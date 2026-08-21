@@ -54,8 +54,8 @@ Unity/Godot 对象或 Three.js 场景。当前实现也不修改任何现有 v5 
 | engine-owned tick、catch-up、fatal 与冻结命令 batch | current v5 每 committed tick authority commit port 与 Python adapter |
 | 64/20/72-byte frame/section/entity packed layout 与 golden vector | packed SceneBootstrap、坐标/单位、visual/resource/channel manifest |
 | producer ID tracker、latest mailbox、complete-set consumer | recent-event window、renderer resource generation |
-| 24-byte packet envelope 与 codec-none | WebSocket one-running + one-pending-latest、可选压缩 |
-| 60 tick / 30 frame / 稀疏消费测试 | 可复用 frame buffer pool、diagnostic capture/dump、性能门禁 |
+| 24-byte packet envelope 与 codec-none | MW ordered 60Hz WebSocket、ACK/credit、correlation/control 与可选压缩 |
+| experimental 60 tick / 30 frame / 稀疏消费测试 | MW 每 tick complete frame、严格 consumer、可复用 pool、diagnostic 与性能门禁 |
 | Python polling host | C++ core/C ABI、Unity/Godot/Web renderer adapter |
 
 最小组合入口：
@@ -86,9 +86,8 @@ runtime 的提交/失败/命令边界见 [`docs/contracts/runtime.md`](docs/cont
 
 ## 下一步
 
-1. 补齐 packed `SceneBootstrapBytes`、coordinate/resource manifest 和完整 profile identity；
-2. 在 runtime 增加每个 committed tick 必达、与 display sampling 分离的 authority commit port，
-   再接 `python-game` 旁路 adapter；current v5 producer 必须继续逐 tick发布；
-3. 实现可复用 frame buffer pool、recent-event window 与 diagnostics capture/dump；
-4. 通过 100/1000/3000/5000 entities 性能基线后，再实现非 current Web adapter；
-5. C++ core 与 C ABI 必须复用相同 golden bytes，不能暴露 native struct layout。
+1. 按集成计划第 2 轮冻结 Bootstrap、正式 DisplayFrame typed sections、correlation/control 与跨语言 vectors；
+2. 增加 mandatory authority/presentation ports，再接 `python-game` 单 tick facade 和 byte-parity harness；
+3. 实现 ordered ACK/credit Web transport 与 Replay sidecar，不把 latest mailbox接入 MW StateSource；
+4. 完成 Arts 单 DisplayShell/business store/owner adapters 与 100/1000/3000/5000 entities 性能门禁；
+5. C++ core 与 C ABI 若实施，必须复用相同 canonical bytes，不能暴露 native struct layout。

@@ -4,6 +4,11 @@
 Missile War current wire。目前冻结的是 dynamic frame 的机械物理布局，不代表完整 renderer-neutral
 profile 已冻结；bootstrap、坐标轴/单位、visual/resource manifest 和 extension channel 仍未实现。
 
+该 V1 明确不得晋升为 Missile War production profile：它没有 Bootstrap/static world、viewer scope、
+typed owner state、interaction mapping、correlation 或可靠 event/effect lane，且现有 consumer 允许 gap。
+正式迁移必须发布新的 schema/version 与独立 cross-language golden/malformed corpus，不能在 V1 reserved
+字段或 flags 中静默扩展。
+
 ## Canonical bytes
 
 所有整数和 IEEE-754 `float32` 使用 little-endian。所有 offset 从 canonical message 第一个

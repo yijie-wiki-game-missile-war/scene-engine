@@ -51,3 +51,24 @@ Display sampling 使用整数比率调度，不反向影响 gameplay。首切片
 一次 export 失败只跳过该 display sample，并记录 health；已提交 gameplay tick 继续。只有完整、
 通过验证并 seal 的 frame 可以 publish。latest-only 只属于这条实验 display 支路，不能用于 current
 v5 authority publication。
+
+## Missile War candidate profile
+
+上述 sampling/failure 语义只适用于 experimental profile。正式 Missile War 候选必须增加 mandatory
+authority commit port 和 mandatory per-tick presentation export：
+
+```text
+gameplay.step(exactly one tick)
+  -> immutable ProjectionCommitBatch
+  -> durable authority outbox admission
+  -> mandatory complete DisplayFrame export for this tick
+  -> ordered wire publication/correlation/raw-record sink
+```
+
+MW candidate 固定 `ticks_per_second = display_frames_per_second = 60`。同 tick presentation-changing
+事务可以产生额外 frame。任一 binary export 失败使当前 presentation epoch 失效，下一成功帧不能跨 gap
+继续；以 new epoch + Bootstrap + complete frame 恢复。authority/tape 能否继续由 binding fault contract
+决定，不能复用 experimental “跳过 sample 后继续同 epoch”的策略。
+
+首次 runtime 切换不使用本 runtime 的 next-tick command batch；current v5 command 仍由 Python input
+composition 即时处理，frozen command tuple 固定为空。command batch 的正式迁移需要独立版本合同。
