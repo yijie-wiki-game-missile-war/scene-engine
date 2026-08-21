@@ -25,6 +25,8 @@ from .errors import (
     MailboxError,
     PacketError,
     PresentationControlError,
+    PresentationBackpressureError,
+    PresentationTransportError,
     PresentationFrameError,
     RuntimeBusyError,
     RuntimeStoppedError,
@@ -66,6 +68,11 @@ from .presentation_frame import (
     SealedPresentationFrame,
     encode_presentation_frame,
     parse_presentation_frame,
+)
+from .presentation_transport import (
+    OrderedPresentationSession,
+    PresentationTransmission,
+    PresentationTransportLimits,
 )
 from .runtime import (
     AuthorityCommitCallback,
@@ -122,12 +129,17 @@ __all__ = [
     "PacketError",
     "PacketView",
     "PresentationControlError",
+    "PresentationBackpressureError",
+    "PresentationTransportError",
     "PresentationEntityRecordV2",
     "PresentationEntityV2",
     "PresentationEventV1",
     "PresentationFrameError",
     "PresentationFrameHeaderV2",
     "PresentationFrameView",
+    "OrderedPresentationSession",
+    "PresentationTransmission",
+    "PresentationTransportLimits",
     "InteractionMappingV1",
     "InteractionRecordV1",
     "OwnerStateRecordV1",

@@ -78,3 +78,14 @@ gameplay 正常返回是 tick commit 点。其后的 mandatory authority commit 
 
 首次 runtime 切换不使用本 runtime 的 next-tick command batch；current v5 command 仍由 Python input
 composition 即时处理，frozen command tuple 固定为空。command batch 的正式迁移需要独立版本合同。
+
+## Ordered presentation transport
+
+`OrderedPresentationSession` 是 viewer-scoped dormant transport core：Bootstrap 只打开一次，匹配的
+`presentation.ready` 到达前不释放 frame；每个 admission 原子包含零/多份连续 complete frame 与一份
+correlation。固定 `maximum_in_flight_frames` 作为 credit，只有 CompleteFrameStore commit 后回送的
+cumulative ACK 同时匹配 frame/correlation/full cursor 才归还 credit。
+
+pending + in-flight 同时受 frame/byte hard limit 约束。到界拒绝新 admission，不覆盖旧帧；ACK 超时或
+resync 使 session 失效并要求更高 scene epoch/bootstrap。每个 viewer 使用独立 session，慢 viewer 的
+backpressure 不改变其他 viewer 或 authority tick。

@@ -49,6 +49,14 @@ class PresentationControlError(SceneEngineError, ValueError):
     """A presentation control/correlation envelope is invalid."""
 
 
+class PresentationTransportError(SceneEngineError, RuntimeError):
+    """An ordered presentation session violated flow-control state."""
+
+
+class PresentationBackpressureError(PresentationTransportError):
+    """A viewer queue reached a hard frame or byte limit."""
+
+
 class MailboxError(SceneEngineError, RuntimeError):
     """A latest-frame mailbox ownership rule was violated."""
 

@@ -12,7 +12,8 @@
 - 无 renderer 的 complete-set consumer 验证跳帧、绝对状态、移除和隐藏语义。
 - migration candidate 已冻结 packed SceneBootstrapV1、DisplayFrameV2 typed sections、canonical
   correlation/control、跨语言 golden 与 malformed corpus；runtime 已有 dormant MW 60Hz mandatory
-  authority/display ports，尚未接入 ordered transport/renderer。
+  authority/display ports；viewer-scoped ordered ready/ACK-credit transport 已作为 dormant candidate
+  接入，尚未接 renderer。
 
 这是 `complete-dynamic-frame-binary-v4` 计划的内核预切片，不是该计划第 24 节完整纵向切片，
 也不是 current 产品协议。
@@ -55,9 +56,9 @@ Unity/Godot 对象或 Three.js 场景。当前实现也不修改任何现有 v5 
 | 已实现 | 明确延后 |
 | --- | --- |
 | engine-owned tick、catch-up、fatal、MW 60Hz mandatory authority/display ports | Python facade 的 composition adapter 与 durable transport |
-| experimental V1 及 candidate BootstrapV1/FrameV2/control/correlation golden | Python exporter、ordered transport、Replay sidecar 与 Arts store/binder |
+| experimental V1 及 candidate BootstrapV1/FrameV2/control/correlation golden | Python exporter 与 Arts store/binder |
 | producer ID tracker、latest mailbox、complete-set consumer | recent-event window、renderer resource generation |
-| 24-byte packet envelope、bootstrap/frame message type 与 codec-none | MW ordered 60Hz WebSocket、ACK/credit 与可选压缩 |
+| 24-byte packet、MW ordered ready/ACK-credit queue、hard limits/reset | WebSocket adapter 与可选压缩 |
 | experimental 60 tick / 30 frame / 稀疏消费测试 | MW 每 tick complete frame、严格 consumer、可复用 pool、diagnostic 与性能门禁 |
 | Python polling host | C++ core/C ABI、Unity/Godot/Web renderer adapter |
 
@@ -94,6 +95,6 @@ runtime 的提交/失败/命令边界见 [`docs/contracts/runtime.md`](docs/cont
 ## 下一步
 
 1. 将 `python-game` 单 tick facade 通过 composition adapter 接入 dormant MW runtime profile；
-2. 实现 ordered ACK/credit Web transport 与 Replay sidecar，不把 latest mailbox接入 MW StateSource；
+2. 将 ordered session 接入 WebSocket adapter；Replay sidecar 已由 Replay 仓实现，不把 latest mailbox接入 MW StateSource；
 3. 完成 Arts 单 DisplayShell/business store/owner adapters 与 100/1000/3000/5000 entities 性能门禁；
 4. C++ core 与 C ABI 若实施，必须复用相同 canonical bytes，不能暴露 native struct layout。
