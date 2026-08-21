@@ -8,6 +8,8 @@ import pytest
 from scene_engine.binary_schema import PACKET_HEADER_V1
 from scene_engine.errors import ConfigurationError, DisplayFrameError, PacketError
 from scene_engine.packet_codec import (
+    decode_presentation_frame_packet,
+    decode_scene_bootstrap_packet,
     decode_display_frame_packet,
     encode_packet,
     parse_packet,
@@ -15,6 +17,8 @@ from scene_engine.packet_codec import (
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "display_frame_v1.hex"
+BOOTSTRAP_FIXTURE = Path(__file__).parent / "fixtures" / "scene_bootstrap_v1.hex"
+PRESENTATION_FIXTURE = Path(__file__).parent / "fixtures" / "presentation_frame_v2.hex"
 
 
 def _frame_bytes() -> bytes:
@@ -57,9 +61,10 @@ def test_codec_none_envelope_is_byte_exact() -> None:
     assert parsed.header.compression_codec == 0
 
 
-def test_codec_none_accepts_no_alternate_message_type_or_codec() -> None:
+def test_codec_none_accepts_registered_bootstrap_and_rejects_unknown_type_or_codec() -> None:
+    assert _parse(encode_packet(b"bootstrap", message_type=1)).header.message_type == 1
     with pytest.raises(PacketError):
-        encode_packet(b"frame", message_type=1)
+        encode_packet(b"frame", message_type=3)
     with pytest.raises(PacketError):
         encode_packet(b"frame", compression_codec=1)
 
@@ -80,7 +85,7 @@ def test_packet_parser_applies_budgets_before_copying_payload() -> None:
     [
         (0, b"NOPE"),
         (4, struct.pack("<H", 2)),
-        (6, struct.pack("<B", 1)),
+        (6, struct.pack("<B", 3)),
         (7, struct.pack("<B", 1)),
         (8, struct.pack("<H", 1)),
         (10, struct.pack("<H", 20)),
@@ -124,4 +129,44 @@ def test_combined_decoder_validates_inner_frame_before_returning() -> None:
             maximum_uncompressed_bytes=1000,
             maximum_frame_entities=10,
             maximum_frame_bytes=1000,
+        )
+
+
+def test_packet_dispatches_bootstrap_and_schema_v2_presentation_frame() -> None:
+    bootstrap = bytes.fromhex(BOOTSTRAP_FIXTURE.read_text(encoding="ascii"))
+    decoded_bootstrap = decode_scene_bootstrap_packet(
+        encode_packet(bootstrap, message_type=1),
+        maximum_stored_bytes=4096,
+        maximum_uncompressed_bytes=4096,
+        maximum_bootstrap_bytes=4096,
+        maximum_static_nodes=10,
+        maximum_topology_nodes=10,
+        maximum_adjacencies=10,
+        maximum_visual_types=10,
+        maximum_animation_states=10,
+    )
+    assert decoded_bootstrap.identity.viewer_scope == "viewer:blue"
+
+    frame = bytes.fromhex(PRESENTATION_FIXTURE.read_text(encoding="ascii"))
+    decoded_frame = decode_presentation_frame_packet(
+        encode_packet(frame, message_type=2),
+        maximum_stored_bytes=4096,
+        maximum_uncompressed_bytes=4096,
+        maximum_frame_entities=10,
+        maximum_frame_events=10,
+        maximum_frame_bytes=4096,
+    )
+    assert decoded_frame.frame_seq == 60
+
+    with pytest.raises(PacketError, match="not scene.bootstrap"):
+        decode_scene_bootstrap_packet(
+            encode_packet(frame, message_type=2),
+            maximum_stored_bytes=4096,
+            maximum_uncompressed_bytes=4096,
+            maximum_bootstrap_bytes=4096,
+            maximum_static_nodes=10,
+            maximum_topology_nodes=10,
+            maximum_adjacencies=10,
+            maximum_visual_types=10,
+            maximum_animation_states=10,
         )

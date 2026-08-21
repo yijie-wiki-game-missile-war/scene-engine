@@ -33,6 +33,18 @@ class DisplayExportError(DisplayFrameError):
     """Gameplay could not export a complete display sample."""
 
 
+class SceneBootstrapError(SceneEngineError, ValueError):
+    """A SceneBootstrap violates the ordered presentation profile."""
+
+
+class PresentationFrameError(DisplayFrameError):
+    """A schema-V2 presentation frame is malformed or non-canonical."""
+
+
+class PresentationControlError(SceneEngineError, ValueError):
+    """A presentation control/correlation envelope is invalid."""
+
+
 class MailboxError(SceneEngineError, RuntimeError):
     """A latest-frame mailbox ownership rule was violated."""
 

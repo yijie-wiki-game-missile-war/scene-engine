@@ -1,0 +1,2 @@
+{"bootstrap_id":"11","message_id":"message:1","payload":{"baseline":{"snapshot_id":"snapshot:demo1","state_epoch":"epoch:demo1","state_seq":60,"state_stream_id":"stream:demo1","world_revision":61},"profile_id":"mw-presentation-v1"},"protocol":"scene-display-control-v1","scene_epoch":"9","schema_version":1,"session_seq":1,"type":"presentation.ready","viewer_scope":"viewer:blue"}
+

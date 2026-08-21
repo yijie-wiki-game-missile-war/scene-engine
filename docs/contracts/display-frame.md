@@ -84,7 +84,8 @@ record 前先检查 header、directory、总长度和这些预算。首切片不
 transport envelope 固定 24 bytes，格式为 `<4sHBBHHIII>`：
 
 - magic = `SEDF`；packet_version = 1；
-- message_type 目前只接受 `2 = display.frame`；
+- message type `2 = display.frame` 包裹本 experimental V1；同一 envelope 已为正式候选注册
+  `1 = scene.bootstrap`，其 inner bytes 由 `presentation-profile.md` 独立约束；
 - compression_codec 目前只接受 `0 = none`；
 - header_bytes = 24，reserved0 = 0；
 - codec-none 要求 `stored_bytes == uncompressed_bytes`；

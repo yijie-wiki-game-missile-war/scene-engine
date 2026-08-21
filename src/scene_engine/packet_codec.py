@@ -1,4 +1,4 @@
-"""Exact codec-none transport envelope for canonical display-frame bytes."""
+"""Exact codec-none envelope for canonical bootstrap and display-frame bytes."""
 
 from __future__ import annotations
 
@@ -11,11 +11,23 @@ from .binary_schema import (
     PACKET_HEADER_V1,
     PACKET_MAGIC,
     PACKET_MESSAGE_TYPE_DISPLAY_FRAME,
+    PACKET_MESSAGE_TYPE_SCENE_BOOTSTRAP,
     PACKET_VERSION,
     UINT32_MAX,
 )
 from .display_frame import DisplayFrameView, SealedDisplayFrame, parse_display_frame
 from .errors import ConfigurationError, PacketError
+from .presentation_frame import (
+    PresentationFrameView,
+    SealedPresentationFrame,
+    parse_presentation_frame,
+)
+from .scene_bootstrap import SceneBootstrapView, parse_scene_bootstrap
+
+
+_KNOWN_MESSAGE_TYPES = frozenset(
+    (PACKET_MESSAGE_TYPE_SCENE_BOOTSTRAP, PACKET_MESSAGE_TYPE_DISPLAY_FRAME)
+)
 
 
 @dataclass(frozen=True)
@@ -46,11 +58,11 @@ def encode_packet(
 ) -> bytes:
     """Wrap canonical bytes in the v1 envelope without transforming them."""
 
-    if message_type != PACKET_MESSAGE_TYPE_DISPLAY_FRAME:
-        raise PacketError("only display.frame message_type 2 is supported")
+    if message_type not in _KNOWN_MESSAGE_TYPES:
+        raise PacketError("unsupported packet message_type")
     if compression_codec != PACKET_COMPRESSION_NONE:
         raise PacketError("only compression_codec 0/none is supported")
-    if isinstance(payload, SealedDisplayFrame):
+    if isinstance(payload, (SealedDisplayFrame, SealedPresentationFrame)):
         payload = payload.data
     payload_view = _byte_view(payload)
     payload_size = payload_view.nbytes
@@ -73,6 +85,10 @@ def encode_packet(
 
 def encode_display_frame_packet(frame: Any) -> bytes:
     return encode_packet(frame, message_type=PACKET_MESSAGE_TYPE_DISPLAY_FRAME)
+
+
+def encode_scene_bootstrap_packet(bootstrap: Any) -> bytes:
+    return encode_packet(bootstrap, message_type=PACKET_MESSAGE_TYPE_SCENE_BOOTSTRAP)
 
 
 def parse_packet(
@@ -101,8 +117,8 @@ def parse_packet(
         raise PacketError("packet magic must be SEDF")
     if header.packet_version != PACKET_VERSION:
         raise PacketError("unsupported packet_version")
-    if header.message_type != PACKET_MESSAGE_TYPE_DISPLAY_FRAME:
-        raise PacketError("only display.frame message_type 2 is supported")
+    if header.message_type not in _KNOWN_MESSAGE_TYPES:
+        raise PacketError("unsupported packet message_type")
     if header.compression_codec != PACKET_COMPRESSION_NONE:
         raise PacketError("only compression_codec 0/none is supported")
     if header.flags != 0:
@@ -142,9 +158,65 @@ def decode_display_frame_packet(
         maximum_stored_bytes=maximum_stored_bytes,
         maximum_uncompressed_bytes=maximum_uncompressed_bytes,
     )
+    if packet.header.message_type != PACKET_MESSAGE_TYPE_DISPLAY_FRAME:
+        raise PacketError("packet message_type is not display.frame")
     return parse_display_frame(
         packet.payload,
         maximum_frame_entities=maximum_frame_entities,
+        maximum_frame_bytes=maximum_frame_bytes,
+    )
+
+
+def decode_scene_bootstrap_packet(
+    data: Any,
+    *,
+    maximum_stored_bytes: int,
+    maximum_uncompressed_bytes: int,
+    maximum_bootstrap_bytes: int,
+    maximum_static_nodes: int,
+    maximum_topology_nodes: int,
+    maximum_adjacencies: int,
+    maximum_visual_types: int,
+    maximum_animation_states: int,
+) -> SceneBootstrapView:
+    packet = parse_packet(
+        data,
+        maximum_stored_bytes=maximum_stored_bytes,
+        maximum_uncompressed_bytes=maximum_uncompressed_bytes,
+    )
+    if packet.header.message_type != PACKET_MESSAGE_TYPE_SCENE_BOOTSTRAP:
+        raise PacketError("packet message_type is not scene.bootstrap")
+    return parse_scene_bootstrap(
+        packet.payload,
+        maximum_bootstrap_bytes=maximum_bootstrap_bytes,
+        maximum_static_nodes=maximum_static_nodes,
+        maximum_topology_nodes=maximum_topology_nodes,
+        maximum_adjacencies=maximum_adjacencies,
+        maximum_visual_types=maximum_visual_types,
+        maximum_animation_states=maximum_animation_states,
+    )
+
+
+def decode_presentation_frame_packet(
+    data: Any,
+    *,
+    maximum_stored_bytes: int,
+    maximum_uncompressed_bytes: int,
+    maximum_frame_entities: int,
+    maximum_frame_events: int,
+    maximum_frame_bytes: int,
+) -> PresentationFrameView:
+    packet = parse_packet(
+        data,
+        maximum_stored_bytes=maximum_stored_bytes,
+        maximum_uncompressed_bytes=maximum_uncompressed_bytes,
+    )
+    if packet.header.message_type != PACKET_MESSAGE_TYPE_DISPLAY_FRAME:
+        raise PacketError("packet message_type is not display.frame")
+    return parse_presentation_frame(
+        packet.payload,
+        maximum_frame_entities=maximum_frame_entities,
+        maximum_frame_events=maximum_frame_events,
         maximum_frame_bytes=maximum_frame_bytes,
     )
 
@@ -183,7 +255,10 @@ __all__ = [
     "encode_packet",
     "pack_packet",
     "encode_display_frame_packet",
+    "encode_scene_bootstrap_packet",
     "parse_packet",
     "decode_packet",
     "decode_display_frame_packet",
+    "decode_scene_bootstrap_packet",
+    "decode_presentation_frame_packet",
 ]

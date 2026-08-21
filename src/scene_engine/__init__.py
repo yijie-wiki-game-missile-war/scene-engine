@@ -1,4 +1,4 @@
-"""Scene Engine experimental Python reference implementation."""
+"""Scene Engine experimental kernel and MW presentation reference codecs."""
 
 from .clock import ManualClock, MonotonicClock, SystemMonotonicClock
 from .consumer import (
@@ -23,8 +23,11 @@ from .errors import (
     DisplayFrameError,
     MailboxError,
     PacketError,
+    PresentationControlError,
+    PresentationFrameError,
     RuntimeBusyError,
     RuntimeStoppedError,
+    SceneBootstrapError,
     SceneEngineError,
     SimulationFatalError,
 )
@@ -35,8 +38,33 @@ from .packet_codec import (
     PacketHeaderV1,
     PacketView,
     decode_display_frame_packet,
+    decode_presentation_frame_packet,
+    decode_scene_bootstrap_packet,
     encode_display_frame_packet,
+    encode_scene_bootstrap_packet,
     parse_packet,
+)
+from .presentation_control import (
+    PRESENTATION_CONTROL_CLIENT_TO_SERVER,
+    PRESENTATION_CONTROL_SERVER_TO_CLIENT,
+    SCENE_DISPLAY_CONTROL_PROTOCOL,
+    encode_presentation_control,
+    parse_presentation_control,
+    validate_presentation_control,
+)
+from .presentation_frame import (
+    InteractionMappingV1,
+    InteractionRecordV1,
+    OwnerStateRecordV1,
+    OwnerStateV1,
+    PresentationEntityRecordV2,
+    PresentationEntityV2,
+    PresentationEventV1,
+    PresentationFrameHeaderV2,
+    PresentationFrameView,
+    SealedPresentationFrame,
+    encode_presentation_frame,
+    parse_presentation_frame,
 )
 from .runtime import (
     DisplayExportRequest,
@@ -45,10 +73,25 @@ from .runtime import (
     RuntimeHealth,
     SceneEngineRuntime,
 )
+from .scene_bootstrap import (
+    AdjacencyRecordV1,
+    AnimationRegistryRecordV1,
+    BootstrapIdentityV1,
+    SceneBootstrapHeaderV1,
+    SceneBootstrapView,
+    StaticNodeRecordV1,
+    TopologyNodeRecordV1,
+    VisualRegistryRecordV1,
+    encode_scene_bootstrap,
+    parse_scene_bootstrap,
+)
 from .types import DisplayPose, GameSimulation, TickContext
 
 __all__ = [
     "CommandQueueFullError",
+    "AdjacencyRecordV1",
+    "AnimationRegistryRecordV1",
+    "BootstrapIdentityV1",
     "CompleteFrameConsumer",
     "ConfigurationError",
     "ConsumeResult",
@@ -72,6 +115,17 @@ __all__ = [
     "PacketHeaderV1",
     "PacketError",
     "PacketView",
+    "PresentationControlError",
+    "PresentationEntityRecordV2",
+    "PresentationEntityV2",
+    "PresentationEventV1",
+    "PresentationFrameError",
+    "PresentationFrameHeaderV2",
+    "PresentationFrameView",
+    "InteractionMappingV1",
+    "InteractionRecordV1",
+    "OwnerStateRecordV1",
+    "OwnerStateV1",
     "PumpResult",
     "RuntimeConfig",
     "RuntimeBusyError",
@@ -80,13 +134,32 @@ __all__ = [
     "SceneEngine",
     "SceneEngineError",
     "SceneEngineRuntime",
+    "SceneBootstrapError",
+    "SceneBootstrapHeaderV1",
+    "SceneBootstrapView",
     "SealedDisplayFrame",
+    "SealedPresentationFrame",
     "SimulationFatalError",
     "StaleFramePolicy",
     "SystemMonotonicClock",
+    "StaticNodeRecordV1",
     "TickContext",
+    "TopologyNodeRecordV1",
+    "VisualRegistryRecordV1",
     "decode_display_frame_packet",
+    "decode_presentation_frame_packet",
+    "decode_scene_bootstrap_packet",
     "encode_display_frame_packet",
+    "encode_presentation_control",
+    "encode_presentation_frame",
+    "encode_scene_bootstrap",
+    "parse_presentation_control",
+    "parse_presentation_frame",
+    "parse_scene_bootstrap",
     "parse_display_frame",
     "parse_packet",
+    "validate_presentation_control",
+    "PRESENTATION_CONTROL_CLIENT_TO_SERVER",
+    "PRESENTATION_CONTROL_SERVER_TO_CLIENT",
+    "SCENE_DISPLAY_CONTROL_PROTOCOL",
 ]
