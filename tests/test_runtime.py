@@ -471,6 +471,33 @@ def test_missile_war_profile_emits_sixty_authority_and_display_commits_per_secon
     assert result.display_samples_succeeded == 60
 
 
+def test_same_tick_external_commit_advances_frame_sequence_not_tick() -> None:
+    clock = ManualClock()
+    exported: List[Any] = []
+    runtime = SceneEngineRuntime(
+        RecordingSimulation(),
+        config=config(
+            display_frames_per_second=60,
+            missile_war_profile=True,
+        ),
+        clock=clock,
+        authority_commit=lambda request: {"projection_id": request.context.tick},
+        frame_export=lambda request: exported.append(request) or {
+            "frame_seq": request.frame_seq,
+            "source_tick": request.source_tick,
+        },
+    )
+
+    clock.advance(1.0 / 60.0)
+    runtime.pump()
+    extra = runtime.export_committed_state({"projection_id": "command:1"})
+
+    assert runtime.current_tick == 1
+    assert [item.frame_seq for item in exported] == [1, 2]
+    assert [item.source_tick for item in exported] == [1, 1]
+    assert extra == {"frame_seq": 2, "source_tick": 1}
+
+
 def test_missile_war_authority_failure_is_fatal_after_committed_tick() -> None:
     clock = ManualClock()
     simulation = RecordingSimulation()

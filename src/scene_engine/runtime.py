@@ -550,6 +550,38 @@ class SceneEngineRuntime:
             self._consecutive_display_export_failures = 0
             self._presentation_epoch_valid = True
 
+    def export_committed_state(self, authority_commit: Any) -> Any:
+        """Export one extra complete frame at the current committed tick.
+
+        Current v5 commands are admitted outside the engine command queue. A
+        successful same-tick command projection crosses this port after its
+        authority commit. It advances ``frame_seq`` but never the global tick.
+        """
+
+        with self._pump_lock:
+            with self._state_lock:
+                self._require_running()
+                if self._active_tick is not None:
+                    raise RuntimeBusyError(
+                        "cannot export an external commit during an active tick"
+                    )
+                if not self._config.missile_war_profile:
+                    raise ConfigurationError(
+                        "export_committed_state requires missile_war_profile"
+                    )
+                if not self._has_export_strategy:
+                    raise ConfigurationError(
+                        "export_committed_state requires a display export strategy"
+                    )
+                if not self._presentation_epoch_valid:
+                    raise DisplayExportError("presentation epoch is invalid")
+                source_tick = self._current_tick
+            if not self._attempt_display_export(source_tick, authority_commit):
+                raise DisplayExportError(
+                    "same-tick committed state export invalidated presentation epoch"
+                )
+            return self.last_exported_frame
+
     @property
     def _has_export_strategy(self) -> bool:
         return self._frame_export is not None or self._writer_factory is not None
