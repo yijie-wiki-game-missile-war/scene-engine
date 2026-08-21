@@ -63,10 +63,11 @@ class _Admission:
     frames: Tuple[_FrameRecord, ...]
     correlation: bytes
     byte_count: int
+    cumulative_frame_seq: int
 
     @property
     def last_frame_seq(self) -> int:
-        return self.frames[-1].frame_seq if self.frames else 0
+        return self.cumulative_frame_seq
 
 
 class OrderedPresentationSession:
@@ -81,6 +82,7 @@ class OrderedPresentationSession:
         baseline: Mapping[str, Any],
         limits: PresentationTransportLimits | None = None,
         initial_tick: int = 0,
+        initial_correlation_seq: int = 0,
     ) -> None:
         self.limits = limits or PresentationTransportLimits()
         self._bootstrap_packet = bytes(bootstrap_packet)
@@ -112,9 +114,17 @@ class OrderedPresentationSession:
         self._queued_bytes = 0
         self._last_admitted_frame_seq: int | None = None
         self._last_admitted_tick: int | None = None
-        self._last_correlation_seq = 0
+        if (
+            isinstance(initial_correlation_seq, bool)
+            or not isinstance(initial_correlation_seq, int)
+            or initial_correlation_seq < 0
+        ):
+            raise PresentationTransportError(
+                "initial_correlation_seq must be a non-negative integer"
+            )
+        self._last_correlation_seq = initial_correlation_seq
         self._last_acked_frame_seq = 0
-        self._last_acked_correlation_seq = 0
+        self._last_acked_correlation_seq = initial_correlation_seq
         self._last_progress_tick = _tick(initial_tick)
         self._client_messages: Dict[int, bytes] = {}
         self._last_client_session_seq = 0
@@ -231,7 +241,16 @@ class OrderedPresentationSession:
             frames=tuple(records),
             correlation=correlation_raw,
             byte_count=added_bytes,
+            cumulative_frame_seq=(
+                records[-1].frame_seq
+                if records
+                else (self._last_admitted_frame_seq or 0)
+            ),
         )
+        if admission.cumulative_frame_seq == 0:
+            raise PresentationTransportError(
+                "first presentation correlation must contain a frame"
+            )
         self._pending.append(admission)
         self._queued_frames += added_frames
         self._queued_bytes += added_bytes

@@ -47,7 +47,9 @@ def _frame_packet(frame_seq: int, source_tick: int, projection_id: int) -> bytes
     return encode_display_frame_packet(bytes(frame))
 
 
-def _session(**limit_changes: int) -> OrderedPresentationSession:
+def _session(
+    *, initial_correlation_seq: int = 0, **limit_changes: int
+) -> OrderedPresentationSession:
     limits = PresentationTransportLimits(**limit_changes)
     return OrderedPresentationSession(
         bootstrap_packet=encode_scene_bootstrap_packet(
@@ -57,6 +59,7 @@ def _session(**limit_changes: int) -> OrderedPresentationSession:
         profile_id="mw-presentation-v1",
         baseline=BASELINE,
         limits=limits,
+        initial_correlation_seq=initial_correlation_seq,
     )
 
 
@@ -114,6 +117,23 @@ def _correlation(packet: bytes, *, record_seq: int, cursor: dict) -> bytes:
     )
 
 
+def _business_correlation(
+    *, record_seq: int, cursor: dict, projection_id: int
+) -> bytes:
+    return _control(
+        "presentation.correlation",
+        {
+            "cursor": cursor,
+            "frame_refs": [],
+            "presentation_required": False,
+            "projection_id": str(projection_id),
+            "record_seq": str(record_seq),
+        },
+        session_seq=record_seq,
+        direction=PRESENTATION_CONTROL_SERVER_TO_CLIENT,
+    )
+
+
 def _ack(
     *, frame_seq: int, correlation_seq: int, cursor: dict, session_seq: int
 ) -> bytes:
@@ -158,6 +178,66 @@ def test_ready_barrier_credit_and_cumulative_commit_ack() -> None:
     )
     second = session.drain_sendable(current_tick=2)
     assert [item.frame_seq for item in second if item.kind == "frame"] == [61]
+
+
+def test_business_only_correlation_ack_uses_cumulative_frame_sequence() -> None:
+    session = _session(maximum_in_flight_frames=1)
+    session.open_bootstrap()
+    frame_cursor = {**BASELINE, "state_seq": 1, "world_revision": 8}
+    business_cursor = {**BASELINE, "state_seq": 2, "world_revision": 8}
+    frame = _frame_packet(60, 60, 61)
+    session.admit(
+        frame_packets=(frame,),
+        correlation=_correlation(frame, record_seq=1, cursor=frame_cursor),
+    )
+    session.admit(
+        frame_packets=(),
+        correlation=_business_correlation(
+            record_seq=2,
+            cursor=business_cursor,
+            projection_id=61,
+        ),
+    )
+    session.handle_client_control(_ready(), current_tick=1)
+    sent = session.drain_sendable(current_tick=1)
+    assert [item.kind for item in sent] == ["frame", "correlation", "correlation"]
+    session.handle_client_control(
+        _ack(
+            frame_seq=60,
+            correlation_seq=1,
+            cursor=frame_cursor,
+            session_seq=2,
+        ),
+        current_tick=2,
+    )
+    session.handle_client_control(
+        _ack(
+            frame_seq=60,
+            correlation_seq=2,
+            cursor=business_cursor,
+            session_seq=3,
+        ),
+        current_tick=3,
+    )
+    assert session.queued_frames == 0
+
+
+def test_checkpoint_session_can_start_at_a_later_correlation_sequence() -> None:
+    session = _session(initial_correlation_seq=40)
+    session.open_bootstrap()
+    session.handle_client_control(_ready(), current_tick=1)
+    frame = _frame_packet(frame_seq=90, source_tick=90, projection_id=90)
+    session.admit(
+        frame_packets=(frame,),
+        correlation=_correlation(
+            frame,
+            record_seq=41,
+            cursor={**BASELINE, "state_seq": 41, "world_revision": 41},
+        ),
+    )
+
+    sent = session.drain_sendable(current_tick=1)
+    assert [item.kind for item in sent] == ["frame", "correlation"]
 
 
 def test_queue_hard_limit_never_overwrites_and_is_viewer_local() -> None:
