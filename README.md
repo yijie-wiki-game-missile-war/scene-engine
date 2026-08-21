@@ -1,6 +1,6 @@
 # Scene Engine
 
-`scene-engine/` 是从 Missile War 玩法项目中并行抽取的场景运行时实验仓库。当前切片实现：
+`scene-engine/` 是 Missile War production release tuple 使用的场景运行时内核。当前实现：
 
 - runtime 独占整数 tick，gameplay 只实现 `step(context, commands)`；
 - gameplay 异常逃逸后 runtime 进入 fatal，失败 tick 不提交也不重试；
@@ -10,15 +10,15 @@
 - transport packet envelope 的首个基线只实现 `compression_codec = 0`；
 - producer identity tracker 观察每份已导出帧并禁止 ID 复用；
 - 无 renderer 的 complete-set consumer 验证跳帧、绝对状态、移除和隐藏语义。
-- migration candidate 已冻结 packed SceneBootstrapV1、DisplayFrameV2 typed sections、canonical
-  correlation/control、跨语言 golden 与 malformed corpus；runtime 已有 dormant MW 60Hz mandatory
-  authority/display ports；viewer-scoped ordered ready/ACK-credit transport 已作为 dormant candidate
-  接入；workspace candidate 已由 Python composition adapter 与 Arts SceneDisplayEngine 纵向接通。
+- production `mw-presentation-v1` 已冻结 packed SceneBootstrapV1、DisplayFrameV2 typed sections、canonical
+  correlation/control、跨语言 golden 与 malformed corpus；runtime 的 MW 60Hz mandatory
+  authority/display ports、viewer-scoped ordered ready/ACK-credit transport 已由 Python composition adapter
+  与 Arts SceneDisplayEngine 纵向接通。
 
 这是 `complete-dynamic-frame-binary-v4` 计划的内核预切片，不是该计划第 24 节完整纵向切片，
 也不是 current 产品协议。
-当前 `python-game -> v5 -> replay/arts` 链路仍逐 tick 保留 60 Hz authority frame；本项目的
-latest-only frame 不能作为 raw tape、strict Replay 或当前验收证据。
+当前 `python-game -> scene-engine -> replay/arts` 链路逐 tick 保留 60 Hz authority 与 ordered
+presentation frame；实验性的 latest-only mailbox 仍不能作为 raw tape、strict Replay 或 MW 验收证据。
 
 物理目录与 GitLab repository 最后路径段统一使用 `scene-engine`；Python package 名继续使用
 `scene_engine`。
@@ -55,11 +55,11 @@ Unity/Godot 对象或 Three.js 场景。当前实现也不修改任何现有 v5 
 
 | 已实现 | 明确延后 |
 | --- | --- |
-| engine-owned tick、catch-up、fatal、MW 60Hz mandatory authority/display ports | Python facade 的 composition adapter 与 durable transport |
-| experimental V1 及 candidate BootstrapV1/FrameV2/control/correlation golden | Python exporter 与 Arts store/binder |
+| engine-owned tick、catch-up、fatal、MW 60Hz mandatory authority/display ports | 可选压缩 codec |
+| experimental V1 及 production BootstrapV1/FrameV2/control/correlation golden | C++ core/C ABI |
 | producer ID tracker、latest mailbox、complete-set consumer | recent-event window、renderer resource generation |
-| 24-byte packet、MW ordered ready/ACK-credit queue、hard limits/reset | WebSocket adapter 与可选压缩 |
-| experimental 60 tick / 30 frame / 稀疏消费测试 | MW 每 tick complete frame、严格 consumer、可复用 pool、diagnostic 与性能门禁 |
+| 24-byte packet、MW ordered ready/ACK-credit queue、hard limits/reset | 额外 renderer backend |
+| MW 每 tick complete frame、严格 consumer 与 Python/Arts 性能门禁 | 可复用 native pool |
 | Python polling host | C++ core/C ABI、Unity/Godot/Web renderer adapter |
 
 最小组合入口：
@@ -92,9 +92,8 @@ runtime 的提交/失败/命令边界见 [`docs/contracts/runtime.md`](docs/cont
 已完成工作、目标双支路架构以及接入 `python-game` / Arts Web3D 显示壳的分阶段方案见
 [`docs/integration-plan.md`](docs/integration-plan.md)。
 
-## 下一步
+## 后续维护
 
-1. 将 `python-game` 单 tick facade 通过 composition adapter 接入 dormant MW runtime profile；
-2. 将 ordered session 接入 WebSocket adapter；Replay sidecar 已由 Replay 仓实现，不把 latest mailbox接入 MW StateSource；
-3. 完成 Arts 单 DisplayShell/business store/owner adapters 与 100/1000/3000/5000 entities 性能门禁；
-4. C++ core 与 C ABI 若实施，必须复用相同 canonical bytes，不能暴露 native struct layout。
+1. schema/profile 变更必须同时升级跨语言 golden、malformed corpus、Replay sidecar 与 release manifest；
+2. latest mailbox 不得重新进入 MW production StateSource；
+3. C++ core 与 C ABI 若实施，必须复用相同 canonical bytes，不能暴露 native struct layout。

@@ -1,6 +1,6 @@
 # Missile War Ordered Presentation Profile
 
-状态：`mw-scene-presentation-v1@1` migration candidate；只有完整 workspace release manifest 才能激活。
+状态：`mw-scene-presentation-v1@1` production；由 workspace release manifest 锁定完整 commit tuple。
 
 本文冻结 `SceneBootstrapV1`、`DisplayFrameV2` 与 `scene-display-control-v1@1` 的物理合同。所有 binary
 整数与 IEEE-754 `float32` 使用 little-endian；offset 从 inner message byte 0 计算；所有 section 按 type
