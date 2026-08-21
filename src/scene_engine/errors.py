@@ -1,0 +1,45 @@
+"""Public exception hierarchy for the scene engine."""
+
+
+class SceneEngineError(Exception):
+    """Base class for engine failures."""
+
+
+class ConfigurationError(SceneEngineError, ValueError):
+    """Runtime or resource limits are invalid."""
+
+
+class RuntimeStoppedError(SceneEngineError, RuntimeError):
+    """An operation requires a running runtime."""
+
+
+class RuntimeBusyError(SceneEngineError, RuntimeError):
+    """A caller attempted to enter pump while another pump was active."""
+
+
+class CommandQueueFullError(SceneEngineError, RuntimeError):
+    """The bounded command queue cannot accept another intent."""
+
+
+class SimulationFatalError(SceneEngineError, RuntimeError):
+    """Gameplay raised from a tick and the runtime became permanently fatal."""
+
+
+class DisplayFrameError(SceneEngineError, ValueError):
+    """A display frame violates the local binary/profile contract."""
+
+
+class DisplayExportError(DisplayFrameError):
+    """Gameplay could not export a complete display sample."""
+
+
+class MailboxError(SceneEngineError, RuntimeError):
+    """A latest-frame mailbox ownership rule was violated."""
+
+
+class PacketError(SceneEngineError, ValueError):
+    """A transport packet is malformed or unsupported."""
+
+
+class ConsumerError(SceneEngineError, ValueError):
+    """A complete-frame consumer rejected an otherwise decoded frame."""
