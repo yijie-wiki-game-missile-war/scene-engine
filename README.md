@@ -81,6 +81,8 @@ engine = SceneEngine(
 
 runtime 的提交/失败/命令边界见 [`docs/contracts/runtime.md`](docs/contracts/runtime.md)，现有能力
 到目标模块的迁移映射见 [`docs/extraction-plan.md`](docs/extraction-plan.md)。
+已完成工作、目标双支路架构以及接入 `python-game` / Arts Web3D 显示壳的分阶段方案见
+[`docs/integration-plan.md`](docs/integration-plan.md)。
 
 ## 下一步
 
