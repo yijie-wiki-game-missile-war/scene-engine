@@ -61,8 +61,10 @@ byte lengths、总 string bytes、initial state seq 与 world revision，随后�
 Static node 为 `<QQIIII3f4f3fII>`：display/parent、visual/owner、flags/reserved、absolute position/quaternion/
 scale、variant/content。parent 必须为 0 或已出现 ID；flags 只定义 visible bit；visual/owner/content positive。
 
-Topology node 为 `<QIIiiII>`：static display、island/tile registry、axial q/r、terrain registry、flags。
-Adjacency 为 `<QQ>`，两端必须存在于 topology set。
+Topology node 为 `<QIIiiII>`：static display、island/tile registry、axial q/r、terrain registry、zero flags。
+每个 topology tile 的 static node 必须以一个不在 topology set 中的 session-local static 岛根为 parent；
+岛根 parent 必须为 0，该 parent display ID 只用于本 session 分组，不是 domain island ID。Adjacency 为
+`<QQ>`，两端必须存在于 topology set；同岛端点表达 tile 邻接，跨岛端点表达岛连接。
 
 Visual registry 为 `<IIIIIIII>`：visual、owner、variant、capability flags、resource content、placement profile、
 animation range start/count。capability bits：interactive/attachment/effect。Animation 为 `<IIII>`：state、
@@ -143,7 +145,7 @@ address、ground weapon、small person、battle effect、aircraft、projectile�
 
 共享 fixtures：
 
-- `scene_bootstrap_v1.hex`（612 bytes）；
+- `scene_bootstrap_v1.hex`（692 bytes）；
 - `presentation_frame_v2.hex`（536 bytes）。
 - `presentation_control_v1.json`（canonical ready envelope）。
 

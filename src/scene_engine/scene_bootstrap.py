@@ -600,6 +600,8 @@ def _parse_topology_nodes(view, entry):
             raise SceneBootstrapError("topology IDs must be positive and increasing")
         if min(record.island_type_id, record.tile_type_id, record.terrain_type_id) == 0:
             raise SceneBootstrapError("topology registry IDs must be positive")
+        if record.flags != 0:
+            raise SceneBootstrapError("topology flags are not defined")
         result.append(record)
         previous = record.static_display_id
     return tuple(result)
@@ -651,6 +653,7 @@ def _parse_animation_registry(view, entry):
 
 def _validate_cross_references(static_nodes, topology, adjacencies, visuals, animations):
     static_ids = {record.display_id for record in static_nodes}
+    static_by_id = {record.display_id: record for record in static_nodes}
     visual_ids = {record.visual_type_id for record in visuals}
     animation_count = len(animations)
     for record in static_nodes:
@@ -659,9 +662,19 @@ def _validate_cross_references(static_nodes, topology, adjacencies, visuals, ani
         if record.visual_type_id not in visual_ids:
             raise SceneBootstrapError("static node visual_type_id is missing from registry")
     for record in topology:
-        if record.static_display_id not in static_ids:
-            raise SceneBootstrapError("topology node references missing static node")
+        tile = static_by_id.get(record.static_display_id)
+        island = static_by_id.get(tile.parent_display_id) if tile is not None else None
+        if (
+            tile is None
+            or island is None
+            or island.parent_display_id != 0
+        ):
+            raise SceneBootstrapError(
+                "topology node references an invalid static island parent"
+            )
     topology_ids = {record.static_display_id for record in topology}
+    if any(static_by_id[record.static_display_id].parent_display_id in topology_ids for record in topology):
+        raise SceneBootstrapError("static island parent cannot also be a topology tile")
     for record in adjacencies:
         if record.from_display_id not in topology_ids or record.to_display_id not in topology_ids:
             raise SceneBootstrapError("adjacency references missing topology node")

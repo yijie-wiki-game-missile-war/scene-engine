@@ -58,12 +58,16 @@ def _golden():
         scene_epoch=9,
         bootstrap_id=11,
         identity=_identity(),
-        static_nodes=(_static(1), _static(2, parent=1, x=1.5)),
-        topology_nodes=(
-            TopologyNodeRecordV1(1, 1, 1, 0, 0, 1),
-            TopologyNodeRecordV1(2, 1, 1, 1, 0, 2),
+        static_nodes=(
+            _static(1),
+            _static(2, parent=1, x=1.5),
+            _static(3, parent=1, x=3.0),
         ),
-        adjacencies=(AdjacencyRecordV1(1, 2),),
+        topology_nodes=(
+            TopologyNodeRecordV1(2, 1, 1, 1, 0, 2),
+            TopologyNodeRecordV1(3, 1, 1, 2, 0, 1),
+        ),
+        adjacencies=(AdjacencyRecordV1(2, 3),),
         visual_registry=(VisualRegistryRecordV1(1, 10, 0, 1, 100, 200, 0, 1),),
         animation_registry=(AnimationRegistryRecordV1(1, 1, 60),),
         maximum_dynamic_entities=5000,
@@ -94,10 +98,11 @@ def test_bootstrap_round_trip_installs_static_topology_and_identity() -> None:
     assert decoded.bootstrap_id == 11
     assert decoded.header.ticks_per_second == 60
     assert decoded.identity == _identity()
-    assert [item.display_id for item in decoded.static_nodes] == [1, 2]
+    assert [item.display_id for item in decoded.static_nodes] == [1, 2, 3]
     assert decoded.static_nodes[1].parent_display_id == 1
-    assert decoded.topology_nodes[1].axial_q == 1
-    assert decoded.adjacencies == (AdjacencyRecordV1(1, 2),)
+    assert decoded.topology_nodes[1].axial_q == 2
+    assert decoded.topology_nodes[1].flags == 0
+    assert decoded.adjacencies == (AdjacencyRecordV1(2, 3),)
     assert decoded.visual_registry[0].animation_registry_count == 1
 
 

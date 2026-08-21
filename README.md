@@ -13,7 +13,7 @@
 - migration candidate 已冻结 packed SceneBootstrapV1、DisplayFrameV2 typed sections、canonical
   correlation/control、跨语言 golden 与 malformed corpus；runtime 已有 dormant MW 60Hz mandatory
   authority/display ports；viewer-scoped ordered ready/ACK-credit transport 已作为 dormant candidate
-  接入，尚未接 renderer。
+  接入；workspace candidate 已由 Python composition adapter 与 Arts SceneDisplayEngine 纵向接通。
 
 这是 `complete-dynamic-frame-binary-v4` 计划的内核预切片，不是该计划第 24 节完整纵向切片，
 也不是 current 产品协议。

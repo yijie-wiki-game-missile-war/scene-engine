@@ -36,6 +36,7 @@ STATIC_NODE_RECORD_V1 = struct.Struct("<QQIIII3f4f3fII")
 STATIC_NODE_FLAG_VISIBLE = 1 << 0
 STATIC_NODE_ALLOWED_FLAGS = STATIC_NODE_FLAG_VISIBLE
 TOPOLOGY_NODE_RECORD_BYTES = 32
+# The final uint32 is reserved topology flags and must remain zero in v1.
 TOPOLOGY_NODE_RECORD_V1 = struct.Struct("<QIIiiII")
 ADJACENCY_RECORD_BYTES = 16
 ADJACENCY_RECORD_V1 = struct.Struct("<QQ")
