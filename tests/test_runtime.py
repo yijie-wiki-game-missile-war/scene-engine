@@ -7,6 +7,7 @@ import pytest
 
 from scene_engine.clock import ManualClock, SystemMonotonicClock
 from scene_engine.errors import (
+    AuthorityCommitFatalError,
     CommandQueueFullError,
     ConfigurationError,
     RuntimeBusyError,
@@ -28,7 +29,7 @@ class RecordingSimulation:
         writer.writes.append(writer.source_tick)
 
 
-def config(**changes: int) -> RuntimeConfig:
+def config(**changes: Any) -> RuntimeConfig:
     values = dict(
         ticks_per_second=60,
         display_frames_per_second=30,
@@ -37,6 +38,7 @@ def config(**changes: int) -> RuntimeConfig:
         maximum_frame_bytes=64_000,
         maximum_pending_commands=128,
         maximum_outstanding_leases=3,
+        missile_war_profile=False,
     )
     values.update(changes)
     return RuntimeConfig(**values)
@@ -75,6 +77,29 @@ def test_manual_and_system_clocks_expose_monotonic_seconds() -> None:
 def test_runtime_config_rejects_invalid_or_non_integral_limits(changes: Any) -> None:
     with pytest.raises(ConfigurationError):
         config(**changes)
+
+
+def test_missile_war_profile_requires_exact_ports_and_rates() -> None:
+    with pytest.raises(ConfigurationError, match="exact 60 Hz"):
+        config(missile_war_profile=True)
+    with pytest.raises(ConfigurationError, match="authority_commit"):
+        SceneEngineRuntime(
+            RecordingSimulation(),
+            config=config(
+                display_frames_per_second=60,
+                missile_war_profile=True,
+            ),
+            frame_export=lambda request: {"frame_seq": request.frame_seq},
+        )
+    with pytest.raises(ConfigurationError, match="frame_export"):
+        SceneEngineRuntime(
+            RecordingSimulation(),
+            config=config(
+                display_frames_per_second=60,
+                missile_war_profile=True,
+            ),
+            authority_commit=lambda request: {"projection_id": request.context.tick},
+        )
 
 
 def test_one_manual_second_executes_exactly_sixty_ordered_steps() -> None:
@@ -375,6 +400,141 @@ def test_display_or_renderer_activity_never_advances_gameplay_time() -> None:
     runtime.pump()
     assert runtime.current_tick == 1
     assert render_samples == []  # 30 FPS sample is not due until tick 2.
+
+
+def test_missile_war_profile_commits_authority_before_every_60hz_frame() -> None:
+    clock = ManualClock()
+    simulation = RecordingSimulation()
+    order: List[Tuple[str, int, Any]] = []
+
+    def commit(request: Any) -> dict[str, int]:
+        result = {"projection_id": request.context.tick}
+        order.append(("authority", request.context.tick, result))
+        return result
+
+    def export(request: Any) -> Any:
+        order.append(("display", request.source_tick, request.authority_commit))
+        return {"frame_seq": request.frame_seq}
+
+    runtime = SceneEngineRuntime(
+        simulation,
+        config=config(
+            display_frames_per_second=60,
+            missile_war_profile=True,
+        ),
+        clock=clock,
+        authority_commit=commit,
+        frame_export=export,
+    )
+    clock.advance(2.0 / 60.0)
+
+    result = runtime.pump()
+
+    assert order == [
+        ("authority", 1, {"projection_id": 1}),
+        ("display", 1, {"projection_id": 1}),
+        ("authority", 2, {"projection_id": 2}),
+        ("display", 2, {"projection_id": 2}),
+    ]
+    assert result.authority_commits_attempted == 2
+    assert result.authority_commits_succeeded == 2
+    assert runtime.health.presentation_epoch_valid
+
+
+def test_missile_war_profile_emits_sixty_authority_and_display_commits_per_second() -> None:
+    clock = ManualClock()
+    authority_ticks: List[int] = []
+    display_ticks: List[int] = []
+    runtime = SceneEngineRuntime(
+        RecordingSimulation(),
+        config=config(
+            display_frames_per_second=60,
+            missile_war_profile=True,
+        ),
+        clock=clock,
+        authority_commit=lambda request: (
+            authority_ticks.append(request.context.tick)
+            or {"projection_id": request.context.tick}
+        ),
+        frame_export=lambda request: (
+            display_ticks.append(request.source_tick)
+            or {"frame_seq": request.frame_seq}
+        ),
+    )
+    clock.advance(1.0)
+
+    result = runtime.pump()
+
+    assert authority_ticks == list(range(1, 61))
+    assert display_ticks == list(range(1, 61))
+    assert result.authority_commits_succeeded == 60
+    assert result.display_samples_succeeded == 60
+
+
+def test_missile_war_authority_failure_is_fatal_after_committed_tick() -> None:
+    clock = ManualClock()
+    simulation = RecordingSimulation()
+
+    def commit(request: Any) -> dict[str, int]:
+        if request.context.tick == 2:
+            raise LookupError("v5 unavailable")
+        return {"projection_id": request.context.tick}
+
+    runtime = SceneEngineRuntime(
+        simulation,
+        config=config(
+            display_frames_per_second=60,
+            missile_war_profile=True,
+        ),
+        clock=clock,
+        authority_commit=commit,
+        frame_export=lambda request: {"frame_seq": request.frame_seq},
+    )
+    clock.advance(3.0 / 60.0)
+
+    with pytest.raises(AuthorityCommitFatalError) as raised:
+        runtime.pump()
+
+    assert isinstance(raised.value.__cause__, LookupError)
+    assert runtime.current_tick == 2
+    assert runtime.health.ticks_committed == 2
+    assert runtime.health.authority_commits_succeeded == 1
+    assert runtime.health.fatal_tick == 2
+
+
+def test_missile_war_display_gap_invalidates_epoch_until_new_bootstrap() -> None:
+    clock = ManualClock()
+    simulation = RecordingSimulation()
+    attempts: List[Tuple[int, int]] = []
+
+    def export(request: Any) -> Any:
+        attempts.append((request.scene_epoch, request.source_tick))
+        if request.scene_epoch == 1:
+            raise ValueError("binary sink unavailable")
+        return {"frame_seq": request.frame_seq}
+
+    runtime = SceneEngineRuntime(
+        simulation,
+        config=config(
+            display_frames_per_second=60,
+            missile_war_profile=True,
+        ),
+        clock=clock,
+        authority_commit=lambda request: {"projection_id": request.context.tick},
+        frame_export=export,
+    )
+    clock.advance(2.0 / 60.0)
+    result = runtime.pump()
+
+    assert result.ticks_committed == 2
+    assert attempts == [(1, 1)]
+    assert not runtime.health.presentation_epoch_valid
+
+    runtime.activate_presentation_epoch(scene_epoch=2, bootstrap_id=2)
+    clock.advance(1.0 / 60.0)
+    runtime.pump()
+    assert attempts == [(1, 1), (2, 3)]
+    assert runtime.health.last_successful_frame_seq == 1
 
 
 def test_pump_is_non_reentrant_and_fails_fast_instead_of_deadlocking() -> None:

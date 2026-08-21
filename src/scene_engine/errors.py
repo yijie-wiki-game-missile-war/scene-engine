@@ -25,6 +25,10 @@ class SimulationFatalError(SceneEngineError, RuntimeError):
     """Gameplay raised from a tick and the runtime became permanently fatal."""
 
 
+class AuthorityCommitFatalError(SimulationFatalError):
+    """Mandatory authority publication failed after gameplay committed a tick."""
+
+
 class DisplayFrameError(SceneEngineError, ValueError):
     """A display frame violates the local binary/profile contract."""
 

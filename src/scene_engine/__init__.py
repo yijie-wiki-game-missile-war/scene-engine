@@ -16,6 +16,7 @@ from .display_frame import (
     parse_display_frame,
 )
 from .errors import (
+    AuthorityCommitFatalError,
     CommandQueueFullError,
     ConfigurationError,
     ConsumerError,
@@ -67,6 +68,8 @@ from .presentation_frame import (
     parse_presentation_frame,
 )
 from .runtime import (
+    AuthorityCommitCallback,
+    AuthorityCommitRequest,
     DisplayExportRequest,
     PumpResult,
     RuntimeConfig,
@@ -88,6 +91,9 @@ from .scene_bootstrap import (
 from .types import DisplayPose, GameSimulation, TickContext
 
 __all__ = [
+    "AuthorityCommitFatalError",
+    "AuthorityCommitCallback",
+    "AuthorityCommitRequest",
     "CommandQueueFullError",
     "AdjacencyRecordV1",
     "AnimationRegistryRecordV1",

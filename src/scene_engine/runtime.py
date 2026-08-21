@@ -15,6 +15,7 @@ from typing import Any, Callable, Dict, List, Optional, Protocol, Tuple
 
 from .clock import MonotonicClock, SystemMonotonicClock
 from .errors import (
+    AuthorityCommitFatalError,
     CommandQueueFullError,
     ConfigurationError,
     DisplayExportError,
@@ -47,6 +48,7 @@ class RuntimeConfig:
     maximum_frame_bytes: int = 8 * 1024 * 1024
     maximum_pending_commands: int = 1_024
     maximum_outstanding_leases: int = 3
+    missile_war_profile: bool = False
 
     def __post_init__(self) -> None:
         for name in (
@@ -63,6 +65,31 @@ class RuntimeConfig:
             raise ConfigurationError(
                 "display_frames_per_second cannot exceed ticks_per_second"
             )
+        if not isinstance(self.missile_war_profile, bool):
+            raise ConfigurationError("missile_war_profile must be a boolean")
+        if self.missile_war_profile and (
+            self.ticks_per_second != 60
+            or self.display_frames_per_second != 60
+        ):
+            raise ConfigurationError(
+                "missile_war_profile requires exact 60 Hz ticks and display frames"
+            )
+
+
+@dataclass(frozen=True)
+class AuthorityCommitRequest:
+    """One post-step authority commit at an already committed global tick."""
+
+    simulation: GameSimulation
+    context: TickContext
+    commands: Tuple[Any, ...]
+
+
+class AuthorityCommitCallback(Protocol):
+    """Materialize v5/tape/projection state for one committed tick."""
+
+    def __call__(self, request: AuthorityCommitRequest) -> Any:
+        ...
 
 
 @dataclass(frozen=True)
@@ -77,6 +104,7 @@ class DisplayExportRequest:
     ticks_per_second: int
     maximum_frame_entities: int
     maximum_frame_bytes: int
+    authority_commit: Any = None
 
 
 class FrameExportCallback(Protocol):
@@ -112,6 +140,8 @@ class PumpResult:
     ticks_overdue: int
     ticks_attempted: int
     ticks_committed: int
+    authority_commits_attempted: int
+    authority_commits_succeeded: int
     ticks_remaining: int
     display_samples_due: int
     display_samples_attempted: int
@@ -130,15 +160,19 @@ class RuntimeHealth:
     current_tick: Tick
     ticks_attempted: int
     ticks_committed: int
+    authority_commits_attempted: int
+    authority_commits_succeeded: int
     display_samples_attempted: int
     display_samples_succeeded: int
     display_samples_failed: int
     consecutive_display_export_failures: int
     last_successful_frame_seq: int
+    presentation_epoch_valid: bool
     pending_commands: int
     fatal_tick: Optional[Tick]
     fatal_cause: Optional[BaseException]
     last_display_export_error: Optional[BaseException]
+    last_authority_commit_error: Optional[BaseException]
 
     @property
     def running(self) -> bool:
@@ -154,7 +188,7 @@ class RuntimeHealth:
 
     @property
     def healthy(self) -> bool:
-        return not self.fatal
+        return not self.fatal and self.presentation_epoch_valid
 
 
 class SceneEngineRuntime:
@@ -182,6 +216,7 @@ class SceneEngineRuntime:
         frame_export: Optional[FrameExportCallback] = None,
         writer_factory: Optional[DisplayFrameWriterFactory] = None,
         frame_sink: Optional[Callable[[Any], None]] = None,
+        authority_commit: Optional[AuthorityCommitCallback] = None,
         scene_epoch: int = 1,
         bootstrap_id: int = 1,
         initial_tick: Tick = 0,
@@ -202,6 +237,15 @@ class SceneEngineRuntime:
         self._config = config if config is not None else RuntimeConfig()
         if not isinstance(self._config, RuntimeConfig):
             raise ConfigurationError("config must be a RuntimeConfig")
+        if self._config.missile_war_profile:
+            if authority_commit is None:
+                raise ConfigurationError(
+                    "missile_war_profile requires an authority_commit callback"
+                )
+            if frame_export is None:
+                raise ConfigurationError(
+                    "missile_war_profile requires a complete frame_export callback"
+                )
         self._clock = clock if clock is not None else SystemMonotonicClock()
         if not callable(getattr(self._clock, "now", None)):
             raise ConfigurationError("clock must provide now()")
@@ -209,6 +253,7 @@ class SceneEngineRuntime:
         self._frame_export = frame_export
         self._writer_factory = writer_factory
         self._frame_sink = frame_sink
+        self._authority_commit = authority_commit
         self._scene_epoch = scene_epoch
         self._bootstrap_id = bootstrap_id
         self._initial_tick = initial_tick
@@ -230,6 +275,8 @@ class SceneEngineRuntime:
         self._pending_command_count = 0
         self._ticks_attempted = 0
         self._ticks_committed = 0
+        self._authority_commits_attempted = 0
+        self._authority_commits_succeeded = 0
         self._display_samples_attempted = 0
         self._display_samples_succeeded = 0
         self._display_samples_failed = 0
@@ -238,7 +285,10 @@ class SceneEngineRuntime:
         self._fatal_tick: Optional[Tick] = None
         self._fatal_cause: Optional[BaseException] = None
         self._last_display_export_error: Optional[BaseException] = None
+        self._last_authority_commit_error: Optional[BaseException] = None
+        self._last_authority_commit: Any = None
         self._last_exported_frame: Any = None
+        self._presentation_epoch_valid = True
 
         self._state_lock = threading.RLock()
         self._pump_lock = threading.Lock()
@@ -271,6 +321,11 @@ class SceneEngineRuntime:
             return self._last_exported_frame
 
     @property
+    def last_authority_commit(self) -> Any:
+        with self._state_lock:
+            return self._last_authority_commit
+
+    @property
     def health(self) -> RuntimeHealth:
         with self._state_lock:
             return RuntimeHealth(
@@ -278,6 +333,8 @@ class SceneEngineRuntime:
                 current_tick=self._current_tick,
                 ticks_attempted=self._ticks_attempted,
                 ticks_committed=self._ticks_committed,
+                authority_commits_attempted=self._authority_commits_attempted,
+                authority_commits_succeeded=self._authority_commits_succeeded,
                 display_samples_attempted=self._display_samples_attempted,
                 display_samples_succeeded=self._display_samples_succeeded,
                 display_samples_failed=self._display_samples_failed,
@@ -285,10 +342,12 @@ class SceneEngineRuntime:
                     self._consecutive_display_export_failures
                 ),
                 last_successful_frame_seq=self._last_successful_frame_seq,
+                presentation_epoch_valid=self._presentation_epoch_valid,
                 pending_commands=self._pending_command_count,
                 fatal_tick=self._fatal_tick,
                 fatal_cause=self._fatal_cause,
                 last_display_export_error=self._last_display_export_error,
+                last_authority_commit_error=self._last_authority_commit_error,
             )
 
     def enqueue_command(self, command: object) -> Tick:
@@ -302,6 +361,10 @@ class SceneEngineRuntime:
 
         with self._state_lock:
             self._require_running()
+            if self._config.missile_war_profile:
+                raise ConfigurationError(
+                    "missile_war_profile accepts commands through the gameplay facade"
+                )
             if (
                 self._pending_command_count
                 >= self._config.maximum_pending_commands
@@ -345,6 +408,8 @@ class SceneEngineRuntime:
 
             ticks_attempted = 0
             ticks_committed = 0
+            authority_commits_attempted = 0
+            authority_commits_succeeded = 0
             samples_due = 0
             samples_attempted = 0
             samples_succeeded = 0
@@ -400,11 +465,27 @@ class SceneEngineRuntime:
                     status_after_step = self._status
                 ticks_committed += 1
 
+                authority_result = None
+                if self._authority_commit is not None:
+                    authority_commits_attempted += 1
+                    authority_result = self._attempt_authority_commit(
+                        AuthorityCommitRequest(
+                            simulation=self._simulation,
+                            context=context,
+                            commands=commands,
+                        )
+                    )
+                    authority_commits_succeeded += 1
+
                 if sample_is_due:
                     samples_due += 1
-                    if status_after_step == _RUNNING and self._has_export_strategy:
+                    if (
+                        status_after_step == _RUNNING
+                        and self._has_export_strategy
+                        and self._presentation_epoch_valid
+                    ):
                         samples_attempted += 1
-                        if self._attempt_display_export(tick):
+                        if self._attempt_display_export(tick, authority_result):
                             samples_succeeded += 1
                         else:
                             samples_failed += 1
@@ -424,6 +505,8 @@ class SceneEngineRuntime:
                 ticks_overdue=ticks_overdue,
                 ticks_attempted=ticks_attempted,
                 ticks_committed=ticks_committed,
+                authority_commits_attempted=authority_commits_attempted,
+                authority_commits_succeeded=authority_commits_succeeded,
                 ticks_remaining=ticks_remaining,
                 display_samples_due=samples_due,
                 display_samples_attempted=samples_attempted,
@@ -446,11 +529,67 @@ class SceneEngineRuntime:
             self._commands.clear()
             self._pending_command_count = 0
 
+    def activate_presentation_epoch(
+        self, *, scene_epoch: int, bootstrap_id: int
+    ) -> None:
+        """Activate a newly bootstrapped epoch after a presentation failure."""
+
+        _require_positive_int("scene_epoch", scene_epoch)
+        _require_positive_int("bootstrap_id", bootstrap_id)
+        with self._state_lock:
+            self._require_running()
+            if scene_epoch <= self._scene_epoch:
+                raise ConfigurationError("scene_epoch must increase")
+            if bootstrap_id <= self._bootstrap_id:
+                raise ConfigurationError("bootstrap_id must increase")
+            self._scene_epoch = scene_epoch
+            self._bootstrap_id = bootstrap_id
+            self._last_successful_frame_seq = 0
+            self._last_exported_frame = None
+            self._last_display_export_error = None
+            self._consecutive_display_export_failures = 0
+            self._presentation_epoch_valid = True
+
     @property
     def _has_export_strategy(self) -> bool:
         return self._frame_export is not None or self._writer_factory is not None
 
-    def _attempt_display_export(self, source_tick: Tick) -> bool:
+    def _attempt_authority_commit(self, request: AuthorityCommitRequest) -> Any:
+        with self._state_lock:
+            self._authority_commits_attempted += 1
+        try:
+            assert self._authority_commit is not None
+            result = self._authority_commit(request)
+            if self._config.missile_war_profile and result is None:
+                raise AuthorityCommitFatalError(
+                    "missile_war_profile authority_commit returned None"
+                )
+        except BaseException as exc:
+            with self._state_lock:
+                self._active_tick = None
+                self._status = _FATAL
+                self._fatal_tick = request.context.tick
+                self._fatal_cause = exc
+                self._last_authority_commit_error = exc
+                self._commands.clear()
+                self._pending_command_count = 0
+            if not isinstance(exc, Exception):
+                raise
+            if isinstance(exc, AuthorityCommitFatalError):
+                raise
+            raise AuthorityCommitFatalError(
+                "authority commit failed after tick {} committed".format(
+                    request.context.tick
+                )
+            ) from exc
+        with self._state_lock:
+            self._authority_commits_succeeded += 1
+            self._last_authority_commit = result
+        return result
+
+    def _attempt_display_export(
+        self, source_tick: Tick, authority_commit: Any = None
+    ) -> bool:
         with self._state_lock:
             frame_seq = self._last_successful_frame_seq + 1
             self._display_samples_attempted += 1
@@ -464,10 +603,15 @@ class SceneEngineRuntime:
             ticks_per_second=self._config.ticks_per_second,
             maximum_frame_entities=self._config.maximum_frame_entities,
             maximum_frame_bytes=self._config.maximum_frame_bytes,
+            authority_commit=authority_commit,
         )
         try:
             if self._frame_export is not None:
                 exported = self._frame_export(request)
+                if self._config.missile_war_profile and exported is None:
+                    raise DisplayExportError(
+                        "missile_war_profile frame_export returned None"
+                    )
             else:
                 assert self._writer_factory is not None
                 writer = self._writer_factory(
@@ -499,6 +643,8 @@ class SceneEngineRuntime:
                 self._display_samples_failed += 1
                 self._consecutive_display_export_failures += 1
                 self._last_display_export_error = exc
+                if self._config.missile_war_profile:
+                    self._presentation_epoch_valid = False
             return False
 
         with self._state_lock:

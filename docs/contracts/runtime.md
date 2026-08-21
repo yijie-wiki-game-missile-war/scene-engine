@@ -54,8 +54,8 @@ v5 authority publication。
 
 ## Missile War candidate profile
 
-上述 sampling/failure 语义只适用于 experimental profile。正式 Missile War 候选必须增加 mandatory
-authority commit port 和 mandatory per-tick presentation export：
+上述 sampling/failure 语义只适用于 experimental profile。`RuntimeConfig(missile_war_profile=True)`
+启用 dormant Missile War 候选端口，并强制 mandatory authority commit 和 per-tick presentation export：
 
 ```text
 gameplay.step(exactly one tick)
@@ -65,10 +65,16 @@ gameplay.step(exactly one tick)
   -> ordered wire publication/correlation/raw-record sink
 ```
 
-MW candidate 固定 `ticks_per_second = display_frames_per_second = 60`。同 tick presentation-changing
+MW candidate 固定 `ticks_per_second = display_frames_per_second = 60`，构造时必须提供
+`authority_commit` 与完整 `frame_export`；authority 返回值原样进入该 tick 的
+`DisplayExportRequest.authority_commit`。同 tick presentation-changing
 事务可以产生额外 frame。任一 binary export 失败使当前 presentation epoch 失效，下一成功帧不能跨 gap
-继续；以 new epoch + Bootstrap + complete frame 恢复。authority/tape 能否继续由 binding fault contract
+继续；只有外层完成 new epoch + Bootstrap 后，才能用严格增加的 `scene_epoch/bootstrap_id` 调用
+`activate_presentation_epoch()` 并恢复 complete frame。authority/tape 能否继续由 binding fault contract
 决定，不能复用 experimental “跳过 sample 后继续同 epoch”的策略。
+
+gameplay 正常返回是 tick commit 点。其后的 mandatory authority commit 若失败，runtime 在该已提交 tick
+进入 `AuthorityCommitFatalError`，不得重跑 gameplay，也不得尝试该 tick 的 display export。
 
 首次 runtime 切换不使用本 runtime 的 next-tick command batch；current v5 command 仍由 Python input
 composition 即时处理，frozen command tuple 固定为空。command batch 的正式迁移需要独立版本合同。
