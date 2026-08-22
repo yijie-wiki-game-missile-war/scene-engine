@@ -1,59 +1,64 @@
-"""Scene Engine experimental kernel and MW presentation reference codecs."""
+"""Scene Engine generic runtime and presentation platform.
 
+Production consumers use the opaque-cursor V2 control/session, Archive V2,
+Bootstrap V2, complete frames, and fixed-step runtime exported here.  The
+latest-frame mailbox and legacy host are deliberately isolated under
+``scene_engine.experimental``.
+"""
+
+from .authority_cursor import (
+    AuthorityCursorCodec,
+    AuthorityCursorEnvelope,
+    envelope_cursor,
+    validate_envelope_with_codec,
+)
 from .clock import ManualClock, MonotonicClock, SystemMonotonicClock
-from .consumer import (
-    CompleteFrameConsumer,
-    ConsumeResult,
-    InstalledDisplayEntity,
-    StaleFramePolicy,
-)
-from .display_frame import (
-    DisplayFrameLimits,
-    DisplayFrameView,
-    DisplayFrameWriter,
-    DynamicEntityRecordV1,
-    SealedDisplayFrame,
-    parse_display_frame,
-)
 from .errors import (
     AuthorityCommitFatalError,
-    CommandQueueFullError,
     ConfigurationError,
-    ConsumerError,
     DisplayExportError,
-    DisplayFrameError,
-    MailboxError,
     PacketError,
-    PresentationControlError,
+    PresentationArchiveError,
     PresentationBackpressureError,
-    PresentationTransportError,
+    PresentationControlError,
     PresentationFrameError,
+    PresentationTransportError,
     RuntimeBusyError,
     RuntimeStoppedError,
     SceneBootstrapError,
     SceneEngineError,
     SimulationFatalError,
 )
-from .host import SceneEngine
 from .identity import DisplayIdentityTracker
-from .latest_mailbox import DisplayFrameLease, LatestFrameMailbox
 from .packet_codec import (
     PacketHeaderV1,
     PacketView,
     decode_display_frame_packet,
     decode_presentation_frame_packet,
     decode_scene_bootstrap_packet,
+    decode_scene_bootstrap_v2_packet,
     encode_display_frame_packet,
     encode_scene_bootstrap_packet,
     parse_packet,
 )
-from .presentation_control import (
+from .presentation_archive import (
+    PRESENTATION_ARCHIVE_INDEX,
+    PRESENTATION_ARCHIVE_MANIFEST,
+    PRESENTATION_ARCHIVE_SCHEMA_IDENTITY,
+    PRESENTATION_ARCHIVE_SEGMENTS,
+    PresentationArchiveLimits,
+    PresentationArchiveWriter,
+)
+from .presentation_control_v2 import (
     PRESENTATION_CONTROL_CLIENT_TO_SERVER,
     PRESENTATION_CONTROL_SERVER_TO_CLIENT,
-    SCENE_DISPLAY_CONTROL_PROTOCOL,
-    encode_presentation_control,
-    parse_presentation_control,
-    validate_presentation_control,
+    SCENE_PRESENTATION_CONTROL_PROTOCOL,
+    SCENE_PRESENTATION_CONTROL_SCHEMA_VERSION,
+    cursor_envelope_from_json,
+    cursor_envelope_to_json,
+    encode_presentation_control_v2,
+    parse_presentation_control_v2,
+    validate_presentation_control_v2,
 )
 from .presentation_frame import (
     InteractionMappingV1,
@@ -69,10 +74,11 @@ from .presentation_frame import (
     encode_presentation_frame,
     parse_presentation_frame,
 )
-from .presentation_transport import (
+from .presentation_session import (
     OrderedPresentationSession,
+    PresentationFramePacket,
+    PresentationSessionLimits,
     PresentationTransmission,
-    PresentationTransportLimits,
 )
 from .runtime import (
     AuthorityCommitCallback,
@@ -95,89 +101,12 @@ from .scene_bootstrap import (
     encode_scene_bootstrap,
     parse_scene_bootstrap,
 )
+from .scene_bootstrap_v2 import (
+    EngineSessionIdentityV2,
+    SceneBootstrapV2View,
+    encode_scene_bootstrap_v2,
+    parse_scene_bootstrap_v2,
+)
 from .types import DisplayPose, GameSimulation, TickContext
 
-__all__ = [
-    "AuthorityCommitFatalError",
-    "AuthorityCommitCallback",
-    "AuthorityCommitRequest",
-    "CommandQueueFullError",
-    "AdjacencyRecordV1",
-    "AnimationRegistryRecordV1",
-    "BootstrapIdentityV1",
-    "CompleteFrameConsumer",
-    "ConfigurationError",
-    "ConsumeResult",
-    "ConsumerError",
-    "DisplayExportRequest",
-    "DisplayExportError",
-    "DisplayFrameLease",
-    "DisplayFrameLimits",
-    "DisplayFrameError",
-    "DisplayFrameView",
-    "DisplayFrameWriter",
-    "DisplayIdentityTracker",
-    "DisplayPose",
-    "DynamicEntityRecordV1",
-    "GameSimulation",
-    "InstalledDisplayEntity",
-    "LatestFrameMailbox",
-    "MailboxError",
-    "ManualClock",
-    "MonotonicClock",
-    "PacketHeaderV1",
-    "PacketError",
-    "PacketView",
-    "PresentationControlError",
-    "PresentationBackpressureError",
-    "PresentationTransportError",
-    "PresentationEntityRecordV2",
-    "PresentationEntityV2",
-    "PresentationEventV1",
-    "PresentationFrameError",
-    "PresentationFrameHeaderV2",
-    "PresentationFrameView",
-    "OrderedPresentationSession",
-    "PresentationTransmission",
-    "PresentationTransportLimits",
-    "InteractionMappingV1",
-    "InteractionRecordV1",
-    "OwnerStateRecordV1",
-    "OwnerStateV1",
-    "PumpResult",
-    "RuntimeConfig",
-    "RuntimeBusyError",
-    "RuntimeHealth",
-    "RuntimeStoppedError",
-    "SceneEngine",
-    "SceneEngineError",
-    "SceneEngineRuntime",
-    "SceneBootstrapError",
-    "SceneBootstrapHeaderV1",
-    "SceneBootstrapView",
-    "SealedDisplayFrame",
-    "SealedPresentationFrame",
-    "SimulationFatalError",
-    "StaleFramePolicy",
-    "SystemMonotonicClock",
-    "StaticNodeRecordV1",
-    "TickContext",
-    "TopologyNodeRecordV1",
-    "VisualRegistryRecordV1",
-    "decode_display_frame_packet",
-    "decode_presentation_frame_packet",
-    "decode_scene_bootstrap_packet",
-    "encode_display_frame_packet",
-    "encode_presentation_control",
-    "encode_presentation_frame",
-    "encode_scene_bootstrap",
-    "parse_presentation_control",
-    "parse_presentation_frame",
-    "parse_scene_bootstrap",
-    "parse_display_frame",
-    "parse_packet",
-    "validate_presentation_control",
-    "PRESENTATION_CONTROL_CLIENT_TO_SERVER",
-    "PRESENTATION_CONTROL_SERVER_TO_CLIENT",
-    "SCENE_DISPLAY_CONTROL_PROTOCOL",
-]
+__all__ = [name for name in globals() if not name.startswith("_")]

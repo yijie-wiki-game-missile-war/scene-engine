@@ -1,4 +1,4 @@
-"""Canonical SceneBootstrap writer/parser for the MW presentation candidate."""
+"""Canonical SceneBootstrap writer/parser for the presentation profile."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ from .presentation_schema import (
     BOOTSTRAP_SECTION_STATIC_NODES,
     BOOTSTRAP_SECTION_TOPOLOGY_NODES,
     BOOTSTRAP_SECTION_VISUAL_REGISTRY,
-    MW_TICKS_PER_SECOND,
+    PRESENTATION_TICKS_PER_SECOND,
     PRESENTATION_SECTION_DIRECTORY_ENTRY_BYTES,
     PRESENTATION_SECTION_DIRECTORY_ENTRY_V1,
     PRESENTATION_SECTION_FLAG_REQUIRED,
@@ -262,7 +262,7 @@ def encode_scene_bootstrap(
         len(_SECTION_TYPES),
         epoch,
         bootstrap,
-        MW_TICKS_PER_SECOND,
+        PRESENTATION_TICKS_PER_SECOND,
         SCENE_BOOTSTRAP_COORDINATE_PROFILE_RH_Y_UP_Z_FORWARD_XYZW_F32,
         units,
         dynamic_limit,
@@ -494,8 +494,8 @@ def _validate_header(header: SceneBootstrapHeaderV1, total_size: int) -> None:
         raise SceneBootstrapError("bootstrap requires exactly six sections")
     if header.scene_epoch == 0 or header.bootstrap_id == 0:
         raise SceneBootstrapError("bootstrap identities must be positive")
-    if header.ticks_per_second != MW_TICKS_PER_SECOND:
-        raise SceneBootstrapError("MW bootstrap ticks_per_second must be 60")
+    if header.ticks_per_second != PRESENTATION_TICKS_PER_SECOND:
+        raise SceneBootstrapError("bootstrap ticks_per_second must be 60")
     if header.coordinate_profile != SCENE_BOOTSTRAP_COORDINATE_PROFILE_RH_Y_UP_Z_FORWARD_XYZW_F32:
         raise SceneBootstrapError("unsupported bootstrap coordinate profile")
     if not math.isfinite(header.world_units_per_meter) or header.world_units_per_meter <= 0:

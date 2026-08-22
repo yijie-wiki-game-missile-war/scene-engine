@@ -48,7 +48,7 @@ class RuntimeConfig:
     maximum_frame_bytes: int = 8 * 1024 * 1024
     maximum_pending_commands: int = 1_024
     maximum_outstanding_leases: int = 3
-    missile_war_profile: bool = False
+    strict_authority_presentation: bool = False
 
     def __post_init__(self) -> None:
         for name in (
@@ -65,14 +65,15 @@ class RuntimeConfig:
             raise ConfigurationError(
                 "display_frames_per_second cannot exceed ticks_per_second"
             )
-        if not isinstance(self.missile_war_profile, bool):
-            raise ConfigurationError("missile_war_profile must be a boolean")
-        if self.missile_war_profile and (
-            self.ticks_per_second != 60
-            or self.display_frames_per_second != 60
+        if not isinstance(self.strict_authority_presentation, bool):
+            raise ConfigurationError(
+                "strict_authority_presentation must be a boolean"
+            )
+        if self.strict_authority_presentation and (
+            self.display_frames_per_second != self.ticks_per_second
         ):
             raise ConfigurationError(
-                "missile_war_profile requires exact 60 Hz ticks and display frames"
+                "strict_authority_presentation requires one display frame per tick"
             )
 
 
@@ -86,7 +87,7 @@ class AuthorityCommitRequest:
 
 
 class AuthorityCommitCallback(Protocol):
-    """Materialize v5/tape/projection state for one committed tick."""
+    """Materialize authority/projection state for one committed tick."""
 
     def __call__(self, request: AuthorityCommitRequest) -> Any:
         ...
@@ -237,14 +238,14 @@ class SceneEngineRuntime:
         self._config = config if config is not None else RuntimeConfig()
         if not isinstance(self._config, RuntimeConfig):
             raise ConfigurationError("config must be a RuntimeConfig")
-        if self._config.missile_war_profile:
+        if self._config.strict_authority_presentation:
             if authority_commit is None:
                 raise ConfigurationError(
-                    "missile_war_profile requires an authority_commit callback"
+                    "strict_authority_presentation requires an authority_commit callback"
                 )
             if frame_export is None:
                 raise ConfigurationError(
-                    "missile_war_profile requires a complete frame_export callback"
+                    "strict_authority_presentation requires a complete frame_export callback"
                 )
         self._clock = clock if clock is not None else SystemMonotonicClock()
         if not callable(getattr(self._clock, "now", None)):
@@ -361,9 +362,9 @@ class SceneEngineRuntime:
 
         with self._state_lock:
             self._require_running()
-            if self._config.missile_war_profile:
+            if self._config.strict_authority_presentation:
                 raise ConfigurationError(
-                    "missile_war_profile accepts commands through the gameplay facade"
+                    "strict_authority_presentation accepts commands through the authority facade"
                 )
             if (
                 self._pending_command_count
@@ -553,7 +554,7 @@ class SceneEngineRuntime:
     def export_committed_state(self, authority_commit: Any) -> Any:
         """Export one extra complete frame at the current committed tick.
 
-        Current v5 commands are admitted outside the engine command queue. A
+        Profile commands are admitted outside the engine command queue. A
         successful same-tick command projection crosses this port after its
         authority commit. It advances ``frame_seq`` but never the global tick.
         """
@@ -565,9 +566,9 @@ class SceneEngineRuntime:
                     raise RuntimeBusyError(
                         "cannot export an external commit during an active tick"
                     )
-                if not self._config.missile_war_profile:
+                if not self._config.strict_authority_presentation:
                     raise ConfigurationError(
-                        "export_committed_state requires missile_war_profile"
+                        "export_committed_state requires strict_authority_presentation"
                     )
                 if not self._has_export_strategy:
                     raise ConfigurationError(
@@ -592,9 +593,9 @@ class SceneEngineRuntime:
         try:
             assert self._authority_commit is not None
             result = self._authority_commit(request)
-            if self._config.missile_war_profile and result is None:
+            if self._config.strict_authority_presentation and result is None:
                 raise AuthorityCommitFatalError(
-                    "missile_war_profile authority_commit returned None"
+                    "strict_authority_presentation authority_commit returned None"
                 )
         except BaseException as exc:
             with self._state_lock:
@@ -640,9 +641,9 @@ class SceneEngineRuntime:
         try:
             if self._frame_export is not None:
                 exported = self._frame_export(request)
-                if self._config.missile_war_profile and exported is None:
+                if self._config.strict_authority_presentation and exported is None:
                     raise DisplayExportError(
-                        "missile_war_profile frame_export returned None"
+                        "strict_authority_presentation frame_export returned None"
                     )
             else:
                 assert self._writer_factory is not None
@@ -675,7 +676,7 @@ class SceneEngineRuntime:
                 self._display_samples_failed += 1
                 self._consecutive_display_export_failures += 1
                 self._last_display_export_error = exc
-                if self._config.missile_war_profile:
+                if self._config.strict_authority_presentation:
                     self._presentation_epoch_valid = False
             return False
 

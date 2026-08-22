@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "scene-engine"
-version = "0.1.0.dev0"
-description = "Experimental engine-owned tick runtime and complete display-frame core"
+version = "0.2.0"
+description = "Generic tick runtime, presentation protocol, display, archive, and Replay core"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = []
 
 [tool.setuptools]
@@ -19,3 +19,4 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+pythonpath = ["src"]

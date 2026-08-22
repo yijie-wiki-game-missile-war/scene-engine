@@ -38,7 +38,7 @@ def config(**changes: Any) -> RuntimeConfig:
         maximum_frame_bytes=64_000,
         maximum_pending_commands=128,
         maximum_outstanding_leases=3,
-        missile_war_profile=False,
+        strict_authority_presentation=False,
     )
     values.update(changes)
     return RuntimeConfig(**values)
@@ -79,15 +79,15 @@ def test_runtime_config_rejects_invalid_or_non_integral_limits(changes: Any) -> 
         config(**changes)
 
 
-def test_missile_war_profile_requires_exact_ports_and_rates() -> None:
-    with pytest.raises(ConfigurationError, match="exact 60 Hz"):
-        config(missile_war_profile=True)
+def test_strict_authority_presentation_requires_exact_ports_and_rates() -> None:
+    with pytest.raises(ConfigurationError, match="one display frame per tick"):
+        config(strict_authority_presentation=True)
     with pytest.raises(ConfigurationError, match="authority_commit"):
         SceneEngineRuntime(
             RecordingSimulation(),
             config=config(
                 display_frames_per_second=60,
-                missile_war_profile=True,
+                strict_authority_presentation=True,
             ),
             frame_export=lambda request: {"frame_seq": request.frame_seq},
         )
@@ -96,7 +96,7 @@ def test_missile_war_profile_requires_exact_ports_and_rates() -> None:
             RecordingSimulation(),
             config=config(
                 display_frames_per_second=60,
-                missile_war_profile=True,
+                strict_authority_presentation=True,
             ),
             authority_commit=lambda request: {"projection_id": request.context.tick},
         )
@@ -402,7 +402,7 @@ def test_display_or_renderer_activity_never_advances_gameplay_time() -> None:
     assert render_samples == []  # 30 FPS sample is not due until tick 2.
 
 
-def test_missile_war_profile_commits_authority_before_every_60hz_frame() -> None:
+def test_strict_profile_commits_authority_before_every_display_frame() -> None:
     clock = ManualClock()
     simulation = RecordingSimulation()
     order: List[Tuple[str, int, Any]] = []
@@ -420,7 +420,7 @@ def test_missile_war_profile_commits_authority_before_every_60hz_frame() -> None
         simulation,
         config=config(
             display_frames_per_second=60,
-            missile_war_profile=True,
+            strict_authority_presentation=True,
         ),
         clock=clock,
         authority_commit=commit,
@@ -441,7 +441,7 @@ def test_missile_war_profile_commits_authority_before_every_60hz_frame() -> None
     assert runtime.health.presentation_epoch_valid
 
 
-def test_missile_war_profile_emits_sixty_authority_and_display_commits_per_second() -> None:
+def test_strict_profile_emits_sixty_authority_and_display_commits_per_second() -> None:
     clock = ManualClock()
     authority_ticks: List[int] = []
     display_ticks: List[int] = []
@@ -449,7 +449,7 @@ def test_missile_war_profile_emits_sixty_authority_and_display_commits_per_secon
         RecordingSimulation(),
         config=config(
             display_frames_per_second=60,
-            missile_war_profile=True,
+            strict_authority_presentation=True,
         ),
         clock=clock,
         authority_commit=lambda request: (
@@ -478,7 +478,7 @@ def test_same_tick_external_commit_advances_frame_sequence_not_tick() -> None:
         RecordingSimulation(),
         config=config(
             display_frames_per_second=60,
-            missile_war_profile=True,
+            strict_authority_presentation=True,
         ),
         clock=clock,
         authority_commit=lambda request: {"projection_id": request.context.tick},
@@ -498,7 +498,7 @@ def test_same_tick_external_commit_advances_frame_sequence_not_tick() -> None:
     assert extra == {"frame_seq": 2, "source_tick": 1}
 
 
-def test_missile_war_authority_failure_is_fatal_after_committed_tick() -> None:
+def test_strict_authority_failure_is_fatal_after_committed_tick() -> None:
     clock = ManualClock()
     simulation = RecordingSimulation()
 
@@ -511,7 +511,7 @@ def test_missile_war_authority_failure_is_fatal_after_committed_tick() -> None:
         simulation,
         config=config(
             display_frames_per_second=60,
-            missile_war_profile=True,
+            strict_authority_presentation=True,
         ),
         clock=clock,
         authority_commit=commit,
@@ -529,7 +529,7 @@ def test_missile_war_authority_failure_is_fatal_after_committed_tick() -> None:
     assert runtime.health.fatal_tick == 2
 
 
-def test_missile_war_display_gap_invalidates_epoch_until_new_bootstrap() -> None:
+def test_strict_display_gap_invalidates_epoch_until_new_bootstrap() -> None:
     clock = ManualClock()
     simulation = RecordingSimulation()
     attempts: List[Tuple[int, int]] = []
@@ -544,7 +544,7 @@ def test_missile_war_display_gap_invalidates_epoch_until_new_bootstrap() -> None
         simulation,
         config=config(
             display_frames_per_second=60,
-            missile_war_profile=True,
+            strict_authority_presentation=True,
         ),
         clock=clock,
         authority_commit=lambda request: {"projection_id": request.context.tick},

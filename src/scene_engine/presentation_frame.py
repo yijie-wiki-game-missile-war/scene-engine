@@ -1,4 +1,4 @@
-"""Schema-V2 complete presentation frame writer/parser for Missile War."""
+"""Schema-V2 complete presentation frame writer/parser."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from .presentation_schema import (
     INTERACTION_DOMAIN_KINDS,
     INTERACTION_RECORD_BYTES,
     INTERACTION_RECORD_V1,
-    MW_TICKS_PER_SECOND,
+    PRESENTATION_TICKS_PER_SECOND,
     OWNER_STATE_RECORD_BYTES,
     OWNER_STATE_RECORD_V1,
     PRESENTATION_ENTITY_ALLOWED_FLAGS,
@@ -377,7 +377,7 @@ def encode_presentation_frame(
         sequence,
         tick,
         projection,
-        MW_TICKS_PER_SECOND,
+        PRESENTATION_TICKS_PER_SECOND,
         0,
         len(entity_values),
         len(event_values),
@@ -470,8 +470,8 @@ def _validate_header(header, total, entity_limit, event_limit):
         raise PresentationFrameError("presentation frame header layout mismatch")
     if min(header.scene_epoch, header.bootstrap_id, header.frame_seq, header.projection_id) == 0:
         raise PresentationFrameError("presentation frame identities must be positive")
-    if header.ticks_per_second != MW_TICKS_PER_SECOND:
-        raise PresentationFrameError("MW presentation frame TPS must be 60")
+    if header.ticks_per_second != PRESENTATION_TICKS_PER_SECOND:
+        raise PresentationFrameError("presentation frame TPS must be 60")
     if header.reserved0 != 0 or header.reserved1 != 0:
         raise PresentationFrameError("presentation frame reserved fields must be zero")
     if header.entity_count > entity_limit or header.event_count > event_limit:

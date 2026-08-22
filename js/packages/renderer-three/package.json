@@ -1,0 +1,24 @@
+{
+  "name": "@scene-engine/renderer-three",
+  "version": "0.2.0",
+  "type": "module",
+  "sideEffects": false,
+  "files": ["src"],
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "peerDependencies": {
+    "three": ">=0.181.0 <1"
+  },
+  "peerDependenciesMeta": {
+    "three": {
+      "optional": true
+    }
+  },
+  "scripts": {
+    "test": "node --test ./test/*.test.mjs"
+  },
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0"
+  }
+}

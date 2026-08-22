@@ -23,6 +23,7 @@ from .presentation_frame import (
     parse_presentation_frame,
 )
 from .scene_bootstrap import SceneBootstrapView, parse_scene_bootstrap
+from .scene_bootstrap_v2 import SceneBootstrapV2View, parse_scene_bootstrap_v2
 
 
 _KNOWN_MESSAGE_TYPES = frozenset(
@@ -197,6 +198,36 @@ def decode_scene_bootstrap_packet(
     )
 
 
+def decode_scene_bootstrap_v2_packet(
+    data: Any,
+    *,
+    maximum_stored_bytes: int,
+    maximum_uncompressed_bytes: int,
+    maximum_bootstrap_bytes: int,
+    maximum_static_nodes: int,
+    maximum_topology_nodes: int,
+    maximum_adjacencies: int,
+    maximum_visual_types: int,
+    maximum_animation_states: int,
+) -> SceneBootstrapV2View:
+    packet = parse_packet(
+        data,
+        maximum_stored_bytes=maximum_stored_bytes,
+        maximum_uncompressed_bytes=maximum_uncompressed_bytes,
+    )
+    if packet.header.message_type != PACKET_MESSAGE_TYPE_SCENE_BOOTSTRAP:
+        raise PacketError("packet message_type is not scene.bootstrap")
+    return parse_scene_bootstrap_v2(
+        packet.payload,
+        maximum_bootstrap_bytes=maximum_bootstrap_bytes,
+        maximum_static_nodes=maximum_static_nodes,
+        maximum_topology_nodes=maximum_topology_nodes,
+        maximum_adjacencies=maximum_adjacencies,
+        maximum_visual_types=maximum_visual_types,
+        maximum_animation_states=maximum_animation_states,
+    )
+
+
 def decode_presentation_frame_packet(
     data: Any,
     *,
@@ -260,5 +291,6 @@ __all__ = [
     "decode_packet",
     "decode_display_frame_packet",
     "decode_scene_bootstrap_packet",
+    "decode_scene_bootstrap_v2_packet",
     "decode_presentation_frame_packet",
 ]

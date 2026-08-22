@@ -57,6 +57,10 @@ class PresentationBackpressureError(PresentationTransportError):
     """A viewer queue reached a hard frame or byte limit."""
 
 
+class PresentationArchiveError(SceneEngineError, RuntimeError):
+    """A presentation archive stream or identity is invalid."""
+
+
 class MailboxError(SceneEngineError, RuntimeError):
     """A latest-frame mailbox ownership rule was violated."""
 

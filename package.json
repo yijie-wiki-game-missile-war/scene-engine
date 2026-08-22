@@ -1,0 +1,17 @@
+{
+  "name": "scene-engine-workspace",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "npm@11.9.0",
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0",
+    "npm": ">=10 <12"
+  },
+  "workspaces": [
+    "js/packages/*"
+  ],
+  "scripts": {
+    "test": "npm test --workspaces --if-present"
+  }
+}

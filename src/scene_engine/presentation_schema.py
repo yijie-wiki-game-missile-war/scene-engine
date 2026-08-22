@@ -1,8 +1,9 @@
-"""Frozen binary declarations for the Missile War ordered presentation profile.
+"""Frozen binary declarations for the ordered presentation profile.
 
-The existing display-frame V1 declarations remain an immutable experimental
-profile.  This module owns the incompatible Bootstrap V1 and DisplayFrame V2
-layouts used by the migration candidate.
+The standalone display-frame V1 declarations remain an immutable experimental
+slice.  Production uses Bootstrap V2 and DisplayFrame V2; several packed
+record constants retain a ``V1`` suffix solely as their physical-layout
+revision and are shared by the V2 Bootstrap/frame schemas.
 """
 
 from __future__ import annotations
@@ -10,9 +11,10 @@ from __future__ import annotations
 import struct
 
 
-MW_TICKS_PER_SECOND = 60
+PRESENTATION_TICKS_PER_SECOND = 60
 
 SCENE_BOOTSTRAP_SCHEMA_VERSION = 1
+SCENE_BOOTSTRAP_SCHEMA_VERSION_V2 = 2
 SCENE_BOOTSTRAP_FLAG_COMPLETE_STATIC_SET = 1 << 0
 SCENE_BOOTSTRAP_HEADER_BYTES = 96
 SCENE_BOOTSTRAP_COORDINATE_PROFILE_RH_Y_UP_Z_FORWARD_XYZW_F32 = 1
@@ -28,9 +30,12 @@ BOOTSTRAP_SECTION_TOPOLOGY_NODES = 3
 BOOTSTRAP_SECTION_ADJACENCIES = 4
 BOOTSTRAP_SECTION_VISUAL_REGISTRY = 5
 BOOTSTRAP_SECTION_ANIMATION_REGISTRY = 6
+BOOTSTRAP_SECTION_AUTHORITY_BASELINE = 7
 
 BOOTSTRAP_IDENTITY_HEADER_BYTES = 32
 BOOTSTRAP_IDENTITY_HEADER_V1 = struct.Struct("<HHHHHHIQQ")
+BOOTSTRAP_SESSION_IDENTITY_HEADER_V2 = struct.Struct("<HHHIH")
+BOOTSTRAP_AUTHORITY_BASELINE_HEADER_V2 = struct.Struct("<HIIH")
 STATIC_NODE_RECORD_BYTES = 80
 STATIC_NODE_RECORD_V1 = struct.Struct("<QQIIII3f4f3fII")
 STATIC_NODE_FLAG_VISIBLE = 1 << 0
