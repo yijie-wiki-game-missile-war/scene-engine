@@ -1,29 +1,28 @@
 from __future__ import annotations
 
 import inspect
-from typing import Any, List, Tuple
+from typing import Any, List
 
 import pytest
 
 from scene_engine.clock import ManualClock, SystemMonotonicClock
 from scene_engine.errors import (
     AuthorityCommitFatalError,
-    CommandQueueFullError,
     ConfigurationError,
     RuntimeBusyError,
     RuntimeStoppedError,
     SimulationFatalError,
 )
-from scene_engine.runtime import RuntimeConfig, SceneEngineRuntime
-from scene_engine.types import TickContext
+from scene_engine.runtime import AuthorityCommitRequest, RuntimeConfig, SceneEngineRuntime
+from scene_engine.types import GameSimulation, TickContext
 
 
 class RecordingSimulation:
     def __init__(self) -> None:
-        self.steps: List[Tuple[TickContext, Tuple[Any, ...]]] = []
+        self.steps: List[TickContext] = []
 
-    def step(self, context: TickContext, commands: Tuple[Any, ...]) -> None:
-        self.steps.append((context, commands))
+    def step(self, context: TickContext) -> None:
+        self.steps.append(context)
 
 def config(**changes: Any) -> RuntimeConfig:
     values = dict(
@@ -32,7 +31,6 @@ def config(**changes: Any) -> RuntimeConfig:
         maximum_ticks_per_pump=120,
         maximum_frame_nodes=100,
         maximum_frame_bytes=64_000,
-        maximum_pending_commands=128,
         strict_authority_presentation=False,
     )
     values.update(changes)
@@ -63,7 +61,6 @@ def test_manual_and_system_clocks_expose_monotonic_seconds() -> None:
         {"maximum_ticks_per_pump": -1},
         {"maximum_frame_nodes": 0},
         {"maximum_frame_bytes": 0},
-        {"maximum_pending_commands": 0},
         {"ticks_per_second": True},
         {"ticks_per_second": 60.0},
     ],
@@ -79,6 +76,19 @@ def test_removed_v1_writer_ports_are_not_runtime_fallbacks() -> None:
     assert "frame_sink" not in parameters
     assert "maximum_frame_entities" not in RuntimeConfig.__dataclass_fields__
     assert "maximum_outstanding_leases" not in RuntimeConfig.__dataclass_fields__
+
+
+def test_runtime_has_no_command_queue_or_second_command_time_model() -> None:
+    assert "maximum_pending_commands" not in RuntimeConfig.__dataclass_fields__
+    assert "pending_commands" not in vars(SceneEngineRuntime(
+        RecordingSimulation(), config=config()
+    ).health)
+    assert not hasattr(SceneEngineRuntime, "enqueue_command")
+    assert "commands" not in AuthorityCommitRequest.__dataclass_fields__
+    assert list(inspect.signature(GameSimulation.step).parameters) == [
+        "self",
+        "context",
+    ]
 
 
 def test_strict_authority_presentation_requires_exact_ports_and_rates() -> None:
@@ -112,9 +122,9 @@ def test_one_manual_second_executes_exactly_sixty_ordered_steps() -> None:
     clock.advance(1.0)
     result = runtime.pump()
 
-    assert [context.tick for context, _ in simulation.steps] == list(range(1, 61))
-    assert all(context.ticks_per_second == 60 for context, _ in simulation.steps)
-    assert all(context.elapsed_ticks == 1 for context, _ in simulation.steps)
+    assert [context.tick for context in simulation.steps] == list(range(1, 61))
+    assert all(context.ticks_per_second == 60 for context in simulation.steps)
+    assert all(context.elapsed_ticks == 1 for context in simulation.steps)
     assert result.ticks_committed == 60
     assert result.caught_up
     assert runtime.current_tick == 60
@@ -138,60 +148,15 @@ def test_catch_up_is_bounded_but_never_skips_overdue_ticks() -> None:
     assert first.ticks_remaining == 6
     assert second.ticks_committed == 4
     assert third.ticks_committed == 2
-    assert [context.tick for context, _ in simulation.steps] == list(range(1, 11))
-
-
-def test_commands_are_assigned_and_frozen_at_explicit_tick_boundaries() -> None:
-    clock = ManualClock()
-    simulation = RecordingSimulation()
-    runtime: SceneEngineRuntime
-
-    class EnqueueDuringStep(RecordingSimulation):
-        def step(self, context: TickContext, commands: Tuple[Any, ...]) -> None:
-            super().step(context, commands)
-            if context.tick == 1:
-                assert runtime.enqueue_command("during-step") == 2
-
-    simulation = EnqueueDuringStep()
-    runtime = SceneEngineRuntime(simulation, config=config(), clock=clock)
-    assert runtime.enqueue_command("a") == 1
-    assert runtime.enqueue_command("b") == 1
-
-    clock.advance(2.0 / 60.0)
-    runtime.pump()
-
-    assert simulation.steps[0][1] == ("a", "b")
-    assert isinstance(simulation.steps[0][1], tuple)
-    assert simulation.steps[1][1] == ("during-step",)
-
-
-def test_command_queue_is_bounded_until_the_assigned_tick_starts() -> None:
-    clock = ManualClock()
-    simulation = RecordingSimulation()
-    runtime = SceneEngineRuntime(
-        simulation,
-        config=config(maximum_pending_commands=2),
-        clock=clock,
-    )
-    runtime.enqueue_command("a")
-    runtime.enqueue_command("b")
-
-    with pytest.raises(CommandQueueFullError, match="maximum_pending_commands"):
-        runtime.enqueue_command("overflow")
-
-    assert runtime.health.pending_commands == 2
-    clock.advance(1.0 / 60.0)
-    runtime.pump()
-    assert simulation.steps[0][1] == ("a", "b")
-    assert runtime.health.pending_commands == 0
+    assert [context.tick for context in simulation.steps] == list(range(1, 11))
 
 
 def test_gameplay_exception_is_fatal_and_failed_tick_is_never_committed_or_retried() -> None:
     clock = ManualClock()
 
     class FailingSimulation(RecordingSimulation):
-        def step(self, context: TickContext, commands: Tuple[Any, ...]) -> None:
-            super().step(context, commands)
+        def step(self, context: TickContext) -> None:
+            super().step(context)
             if context.tick == 2:
                 raise LookupError("broken world")
 
@@ -210,14 +175,14 @@ def test_gameplay_exception_is_fatal_and_failed_tick_is_never_committed_or_retri
 
     assert isinstance(raised.value.__cause__, LookupError)
     assert runtime.current_tick == 1
-    assert [context.tick for context, _ in simulation.steps] == [1, 2]
+    assert [context.tick for context in simulation.steps] == [1, 2]
     assert exported_ticks == [1]
     assert runtime.health.fatal
     assert runtime.health.fatal_tick == 2
 
     with pytest.raises(SimulationFatalError):
         runtime.pump()
-    assert [context.tick for context, _ in simulation.steps] == [1, 2]
+    assert [context.tick for context in simulation.steps] == [1, 2]
 
 
 def test_non_exception_escape_is_still_fatal_and_cannot_retry_the_tick() -> None:
@@ -227,8 +192,8 @@ def test_non_exception_escape_is_still_fatal_and_cannot_retry_the_tick() -> None
         pass
 
     class SignallingSimulation(RecordingSimulation):
-        def step(self, context: TickContext, commands: Tuple[Any, ...]) -> None:
-            super().step(context, commands)
+        def step(self, context: TickContext) -> None:
+            super().step(context)
             raise ProcessSignal("stop now")
 
     simulation = SignallingSimulation()
@@ -249,7 +214,7 @@ def test_non_exception_escape_is_still_fatal_and_cannot_retry_the_tick() -> None
 def test_rational_display_schedule_attempts_thirty_samples_over_sixty_ticks() -> None:
     clock = ManualClock()
     simulation = RecordingSimulation()
-    samples: List[Tuple[int, int]] = []
+    samples: List[tuple[int, int]] = []
     runtime = SceneEngineRuntime(
         simulation,
         config=config(display_frames_per_second=30),
@@ -289,7 +254,7 @@ def test_non_divisible_display_rate_uses_exact_rational_accumulator() -> None:
 def test_display_export_failure_skips_one_sample_then_recovers_without_stopping_gameplay() -> None:
     clock = ManualClock()
     simulation = RecordingSimulation()
-    attempts: List[Tuple[int, int]] = []
+    attempts: List[tuple[int, int]] = []
 
     def exporter(request: Any) -> None:
         attempts.append((request.frame_seq, request.source_tick))
@@ -305,7 +270,7 @@ def test_display_export_failure_skips_one_sample_then_recovers_without_stopping_
     clock.advance(4.0 / 60.0)
     result = runtime.pump()
 
-    assert [context.tick for context, _ in simulation.steps] == [1, 2, 3, 4]
+    assert [context.tick for context in simulation.steps] == [1, 2, 3, 4]
     assert attempts == [(1, 2), (1, 4)]
     assert result.display_samples_failed == 1
     assert result.display_samples_succeeded == 1
@@ -342,7 +307,7 @@ def test_display_or_renderer_activity_never_advances_gameplay_time() -> None:
 def test_strict_profile_commits_authority_before_every_display_frame() -> None:
     clock = ManualClock()
     simulation = RecordingSimulation()
-    order: List[Tuple[str, int, Any]] = []
+    order: List[tuple[str, int, Any]] = []
 
     def commit(request: Any) -> dict[str, int]:
         result = {"projection_id": request.context.tick}
@@ -469,7 +434,7 @@ def test_strict_authority_failure_is_fatal_after_committed_tick() -> None:
 def test_strict_display_gap_invalidates_epoch_until_new_bootstrap() -> None:
     clock = ManualClock()
     simulation = RecordingSimulation()
-    attempts: List[Tuple[int, int]] = []
+    attempts: List[tuple[int, int]] = []
 
     def export(request: Any) -> Any:
         attempts.append((request.scene_epoch, request.source_tick))
@@ -506,10 +471,10 @@ def test_pump_is_non_reentrant_and_fails_fast_instead_of_deadlocking() -> None:
     runtime: SceneEngineRuntime
 
     class ReentrantSimulation(RecordingSimulation):
-        def step(self, context: TickContext, commands: Tuple[Any, ...]) -> None:
+        def step(self, context: TickContext) -> None:
             with pytest.raises(RuntimeBusyError, match="already active"):
                 runtime.pump()
-            super().step(context, commands)
+            super().step(context)
 
     simulation = ReentrantSimulation()
     runtime = SceneEngineRuntime(simulation, config=config(), clock=clock)
@@ -526,16 +491,12 @@ def test_stop_is_idempotent_and_rejects_future_work() -> None:
     clock = ManualClock()
     simulation = RecordingSimulation()
     runtime = SceneEngineRuntime(simulation, config=config(), clock=clock)
-    runtime.enqueue_command("discarded")
 
     runtime.stop()
     runtime.stop()
     clock.advance(1.0)
 
     assert runtime.health.stopped
-    assert runtime.health.pending_commands == 0
     with pytest.raises(RuntimeStoppedError):
         runtime.pump()
-    with pytest.raises(RuntimeStoppedError):
-        runtime.enqueue_command("too late")
     assert simulation.steps == []

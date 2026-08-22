@@ -24,6 +24,10 @@ test('installs one parented anchor tree without retaining node records', () => {
   assert.equal('entity' in backend.records.get(1n), false);
   assert.equal('node' in backend.records.get(1n), false);
   assert.equal('parentDisplayId' in backend.records.get(1n), false);
+  assert.throws(
+    () => backend.installBootstrap(plan({ kind: 'reset' }), view),
+    (error) => error.code === 'three-bootstrap-plan-invalid',
+  );
 });
 
 test('applies only declared changes and skips an unchanged owner profile', () => {
@@ -54,27 +58,26 @@ test('applies only declared changes and skips an unchanged owner profile', () =>
   assert.equal(root.matrixWorldUpdateCount, 2);
 });
 
-test('applies a correlation batch and updates world matrices exactly once', () => {
+test('applies an ordered frame batch once without owning presentation events', () => {
   const root = new FakeGroup();
-  const events = [];
-  const backend = createBackend(root, () => ownerFactory().factory, {
-    onEvents(values, identity) { events.push([values, identity]); },
-  });
+  const backend = createBackend(root, () => ownerFactory().factory);
   const created = node(1);
   backend.applyBatch([
     {
-      plan: plan({ createIds: [1n], events: [{ eventId: 1n }], frameSeq: 1n }),
+      events: Object.freeze([{ eventId: 1n }]),
+      plan: plan({ createIds: [1n], frameSeq: 1n }),
       view: sceneView([created]),
     },
     {
-      plan: plan({ removeIds: [1n], events: [{ eventId: 2n }], frameSeq: 2n }),
+      events: Object.freeze([{ eventId: 2n }]),
+      plan: plan({ removeIds: [1n], frameSeq: 2n }),
       view: sceneView([]),
     },
   ]);
 
   assert.equal(backend.capture().nodeCount, 0);
   assert.equal(root.matrixWorldUpdateCount, 1);
-  assert.deepEqual(events.map(([, identity]) => identity.frameSeq), [1n, 2n]);
+  assert.equal('publishEvents' in ThreePresentationBackend.prototype, false);
 });
 
 test('rejects stale asynchronous resources after replace and remove', async () => {
@@ -243,9 +246,7 @@ function sceneView(nodes, generation = 1) {
 function plan(overrides = {}) {
   return Object.freeze({
     animationDirtyIds: Object.freeze([]),
-    correlationSeq: 1n,
     createIds: Object.freeze([]),
-    events: Object.freeze([]),
     frameSeq: 1n,
     generation: 1,
     interactionDirtyIds: Object.freeze([]),

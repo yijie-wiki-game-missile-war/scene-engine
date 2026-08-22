@@ -11,7 +11,7 @@ export class SceneDisplayEngineError extends Error {
 export const DEFAULT_SCENE_TREE_LIMITS = Object.freeze({
   maximumNodes: 10_000,
   maximumTreeDepth: 64,
-  maximumFramesPerCorrelation: 8,
+  maximumFramesPerBatch: 8,
 });
 
 /**
@@ -20,9 +20,9 @@ export const DEFAULT_SCENE_TREE_LIMITS = Object.freeze({
  * Node state is retained in dense struct-of-arrays stores. There are no
  * resident per-node records or pose arrays; node and payload views are made
  * only when a caller asks for a specific slot. A bounded store pool lets a
- * whole correlation batch be prepared without mutating the live store.
+ * whole frame batch be prepared without mutating the live store.
  */
-export class PresentationSceneTree {
+class PresentationSceneTree {
   constructor({ limits = {} } = {}) {
     this.limits = normalizeLimits(limits);
     this.state = null;
@@ -37,31 +37,16 @@ export class PresentationSceneTree {
     const installed = buildInstalledState(bootstrap, this.limits, 1);
     this.state = installed.state;
     this.dynamicPool = installed.dynamicPool;
-    return bootstrapPlan(this.state, 'bootstrap', []);
+    return bootstrapPlan(this.state);
   }
 
-  prepareFrame(frame, options) {
-    const prepared = this.prepareFrames([frame], options);
-    const step = prepared.steps[0];
-    return Object.freeze({
-      plan: step.plan,
-      view: step.view,
-      steps: prepared.steps,
-      abort: prepared.abort,
-      commit: prepared.commit,
-    });
-  }
-
-  prepareFrames(frames, { correlationSeq } = {}) {
+  prepareFrames(frames) {
     this.requireReady();
     if (this.pending) throw new SceneDisplayEngineError('frame-prepare-in-flight');
     if (!Array.isArray(frames)) throw new SceneDisplayEngineError('frame-batch-invalid');
-    if (frames.length > this.limits.maximumFramesPerCorrelation) {
+    if (frames.length === 0) throw new SceneDisplayEngineError('frame-batch-empty');
+    if (frames.length > this.limits.maximumFramesPerBatch) {
       throw new SceneDisplayEngineError('frame-batch-limit-exceeded');
-    }
-    const sequence = positiveBigInt(correlationSeq, 'correlationSeq');
-    if (sequence !== this.state.lastCorrelationSeq + 1n) {
-      throw new SceneDisplayEngineError('correlation-sequence-gap');
     }
 
     const expected = this.state;
@@ -76,11 +61,11 @@ export class PresentationSceneTree {
           previous,
           target,
           frame,
-          sequence,
           this.limits,
         );
-        const plan = framePlan(previous, candidate, frame, sequence);
+        const plan = framePlan(previous, candidate);
         steps.push(Object.freeze({
+          events: materializeEvents(frame),
           plan,
           // Step views borrow the already-validated complete frame. This keeps
           // transient lifecycle observable without retaining N dense stores
@@ -94,29 +79,43 @@ export class PresentationSceneTree {
       throw error;
     }
 
-    const finalState = frames.length === 0
-      ? Object.freeze({ ...expected, lastCorrelationSeq: sequence })
-      : previous;
+    const finalState = previous;
+    for (const store of available) {
+      if (store !== finalState.dynamicStore) store.releaseBorrowedPayloads();
+    }
     const frozenSteps = Object.freeze(steps);
-    let settled = false;
+    let status = 'prepared';
     this.pending = true;
     return Object.freeze({
       steps: frozenSteps,
+      assertCommittable: () => {
+        if (status !== 'prepared') {
+          throw new SceneDisplayEngineError('frame-batch-token-not-prepared');
+        }
+        if (this.disposed) throw new SceneDisplayEngineError('scene-tree-disposed');
+        if (!this.pending || this.state !== expected) {
+          throw new SceneDisplayEngineError('frame-batch-token-stale');
+        }
+        status = 'validated';
+      },
       abort: () => {
-        if (settled) return;
-        settled = true;
+        if (status === 'aborted') return;
+        if (status === 'committed') {
+          throw new SceneDisplayEngineError('frame-batch-token-settled');
+        }
+        status = 'aborted';
         this.pending = false;
         for (const store of available) store.releaseBorrowedPayloads();
       },
-      commit: () => {
-        if (settled) return false;
-        settled = true;
+      commitValidated: () => {
+        if (status !== 'validated') {
+          throw new SceneDisplayEngineError('frame-batch-token-not-validated');
+        }
+        status = 'committed';
         this.pending = false;
-        if (this.disposed || this.state !== expected) return false;
-        // The commit barrier is intentionally only an immutable state/cursor
-        // pointer swap. All validation and plans were completed above.
+        // Validation and planning completed before the synchronous barrier.
+        // This method intentionally performs only the live pointer swap.
         this.state = finalState;
-        return true;
       },
     });
   }
@@ -156,21 +155,6 @@ export class PresentationSceneTree {
     return metadataByType(this.state.metadata, metadataTypeId);
   }
 
-  reset(bootstrap) {
-    this.requireReady();
-    if (this.pending) throw new SceneDisplayEngineError('frame-prepare-in-flight');
-    const oldState = this.state;
-    const installed = buildInstalledState(
-      bootstrap,
-      this.limits,
-      oldState.generation + 1,
-    );
-    const removals = allIdsChildFirst(oldState);
-    this.state = installed.state;
-    this.dynamicPool = installed.dynamicPool;
-    return bootstrapPlan(this.state, 'reset', removals);
-  }
-
   dispose() {
     if (this.disposed) return;
     this.disposed = true;
@@ -189,90 +173,80 @@ export class PresentationSceneTree {
   }
 }
 
-export class SceneDisplayEngineCore {
-  constructor({ limits = {}, captureHook = null } = {}) {
-    if (captureHook != null && typeof captureHook !== 'function') {
-      throw new SceneDisplayEngineError('capture-hook-invalid');
-    }
-    this.tree = new PresentationSceneTree({ limits });
-    this.captureHook = captureHook;
-    this.captureScheduled = false;
-    this.disposed = false;
-    this.metrics = { committedFrames: 0, committedCorrelations: 0, prepareFailures: 0, resets: 0 };
+export class SceneDisplayEngine {
+  #captureHook;
+  #captureScheduled;
+  #disposed;
+  #metrics;
+  #tree;
+
+  constructor(options = {}) {
+    const { captureHook, limits } = normalizeEngineOptions(options);
+    this.#tree = new PresentationSceneTree({ limits });
+    this.#captureHook = captureHook;
+    this.#captureScheduled = false;
+    this.#disposed = false;
+    this.#metrics = { committedFrames: 0, committedFrameBatches: 0, prepareFailures: 0 };
   }
 
   installBootstrap(bootstrap) {
-    const plan = this.tree.installBootstrap(bootstrap);
-    this.scheduleCapture();
+    const plan = this.#tree.installBootstrap(bootstrap);
+    this.schedulePostCommitCapture();
     return plan;
   }
 
-  prepareFrame(frame, options) {
+  prepareFrames(frames) {
     let prepared;
     try {
-      prepared = this.tree.prepareFrame(frame, options);
+      prepared = this.#tree.prepareFrames(frames);
     } catch (error) {
-      this.metrics.prepareFailures += 1;
+      this.#metrics.prepareFailures += 1;
       throw error;
     }
-    return this.wrapPrepared(prepared, 1);
+    return this.#wrapPrepared(prepared, frames.length);
   }
 
-  prepareFrames(frames, options) {
-    let prepared;
-    try {
-      prepared = this.tree.prepareFrames(frames, options);
-    } catch (error) {
-      this.metrics.prepareFailures += 1;
-      throw error;
-    }
-    return this.wrapPrepared(prepared, frames.length);
-  }
-
-  wrapPrepared(prepared, frameCount) {
-    let settled = false;
+  #wrapPrepared(prepared, frameCount) {
+    let status = 'prepared';
     const result = {
       steps: prepared.steps,
+      assertCommittable: () => {
+        if (status !== 'prepared') {
+          throw new SceneDisplayEngineError('frame-batch-token-not-prepared');
+        }
+        prepared.assertCommittable();
+        status = 'validated';
+      },
       abort: () => {
-        if (settled) return;
-        settled = true;
+        if (status === 'aborted') return;
+        if (status === 'committed') {
+          throw new SceneDisplayEngineError('frame-batch-token-settled');
+        }
+        status = 'aborted';
         prepared.abort();
       },
-      commit: () => {
-        if (settled) return false;
-        settled = true;
-        const committed = prepared.commit();
-        if (committed) {
-          this.metrics.committedFrames += frameCount;
-          this.metrics.committedCorrelations += 1;
-          this.scheduleCapture();
+      commitValidated: () => {
+        if (status !== 'validated') {
+          throw new SceneDisplayEngineError('frame-batch-token-not-validated');
         }
-        return committed;
+        prepared.commitValidated();
+        status = 'committed';
+        this.#metrics.committedFrames += frameCount;
+        this.#metrics.committedFrameBatches += 1;
       },
     };
-    if (prepared.plan) {
-      result.plan = prepared.plan;
-      result.view = prepared.view;
-    }
     return Object.freeze(result);
   }
 
-  currentView() { return this.tree.currentView(); }
-  getNode(displayId) { return this.tree.getNode(displayId); }
-  getWorldPose(displayId, out) { return this.tree.getWorldPose(displayId, out); }
-  getInteraction(displayId) { return this.tree.getInteraction(displayId); }
-  getProfile(displayId) { return this.tree.getProfile(displayId); }
-  getSceneMetadata(metadataTypeId) { return this.tree.getSceneMetadata(metadataTypeId); }
-
-  reset(bootstrap) {
-    const plan = this.tree.reset(bootstrap);
-    this.metrics.resets += 1;
-    this.scheduleCapture();
-    return plan;
-  }
+  currentView() { return this.#tree.currentView(); }
+  getNode(displayId) { return this.#tree.getNode(displayId); }
+  getWorldPose(displayId, out) { return this.#tree.getWorldPose(displayId, out); }
+  getInteraction(displayId) { return this.#tree.getInteraction(displayId); }
+  getProfile(displayId) { return this.#tree.getProfile(displayId); }
+  getSceneMetadata(metadataTypeId) { return this.#tree.getSceneMetadata(metadataTypeId); }
 
   capture() {
-    const state = this.tree.state;
+    const state = this.#tree.state;
     return Object.freeze({
       generation: state?.generation ?? 0,
       nodeCount: state ? state.staticStore.count + state.dynamicStore.count : 0,
@@ -281,36 +255,53 @@ export class SceneDisplayEngineCore {
       maxSeenDisplayId: state?.maxSeenDisplayId ?? 0n,
       lastFrameSeq: state?.lastFrameSeq ?? null,
       lastSourceTick: state?.lastSourceTick ?? null,
-      lastCorrelationSeq: state?.lastCorrelationSeq ?? 0n,
-      denseDynamicStoreCount: this.tree.dynamicPool?.length ?? 0,
+      denseDynamicStoreCount: this.#tree.dynamicPool?.length ?? 0,
       dynamicStoreCapacity: state?.dynamicStore.capacity ?? 0,
       residentNodeObjectCount: 0,
       residentPoseObjectCount: 0,
-      metrics: Object.freeze({ ...this.metrics }),
+      metrics: Object.freeze({ ...this.#metrics }),
     });
   }
 
-  scheduleCapture() {
-    if (!this.captureHook || this.captureScheduled) return;
-    this.captureScheduled = true;
-    queueMicrotask(() => {
-      this.captureScheduled = false;
-      if (this.disposed) return;
-      try { this.captureHook(this.capture()); } catch { /* observers cannot alter state */ }
-    });
+  /**
+   * Schedule the protected capture observer after an external pointer barrier.
+   *
+   * Prepared token commitValidated() deliberately never calls this method: a
+   * product coordinator must first swap every jointly-owned pointer, then ask
+   * the Engine to enqueue this observer outside that synchronous barrier.
+   */
+  schedulePostCommitCapture() {
+    if (!this.#captureHook || this.#captureScheduled || this.#disposed) return;
+    this.#captureScheduled = true;
+    try {
+      queueMicrotask(() => {
+        this.#captureScheduled = false;
+        if (this.#disposed) return;
+        try { this.#captureHook(this.capture()); } catch {
+          // Capture observers never alter committed Engine or product state.
+        }
+      });
+    } catch {
+      // Scheduling failure is diagnostic-only and cannot roll state back.
+      this.#captureScheduled = false;
+    }
   }
 
   dispose() {
-    if (this.disposed) return;
-    this.disposed = true;
-    this.tree.dispose();
+    if (this.#disposed) return;
+    this.#disposed = true;
+    this.#captureScheduled = false;
+    this.#tree.dispose();
   }
 }
 
-export class PresentationSceneView {
+class PresentationSceneView {
+  #borrowedDynamicView;
+  #state;
+
   constructor(state, borrowedDynamicView = null) {
-    this.state = state;
-    this.borrowedDynamicView = borrowedDynamicView;
+    this.#state = state;
+    this.#borrowedDynamicView = borrowedDynamicView;
     this.generation = state.generation;
     this.sceneEpoch = state.sceneEpoch;
     this.bootstrapId = state.bootstrapId;
@@ -322,7 +313,6 @@ export class PresentationSceneView {
     this.frameSeq = state.lastFrameSeq;
     this.sourceTick = state.lastSourceTick;
     this.projectionId = state.lastProjectionId;
-    this.correlationSeq = state.lastCorrelationSeq;
     this.sceneMetadataCount = state.metadata.count;
     Object.freeze(this);
   }
@@ -332,54 +322,63 @@ export class PresentationSceneView {
       throw new SceneDisplayEngineError('node-index-invalid');
     }
     if (index < this.staticNodeCount) {
-      return new PresentationNodeSlotView(this.state.staticStore, index);
+      return new PresentationNodeSlotView(this.#state.staticStore, index);
     }
-    if (this.borrowedDynamicView) {
+    if (this.#borrowedDynamicView) {
       return new BorrowedFrameNodeSlotView(
-        this.borrowedDynamicView,
+        this.#borrowedDynamicView,
         index - this.staticNodeCount,
       );
     }
     return new PresentationNodeSlotView(
-      this.state.dynamicStore,
+      this.#state.dynamicStore,
       index - this.staticNodeCount,
     );
   }
 
   getNode(displayId) {
     const id = positiveBigInt(displayId, 'displayId');
-    const staticSlot = this.state.staticStore.index.get(id);
-    if (staticSlot !== -1) return new PresentationNodeSlotView(this.state.staticStore, staticSlot);
-    if (!this.borrowedDynamicView) return nodeById(this.state, id);
-    const slot = borrowedNodeSlot(this.borrowedDynamicView, id);
-    return slot === -1 ? null : new BorrowedFrameNodeSlotView(this.borrowedDynamicView, slot);
+    const staticSlot = this.#state.staticStore.index.get(id);
+    if (staticSlot !== -1) {
+      return new PresentationNodeSlotView(this.#state.staticStore, staticSlot);
+    }
+    if (!this.#borrowedDynamicView) return nodeById(this.#state, id);
+    const slot = borrowedNodeSlot(this.#borrowedDynamicView, id);
+    return slot === -1
+      ? null
+      : new BorrowedFrameNodeSlotView(this.#borrowedDynamicView, slot);
   }
 
   getInteraction(displayId) {
-    if (this.borrowedDynamicView) return this.getNode(displayId)?.interaction ?? null;
-    const located = locateNode(this.state, positiveBigInt(displayId, 'displayId'));
+    if (this.#borrowedDynamicView) return this.getNode(displayId)?.interaction ?? null;
+    const located = locateNode(this.#state, positiveBigInt(displayId, 'displayId'));
     return located ? located.store.payloadAt(located.slot, 'interaction') : null;
   }
 
   getProfile(displayId) {
-    if (this.borrowedDynamicView) return this.getNode(displayId)?.profile ?? null;
-    const located = locateNode(this.state, positiveBigInt(displayId, 'displayId'));
+    if (this.#borrowedDynamicView) return this.getNode(displayId)?.profile ?? null;
+    const located = locateNode(this.#state, positiveBigInt(displayId, 'displayId'));
     return located ? located.store.payloadAt(located.slot, 'profile') : null;
   }
 
   sceneMetadataAt(index) {
-    return metadataAt(this.state.metadata, index);
+    return metadataAt(this.#state.metadata, index);
   }
 
   getSceneMetadata(metadataTypeId) {
-    return metadataByType(this.state.metadata, metadataTypeId);
+    return metadataByType(this.#state.metadata, metadataTypeId);
   }
 
   getWorldPose(displayId, out) {
-    if (this.borrowedDynamicView) {
-      return readBorrowedWorldPose(this.state, this.borrowedDynamicView, displayId, out);
+    if (this.#borrowedDynamicView) {
+      return readBorrowedWorldPose(
+        this.#state,
+        this.#borrowedDynamicView,
+        displayId,
+        out,
+      );
     }
-    const located = locateNode(this.state, positiveBigInt(displayId, 'displayId'));
+    const located = locateNode(this.#state, positiveBigInt(displayId, 'displayId'));
     if (!located) return false;
     located.store.readWorldPose(located.slot, out);
     return true;
@@ -390,65 +389,78 @@ export class PresentationSceneView {
   }
 }
 
-export class PresentationNodeSlotView {
+class PresentationNodeSlotView {
+  #slot;
+  #store;
+
   constructor(store, slot) {
-    this.store = store;
-    this.slot = slot;
+    this.#store = store;
+    this.#slot = slot;
     Object.freeze(this);
   }
 
-  get displayId() { return this.store.displayIds[this.slot]; }
-  get parentDisplayId() { return this.store.parentDisplayIds[this.slot]; }
-  get visualTypeId() { return this.store.visualTypeIds[this.slot]; }
-  get flags() { return this.store.flags[this.slot]; }
-  get isStatic() { return this.store.isStatic; }
-  get localPosition() { return tupleView(this.store.localPositions, this.slot, 3); }
-  get localRotationXyzw() { return tupleView(this.store.localRotations, this.slot, 4); }
-  get localScale() { return tupleView(this.store.localScales, this.slot, 3); }
-  get animationStateId() { return this.store.animationStateIds[this.slot]; }
-  get animationStartTick() { return this.store.animationStartTicks[this.slot]; }
-  get animationFlags() { return this.store.animationFlags[this.slot]; }
-  get profile() { return this.store.payloadAt(this.slot, 'profile'); }
-  get interaction() { return this.store.payloadAt(this.slot, 'interaction'); }
+  get displayId() { return this.#store.displayIds[this.#slot]; }
+  get parentDisplayId() { return this.#store.parentDisplayIds[this.#slot]; }
+  get visualTypeId() { return this.#store.visualTypeIds[this.#slot]; }
+  get flags() { return this.#store.flags[this.#slot]; }
+  get isStatic() { return this.#store.isStatic; }
+  get localPosition() { return tupleView(this.#store.localPositions, this.#slot, 3); }
+  get localRotationXyzw() { return tupleView(this.#store.localRotations, this.#slot, 4); }
+  get localScale() { return tupleView(this.#store.localScales, this.#slot, 3); }
+  get animationStateId() { return this.#store.animationStateIds[this.#slot]; }
+  get animationStartTick() { return this.#store.animationStartTicks[this.#slot]; }
+  get animationFlags() { return this.#store.animationFlags[this.#slot]; }
+  get profile() { return this.#store.payloadAt(this.#slot, 'profile'); }
+  get interaction() { return this.#store.payloadAt(this.#slot, 'interaction'); }
 }
 
-export class BorrowedFrameNodeSlotView {
+class BorrowedFrameNodeSlotView {
+  #slot;
+  #view;
+
   constructor(view, slot) {
-    this.view = view;
-    this.slot = slot;
+    this.#view = view;
+    this.#slot = slot;
     Object.freeze(this);
   }
 
-  get displayId() { return this.view.displayIdAt(this.slot); }
-  get parentDisplayId() { return this.view.parentDisplayIdAt(this.slot); }
-  get visualTypeId() { return this.view.visualTypeIdAt(this.slot); }
-  get flags() { return this.view.flagsAt(this.slot); }
+  get displayId() { return this.#view.displayIdAt(this.#slot); }
+  get parentDisplayId() { return this.#view.parentDisplayIdAt(this.#slot); }
+  get visualTypeId() { return this.#view.visualTypeIdAt(this.#slot); }
+  get flags() { return this.#view.flagsAt(this.#slot); }
   get isStatic() { return false; }
-  get localPosition() { return readBorrowedLocalTuple(this.view, this.slot, 'position'); }
-  get localRotationXyzw() { return readBorrowedLocalTuple(this.view, this.slot, 'rotation'); }
-  get localScale() { return readBorrowedLocalTuple(this.view, this.slot, 'scale'); }
-  get animationStateId() { return this.view.animationStateIdAt(this.slot); }
-  get animationStartTick() { return this.view.animationStartTickAt(this.slot); }
-  get animationFlags() { return this.view.animationFlagsAt(this.slot); }
-  get profile() { return borrowedPayloadAt(this.view, this.slot, 'profile'); }
-  get interaction() { return borrowedPayloadAt(this.view, this.slot, 'interaction'); }
+  get localPosition() { return readBorrowedLocalTuple(this.#view, this.#slot, 'position'); }
+  get localRotationXyzw() { return readBorrowedLocalTuple(this.#view, this.#slot, 'rotation'); }
+  get localScale() { return readBorrowedLocalTuple(this.#view, this.#slot, 'scale'); }
+  get animationStateId() { return this.#view.animationStateIdAt(this.#slot); }
+  get animationStartTick() { return this.#view.animationStartTickAt(this.#slot); }
+  get animationFlags() { return this.#view.animationFlagsAt(this.#slot); }
+  get profile() { return borrowedPayloadAt(this.#view, this.#slot, 'profile'); }
+  get interaction() { return borrowedPayloadAt(this.#view, this.#slot, 'interaction'); }
 }
 
 export function samplePresentationAnimation({
+  animationStateId = 0,
   animationStartTick,
   durationTicks,
   flags = 0,
   sourceTick,
 } = {}) {
+  const stateId = uint32(animationStateId, 'animationStateId');
+  const animationFlags = uint32(flags, 'animationFlags');
+  if (animationFlags & ~7) throw new SceneDisplayEngineError('animationFlags-invalid');
   const start = nonnegativeBigInt(animationStartTick, 'animationStartTick');
   const source = nonnegativeBigInt(sourceTick, 'sourceTick');
   const duration = positiveBigInt(durationTicks, 'durationTicks');
   if (source < start) throw new SceneDisplayEngineError('animation-before-start');
   const elapsed = source - start;
-  const sampled = flags & 1 ? elapsed % duration : (elapsed > duration ? duration : elapsed);
+  const sampled = animationFlags & 1
+    ? elapsed % duration
+    : (elapsed > duration ? duration : elapsed);
   return Object.freeze({
-    elapsedSeconds: Number(elapsed) / 60,
+    animationStateId: stateId,
     elapsedTicks: elapsed,
+    flags: animationFlags,
     phase: Number(sampled) / Number(duration),
     sourceTick: source,
   });
@@ -617,12 +629,11 @@ function buildInstalledState(bootstrap, limits, generation) {
       lastFrameSeq: 0n,
       lastSourceTick: null,
       lastProjectionId: null,
-      lastCorrelationSeq: 0n,
     }),
   };
 }
 
-function prepareFrameCandidate(previous, target, frame, correlationSeq, limits) {
+function prepareFrameCandidate(previous, target, frame, limits) {
   const header = normalizeFrameHeader(frame?.header);
   if (header.sceneEpoch !== previous.sceneEpoch || header.bootstrapId !== previous.bootstrapId) {
     throw new SceneDisplayEngineError('frame-bootstrap-identity-mismatch');
@@ -661,7 +672,6 @@ function prepareFrameCandidate(previous, target, frame, correlationSeq, limits) 
     lastFrameSeq: header.frameSeq,
     lastSourceTick: header.sourceTick,
     lastProjectionId: header.projectionId,
-    lastCorrelationSeq: correlationSeq,
   });
 }
 
@@ -804,7 +814,7 @@ function validateIdLifetime(oldStore, nextStore, initialMaxSeen) {
   return maxSeen;
 }
 
-function framePlan(previous, candidate, frame, correlationSeq) {
+function framePlan(previous, candidate) {
   const oldStore = previous.dynamicStore;
   const nextStore = candidate.dynamicStore;
   const creates = [];
@@ -867,23 +877,21 @@ function framePlan(previous, candidate, frame, correlationSeq) {
     profileStateDirtyIds: profile,
     animationDirtyIds: animation,
     interactionDirtyIds: interaction,
-    events: materializeEvents(frame),
     frameSeq: candidate.lastFrameSeq,
     sourceTick: candidate.lastSourceTick,
-    correlationSeq,
   });
 }
 
-function bootstrapPlan(state, kind, removeIds) {
+function bootstrapPlan(state) {
   const createIds = [];
   for (let slot = 0; slot < state.staticStore.count; slot += 1) {
     createIds.push(state.staticStore.displayIds[slot]);
   }
   return freezePlan({
-    kind,
+    kind: 'bootstrap',
     generation: state.generation,
     createIds,
-    removeIds,
+    removeIds: [],
     reparentIds: [],
     localPoseDirtyIds: [],
     visibilityDirtyIds: [],
@@ -891,23 +899,9 @@ function bootstrapPlan(state, kind, removeIds) {
     profileStateDirtyIds: [],
     animationDirtyIds: [],
     interactionDirtyIds: [],
-    events: [],
     frameSeq: null,
     sourceTick: null,
-    correlationSeq: 0n,
   });
-}
-
-function allIdsChildFirst(state) {
-  const values = [];
-  for (const store of [state.staticStore, state.dynamicStore]) {
-    for (let slot = 0; slot < store.count; slot += 1) {
-      values.push({ id: store.displayIds[slot], depth: store.depths[slot] });
-    }
-  }
-  values.sort((left, right) => right.depth - left.depth
-    || (left.id < right.id ? 1 : -1));
-  return values.map((value) => value.id);
 }
 
 function materializeEvents(frame) {
@@ -925,7 +919,10 @@ function materializeEvents(frame) {
       sourceDisplayId: nonnegativeBigInt(event.sourceDisplayId, 'sourceDisplayId'),
       targetDisplayId: nonnegativeBigInt(event.targetDisplayId, 'targetDisplayId'),
       startTick: nonnegativeBigInt(event.startTick, 'startTick'),
-      payload: borrowedBytes(event.payload),
+      // Event delivery may outlive the borrowed frame and consumers may keep
+      // or mutate the bytes. Own the exact view range for every normalized
+      // event so neither the source frame nor a sibling event can be changed.
+      payload: new Uint8Array(borrowedBytes(event.payload)),
     }));
   }
   return Object.freeze(events);
@@ -1151,7 +1148,7 @@ function freezePlan(value) {
   const result = { ...value };
   for (const field of ['createIds', 'removeIds', 'reparentIds', 'localPoseDirtyIds',
     'visibilityDirtyIds', 'visualReplaceIds', 'profileStateDirtyIds',
-    'animationDirtyIds', 'interactionDirtyIds', 'events']) {
+    'animationDirtyIds', 'interactionDirtyIds']) {
     result[field] = Object.freeze([...(value[field] ?? [])]);
   }
   return Object.freeze(result);
@@ -1205,13 +1202,53 @@ function normalizeFrameHeader(header) {
   });
 }
 
+function normalizeEngineOptions(value) {
+  requireOptionsRecord(value, 'scene-display-engine-options-invalid');
+  assertExactKeys(value, new Set(['captureHook', 'limits']), 'scene-display-engine-option-unknown');
+  const captureHook = value.captureHook ?? null;
+  if (captureHook !== null && typeof captureHook !== 'function') {
+    throw new SceneDisplayEngineError('capture-hook-invalid');
+  }
+  return Object.freeze({
+    captureHook,
+    limits: value.limits === undefined ? {} : value.limits,
+  });
+}
+
 function normalizeLimits(changes) {
+  requireOptionsRecord(changes, 'scene-tree-limits-invalid');
+  assertExactKeys(
+    changes,
+    new Set(['maximumFramesPerBatch', 'maximumNodes', 'maximumTreeDepth']),
+    'scene-tree-limit-unknown',
+  );
   const limits = { ...DEFAULT_SCENE_TREE_LIMITS, ...changes };
   for (const [field, value] of Object.entries(limits)) positiveInteger(value, field);
   if (limits.maximumTreeDepth > 0xffff) {
     throw new SceneDisplayEngineError('maximumTreeDepth-invalid');
   }
   return Object.freeze(limits);
+}
+
+function requireOptionsRecord(value, code) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new SceneDisplayEngineError(code);
+  }
+  let prototype;
+  try { prototype = Object.getPrototypeOf(value); } catch {
+    throw new SceneDisplayEngineError(code);
+  }
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new SceneDisplayEngineError(code);
+  }
+}
+
+function assertExactKeys(value, allowed, code) {
+  for (const key of Reflect.ownKeys(value)) {
+    if (typeof key !== 'string' || !allowed.has(key)) {
+      throw new SceneDisplayEngineError(code, `${code}: ${String(key)}`);
+    }
+  }
 }
 
 function validatePoseOut(out) {

@@ -1,13 +1,15 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import * as displayCore from '../src/index.js';
 import {
-  PresentationSceneTree,
-  SceneDisplayEngineCore,
+  SceneDisplayEngine,
   SceneDisplayEngineError,
+  samplePresentationAnimation,
 } from '../src/index.js';
 
 const encoder = new TextEncoder();
+const EMPTY_BYTES = new Uint8Array([0]);
 
 function node(displayId, parentDisplayId = 0n, changes = {}) {
   const visualTypeId = changes.visualTypeId ?? 1;
@@ -23,7 +25,11 @@ function node(displayId, parentDisplayId = 0n, changes = {}) {
     animationStartTick: BigInt(changes.animationStartTick ?? 0),
     animationFlags: changes.animationFlags ?? 0,
     profile: changes.profile === undefined
-      ? { typeId: visualTypeId === 1 ? 101 : 102, flags: 0, bytes: encoder.encode(`node:${displayId}`) }
+      ? {
+        typeId: visualTypeId === 1 ? 101 : 102,
+        flags: 0,
+        bytes: encoder.encode(`node:${displayId}`),
+      }
       : changes.profile,
     interaction: changes.interaction === undefined
       ? (visualTypeId === 1
@@ -43,7 +49,6 @@ function nodeView(nodes) {
     animationStateIdAt: (index) => nodes[index].animationStateId,
     animationStartTickAt: (index) => nodes[index].animationStartTick,
     animationFlagsAt: (index) => nodes[index].animationFlags,
-    readLocalPoseAt: undefined,
     readLocalPose(index, out) {
       out.localPosition.set(nodes[index].position);
       out.localRotationXyzw.set(nodes[index].rotation);
@@ -106,64 +111,301 @@ function frame(sequence, nodes, { events = [], sourceTick = sequence } = {}) {
 
 function event(id) {
   return {
-    eventId: BigInt(id), eventTypeId: 501, flags: 1,
-    sourceDisplayId: 3n, targetDisplayId: 0n, startTick: 1n,
+    eventId: BigInt(id),
+    eventTypeId: 501,
+    flags: 1,
+    sourceDisplayId: 3n,
+    targetDisplayId: 0n,
+    startTick: 1n,
     payload: encoder.encode(`event:${id}`),
   };
 }
 
-test('one dense tree owns static+dynamic parent/local state and metadata', () => {
-  const tree = new PresentationSceneTree();
-  const root = node(1, 0, { position: [10, 0, 0], interaction: {
-    typeId: 201, flags: 0, bytes: encoder.encode('root'),
-  } });
-  const child = node(2, 1, { position: [2, 0, 0] });
-  assert.deepEqual(tree.installBootstrap(bootstrap([root, child])).createIds, [1n, 2n]);
-  assert.equal(tree.currentView().sceneMetadataCount, 1);
-  assert.equal(new TextDecoder().decode(tree.currentView().getSceneMetadata(301).bytes), 'topology');
+function validateAndCommit(prepared) {
+  prepared.assertCommittable();
+  prepared.commitValidated();
+}
 
-  const prepared = tree.prepareFrame(
-    frame(1, [node(3, 2, { position: [1, 0, 0] })]),
-    { correlationSeq: 1n },
-  );
-  assert.deepEqual(prepared.plan.createIds, [3n]);
-  assert.equal(tree.getNode(3n), null);
-  assert.equal(prepared.commit(), true);
-  const result = { position: new Float64Array(3), rotationXyzw: new Float64Array(4), scale: new Float64Array(3) };
-  assert.equal(tree.getWorldPose(3n, result), true);
-  assert.deepEqual([...result.position], [13, 0, 0]);
-  assert.equal(tree.getNode(3n).parentDisplayId, 2n);
-  assert.equal(new TextDecoder().decode(tree.getInteraction(1n).bytes), 'root');
-  tree.reset(bootstrap([], 100, {
-    typeId: 302, flags: 0, bytes: encoder.encode('reset-metadata'),
-  }));
-  assert.equal(tree.currentView().generation, 2);
-  assert.equal(tree.currentView().getSceneMetadata(301), null);
-  assert.equal(new TextDecoder().decode(tree.getSceneMetadata(302).bytes), 'reset-metadata');
+test('display-core exposes one public Engine facade and no reset or single-frame API', () => {
+  assert.deepEqual(Object.keys(displayCore).sort(), [
+    'DEFAULT_SCENE_TREE_LIMITS',
+    'SceneDisplayEngine',
+    'SceneDisplayEngineError',
+    'samplePresentationAnimation',
+  ]);
+  assert.equal('prepareFrame' in SceneDisplayEngine.prototype, false);
+  assert.equal('reset' in SceneDisplayEngine.prototype, false);
+  assert.equal(typeof SceneDisplayEngine.prototype.schedulePostCommitCapture, 'function');
+  assert.equal('PresentationSceneTree' in displayCore, false);
+  assert.equal('SceneDisplayEngineCore' in displayCore, false);
 });
 
-test('prepare freezes a compact plan and commit is the only live pointer swap', () => {
-  const tree = new PresentationSceneTree();
-  tree.installBootstrap(bootstrap());
-  const prepared = tree.prepareFrame(frame(1, [node(1)]), { correlationSeq: 1n });
-  assert.equal(Object.isFrozen(prepared.plan), true);
-  assert.equal(Object.isFrozen(prepared.plan.createIds), true);
-  assert.equal(tree.currentView().dynamicNodeCount, 0);
-  assert.equal(prepared.view.dynamicNodeCount, 1);
-  assert.equal(prepared.commit(), true);
-  assert.equal(tree.currentView().dynamicNodeCount, 1);
-  assert.equal(prepared.commit(), false);
+test('Engine options and tree limit names fail closed', () => {
+  assert.throws(
+    () => new SceneDisplayEngine({ unsupported: true }),
+    (error) => error.code === 'scene-display-engine-option-unknown',
+  );
+  assert.throws(
+    () => new SceneDisplayEngine(new Date()),
+    (error) => error.code === 'scene-display-engine-options-invalid',
+  );
+  assert.throws(
+    () => new SceneDisplayEngine({ captureHook: 'not-a-function' }),
+    (error) => error.code === 'capture-hook-invalid',
+  );
+  assert.throws(
+    () => new SceneDisplayEngine({ limits: null }),
+    (error) => error.code === 'scene-tree-limits-invalid',
+  );
+  assert.throws(
+    () => new SceneDisplayEngine({ limits: new Map() }),
+    (error) => error.code === 'scene-tree-limits-invalid',
+  );
+  assert.throws(
+    () => new SceneDisplayEngine({ limits: { maximumFramesPerCorrelation: 1 } }),
+    (error) => error.code === 'scene-tree-limit-unknown',
+  );
+  assert.throws(
+    () => new SceneDisplayEngine({ limits: { maximumFramesPerBatc: 1 } }),
+    (error) => error.code === 'scene-tree-limit-unknown',
+  );
+  assert.throws(
+    () => new SceneDisplayEngine({ limits: { [Symbol('unknown')]: 1 } }),
+    (error) => error.code === 'scene-tree-limit-unknown',
+  );
 
-  const aborted = tree.prepareFrame(frame(2, []), { correlationSeq: 2n });
+  const nullPrototypeLimits = Object.assign(Object.create(null), {
+    maximumFramesPerBatch: 1,
+  });
+  const nullPrototypeOptions = Object.assign(Object.create(null), {
+    limits: nullPrototypeLimits,
+  });
+  const engine = new SceneDisplayEngine(nullPrototypeOptions);
+  engine.installBootstrap(bootstrap());
+  assert.throws(
+    () => engine.prepareFrames([frame(1, []), frame(2, [])]),
+    (error) => error.code === 'frame-batch-limit-exceeded',
+  );
+});
+
+test('capture observers run only in protected post-barrier microtasks', async () => {
+  const observed = [];
+  let jointOwner = 'before-bootstrap';
+  let hookCalls = 0;
+  const engine = new SceneDisplayEngine({
+    captureHook(capture) {
+      hookCalls += 1;
+      observed.push(Object.freeze({
+        frameSeq: capture.lastFrameSeq,
+        jointOwner,
+      }));
+      if (hookCalls === 1) throw new Error('capture observer failed');
+    },
+  });
+
+  engine.installBootstrap(bootstrap());
+  engine.schedulePostCommitCapture();
+  assert.equal(hookCalls, 0);
+  await Promise.resolve();
+  assert.deepEqual(observed, [{ frameSeq: 0n, jointOwner: 'before-bootstrap' }]);
+
+  const prepared = engine.prepareFrames([frame(1, [node(1)])]);
+  prepared.assertCommittable();
+  prepared.commitValidated();
+  assert.equal(hookCalls, 1, 'commitValidated must not enqueue or invoke capture hooks');
+  await Promise.resolve();
+  assert.equal(hookCalls, 1);
+
+  jointOwner = 'jointly-committed';
+  engine.schedulePostCommitCapture();
+  engine.schedulePostCommitCapture();
+  assert.equal(hookCalls, 1);
+  await Promise.resolve();
+  assert.deepEqual(observed.at(-1), {
+    frameSeq: 1n,
+    jointOwner: 'jointly-committed',
+  });
+  assert.equal(hookCalls, 2, 'post-commit capture requests coalesce');
+
+  engine.schedulePostCommitCapture();
+  engine.dispose();
+  await Promise.resolve();
+  assert.equal(hookCalls, 2, 'dispose invalidates a queued capture observer');
+});
+
+test('one internal dense tree owns static and dynamic state through the facade', () => {
+  const engine = new SceneDisplayEngine();
+  const root = node(1, 0, {
+    position: [10, 0, 0],
+    interaction: { typeId: 201, flags: 0, bytes: encoder.encode('root') },
+  });
+  const child = node(2, 1, { position: [2, 0, 0] });
+  assert.deepEqual(engine.installBootstrap(bootstrap([root, child])).createIds, [1n, 2n]);
+  assert.equal(engine.currentView().sceneMetadataCount, 1);
+  assert.equal(
+    new TextDecoder().decode(engine.currentView().getSceneMetadata(301).bytes),
+    'topology',
+  );
+
+  const prepared = engine.prepareFrames([
+    frame(1, [node(3, 2, { position: [1, 0, 0] })], { events: [event(1)] }),
+  ]);
+  assert.deepEqual(prepared.steps[0].plan.createIds, [3n]);
+  assert.equal('events' in prepared.steps[0].plan, false);
+  assert.equal(prepared.steps[0].events[0].eventId, 1n);
+  assert.equal(engine.getNode(3n), null);
+  validateAndCommit(prepared);
+
+  const result = {
+    position: new Float64Array(3),
+    rotationXyzw: new Float64Array(4),
+    scale: new Float64Array(3),
+  };
+  assert.equal(engine.getWorldPose(3n, result), true);
+  assert.deepEqual([...result.position], [13, 0, 0]);
+  assert.equal(engine.getNode(3n).parentDisplayId, 2n);
+  assert.equal(new TextDecoder().decode(engine.getInteraction(1n).bytes), 'root');
+});
+
+test('prepared batch requires validation, commits once, and aborts without mutation', () => {
+  const engine = new SceneDisplayEngine();
+  engine.installBootstrap(bootstrap());
+  const prepared = engine.prepareFrames([frame(1, [node(1)])]);
+  assert.equal(Object.isFrozen(prepared.steps), true);
+  assert.equal(Object.isFrozen(prepared.steps[0].plan), true);
+  assert.equal(engine.currentView().dynamicNodeCount, 0);
+  assert.equal(prepared.steps[0].view.dynamicNodeCount, 1);
+  assert.throws(
+    () => prepared.commitValidated(),
+    (error) => error.code === 'frame-batch-token-not-validated',
+  );
+  prepared.assertCommittable();
+  assert.throws(
+    () => prepared.assertCommittable(),
+    (error) => error.code === 'frame-batch-token-not-prepared',
+  );
+  prepared.commitValidated();
+  assert.equal(engine.currentView().dynamicNodeCount, 1);
+  assert.throws(
+    () => prepared.commitValidated(),
+    (error) => error.code === 'frame-batch-token-not-validated',
+  );
+  assert.throws(
+    () => prepared.abort(),
+    (error) => error.code === 'frame-batch-token-settled',
+  );
+
+  const aborted = engine.prepareFrames([frame(2, [])]);
   aborted.abort();
-  assert.equal(tree.currentView().dynamicNodeCount, 1);
+  aborted.abort();
+  assert.equal(engine.currentView().dynamicNodeCount, 1);
+  assert.equal(engine.capture().lastFrameSeq, 1n);
+});
+
+test('assertCommittable fails closed after disposal', () => {
+  const engine = new SceneDisplayEngine();
+  engine.installBootstrap(bootstrap());
+  const prepared = engine.prepareFrames([frame(1, [node(1)])]);
+  engine.dispose();
+  assert.throws(
+    () => prepared.assertCommittable(),
+    (error) => error instanceof SceneDisplayEngineError && error.code === 'scene-tree-disposed',
+  );
+  prepared.abort();
+});
+
+test('frame batches are non-empty, bounded, ordered, and keep events outside plans', () => {
+  const engine = new SceneDisplayEngine({ limits: { maximumFramesPerBatch: 4 } });
+  engine.installBootstrap(bootstrap());
+  assert.throws(() => engine.prepareFrames([]), (error) => error.code === 'frame-batch-empty');
+  assert.throws(
+    () => engine.prepareFrames([
+      frame(1, []), frame(2, []), frame(3, []), frame(4, []), frame(5, []),
+    ]),
+    (error) => error.code === 'frame-batch-limit-exceeded',
+  );
+
+  const prepared = engine.prepareFrames([
+    frame(1, [node(1)], { events: [event(1)] }),
+    frame(2, [], { events: [event(2)] }),
+    frame(3, [node(2)], { events: [event(3)] }),
+    frame(4, [], { events: [event(4)] }),
+  ]);
+  assert.deepEqual(prepared.steps.map(({ events }) => events[0].eventId), [1n, 2n, 3n, 4n]);
+  assert.equal(prepared.steps.every(({ plan }) => !('events' in plan)), true);
+  assert.deepEqual(prepared.steps[0].plan.createIds, [1n]);
+  assert.deepEqual(prepared.steps[1].plan.removeIds, [1n]);
+  assert.equal(prepared.steps[0].view.getNode(1n).displayId, 1n);
+  assert.equal(prepared.steps[1].view.getNode(1n), null);
+  assert.equal(prepared.steps[2].view.getNode(2n).displayId, 2n);
+  assert.equal(prepared.steps[3].view.getNode(2n), null);
+  validateAndCommit(prepared);
+  const capture = engine.capture();
+  assert.equal(capture.lastFrameSeq, 4n);
+  assert.equal(capture.metrics.committedFrames, 4);
+  assert.equal(capture.metrics.committedFrameBatches, 1);
+  assert.equal('lastCorrelationSeq' in capture, false);
+  assert.equal('committedCorrelations' in capture.metrics, false);
+  assert.equal('resets' in capture.metrics, false);
+});
+
+test('normalized event payloads own independent minimal byte copies', () => {
+  const engine = new SceneDisplayEngine();
+  engine.installBootstrap(bootstrap());
+  const backing = new Uint8Array([99, 10, 20, 30, 88]);
+  const borrowedPayload = backing.subarray(1, 4);
+  const shared = { ...event(1), payload: borrowedPayload };
+  const prepared = engine.prepareFrames([
+    frame(1, [], { events: [shared, { ...shared, eventId: 2n }] }),
+  ]);
+  const normalized = prepared.steps[0].events;
+
+  assert.equal(Object.isFrozen(normalized), true);
+  assert.equal(normalized.every((value) => Object.isFrozen(value)), true);
+  assert.notStrictEqual(normalized[0].payload, borrowedPayload);
+  assert.notStrictEqual(normalized[0].payload, normalized[1].payload);
+  assert.equal(normalized[0].payload.byteOffset, 0);
+  assert.equal(normalized[0].payload.buffer.byteLength, borrowedPayload.byteLength);
+  assert.deepEqual([...normalized[0].payload], [10, 20, 30]);
+  assert.deepEqual([...normalized[1].payload], [10, 20, 30]);
+
+  backing[2] = 200;
+  normalized[0].payload[0] = 40;
+  assert.deepEqual([...borrowedPayload], [10, 200, 30]);
+  assert.deepEqual([...normalized[0].payload], [40, 20, 30]);
+  assert.deepEqual([...normalized[1].payload], [10, 20, 30]);
+  prepared.abort();
+});
+
+test('retained event bytes stay isolated across asynchronous delivery and later events', async () => {
+  const engine = new SceneDisplayEngine();
+  engine.installBootstrap(bootstrap());
+  const borrowedPayload = new Uint8Array([7, 8, 9]);
+  const first = engine.prepareFrames([
+    frame(1, [], { events: [{ ...event(1), payload: borrowedPayload }] }),
+  ]);
+  const retained = first.steps[0].events[0].payload;
+  validateAndCommit(first);
+
+  retained[0] = 70;
+  assert.deepEqual([...borrowedPayload], [7, 8, 9]);
+  const second = engine.prepareFrames([
+    frame(2, [], { events: [{ ...event(2), payload: borrowedPayload }] }),
+  ]);
+  const later = second.steps[0].events[0].payload;
+  borrowedPayload.fill(0);
+  await Promise.resolve();
+
+  assert.deepEqual([...retained], [70, 8, 9]);
+  assert.deepEqual([...later], [7, 8, 9]);
+  second.abort();
 });
 
 test('linear merge emits changes and scalar max-seen rejects reappearance', () => {
-  const tree = new PresentationSceneTree();
-  tree.installBootstrap(bootstrap([node(1), node(2, 1)]));
-  tree.prepareFrame(frame(1, [node(3, 2), node(4, 0)]), { correlationSeq: 1n }).commit();
-  const changed = tree.prepareFrame(frame(2, [node(4, 2, {
+  const engine = new SceneDisplayEngine();
+  engine.installBootstrap(bootstrap([node(1), node(2, 1)]));
+  validateAndCommit(engine.prepareFrames([frame(1, [node(3, 2), node(4, 0)])]));
+  const changed = engine.prepareFrames([frame(2, [node(4, 2, {
     position: [4, 0, 0],
     flags: 0,
     visualTypeId: 2,
@@ -171,138 +413,86 @@ test('linear merge emits changes and scalar max-seen rejects reappearance', () =
     animationStateId: 1,
     animationStartTick: 2,
     animationFlags: 1,
-  })]), { correlationSeq: 2n });
-  assert.deepEqual(changed.plan.removeIds, [3n]);
-  assert.deepEqual(changed.plan.reparentIds, [4n]);
-  assert.deepEqual(changed.plan.localPoseDirtyIds, [4n]);
-  assert.deepEqual(changed.plan.visibilityDirtyIds, [4n]);
-  assert.deepEqual(changed.plan.visualReplaceIds, [4n]);
-  assert.deepEqual(changed.plan.profileStateDirtyIds, [4n]);
-  assert.deepEqual(changed.plan.animationDirtyIds, [4n]);
-  changed.commit();
+  })])]);
+  const { plan } = changed.steps[0];
+  assert.deepEqual(plan.removeIds, [3n]);
+  assert.deepEqual(plan.reparentIds, [4n]);
+  assert.deepEqual(plan.localPoseDirtyIds, [4n]);
+  assert.deepEqual(plan.visibilityDirtyIds, [4n]);
+  assert.deepEqual(plan.visualReplaceIds, [4n]);
+  assert.deepEqual(plan.profileStateDirtyIds, [4n]);
+  assert.deepEqual(plan.animationDirtyIds, [4n]);
+  validateAndCommit(changed);
   assert.throws(
-    () => tree.prepareFrame(frame(3, [node(3, 2), node(4, 2, {
-      visualTypeId: 2,
-      profile: { typeId: 102, flags: 0, bytes: encoder.encode('changed') },
-    })]), { correlationSeq: 3n }),
+    () => engine.prepareFrames([frame(3, [
+      node(3, 2),
+      node(4, 2, {
+        visualTypeId: 2,
+        profile: { typeId: 102, flags: 0, bytes: encoder.encode('changed') },
+      }),
+    ])]),
     (error) => error instanceof SceneDisplayEngineError && error.code === 'display-id-reused',
   );
 });
 
-test('tree rejects dangling parents, cycles/order, excessive depth, and invalid local pose', () => {
+test('facade rejects dangling parents, cycles/order, excessive depth, and invalid payloads', () => {
   assert.throws(
-    () => new PresentationSceneTree().installBootstrap(bootstrap([node(2, 1)])),
+    () => new SceneDisplayEngine().installBootstrap(bootstrap([node(2, 1)])),
     (error) => error.code === 'dangling-parent',
   );
   assert.throws(
-    () => new PresentationSceneTree().installBootstrap(bootstrap([node(1, 2), node(2, 1)])),
+    () => new SceneDisplayEngine().installBootstrap(bootstrap([node(1, 2), node(2, 1)])),
     (error) => error.code === 'node-order-or-parent-invalid',
   );
   assert.throws(
-    () => new PresentationSceneTree({ limits: { maximumTreeDepth: 2 } })
+    () => new SceneDisplayEngine({ limits: { maximumTreeDepth: 2 } })
       .installBootstrap(bootstrap([node(1), node(2, 1), node(3, 2)])),
     (error) => error.code === 'tree-depth-exceeded',
   );
   assert.throws(
-    () => new PresentationSceneTree().installBootstrap(bootstrap([
+    () => new SceneDisplayEngine().installBootstrap(bootstrap([
       node(1, 0, { scale: [1, 0, 1] }),
     ])),
     (error) => error.code === 'node-scale-invalid',
   );
-});
-
-test('tree treats absent payload as type zero against the visual registry', () => {
   assert.throws(
-    () => new PresentationSceneTree().installBootstrap(bootstrap([
-      node(1, 0, { profile: null }),
-    ])),
+    () => new SceneDisplayEngine().installBootstrap(bootstrap([node(1, 0, { profile: null })])),
     (error) => error.code === 'profile-type-mismatch',
   );
+  const engine = new SceneDisplayEngine();
+  engine.installBootstrap(bootstrap());
   assert.throws(
-    () => new PresentationSceneTree().installBootstrap(bootstrap([
-      node(1, 0, { interaction: null }),
-    ])),
-    (error) => error.code === 'interaction-type-mismatch',
-  );
-
-  const tree = new PresentationSceneTree();
-  tree.installBootstrap(bootstrap());
-  assert.throws(
-    () => tree.prepareFrame(
-      frame(1, [node(1, 0, { profile: null })]),
-      { correlationSeq: 1n },
-    ),
-    (error) => error.code === 'profile-type-mismatch',
-  );
-  assert.throws(
-    () => tree.prepareFrame(
-      frame(1, [node(1, 0, { interaction: null })]),
-      { correlationSeq: 1n },
-    ),
+    () => engine.prepareFrames([frame(1, [node(1, 0, { interaction: null })])]),
     (error) => error.code === 'interaction-type-mismatch',
   );
 });
 
-test('correlation batch preserves transient lifecycle/events and commits once', () => {
-  const engine = new SceneDisplayEngineCore({ limits: { maximumFramesPerCorrelation: 4 } });
-  engine.installBootstrap(bootstrap());
-  const prepared = engine.prepareFrames([
-    frame(1, [node(1)], { events: [event(1)] }),
-    frame(2, [], { events: [event(2)] }),
-    frame(3, [node(2)], { events: [event(3)] }),
-    frame(4, [], { events: [event(4)] }),
-  ], { correlationSeq: 1n });
-  assert.equal(prepared.steps.length, 4);
-  assert.deepEqual(prepared.steps[0].plan.createIds, [1n]);
-  assert.deepEqual(prepared.steps[1].plan.removeIds, [1n]);
-  assert.equal(prepared.steps[0].view.getNode(1n).displayId, 1n);
-  assert.equal(prepared.steps[1].view.getNode(1n), null);
-  assert.equal(prepared.steps[2].view.getNode(2n).displayId, 2n);
-  assert.equal(prepared.steps[3].view.getNode(2n), null);
-  assert.equal(prepared.steps[0].plan.events[0].eventId, 1n);
-  assert.equal(prepared.steps[1].plan.events[0].eventId, 2n);
-  assert.equal(engine.capture().dynamicNodeCount, 0);
-  assert.equal(prepared.commit(), true);
-  assert.equal(engine.capture().dynamicNodeCount, 0);
-  assert.equal(engine.capture().metrics.committedFrames, 4);
-  assert.equal(engine.capture().metrics.committedCorrelations, 1);
-});
-
-test('capture observers run after the synchronous commit barrier and stay isolated', async () => {
-  const captures = [];
-  const engine = new SceneDisplayEngineCore({
-    captureHook(value) {
-      captures.push(value);
-      throw new Error('diagnostic observer failed');
-    },
+test('animation sampling is tick-based and contains no seconds conversion', () => {
+  const sampled = samplePresentationAnimation({
+    animationStateId: 7,
+    animationStartTick: 60n,
+    durationTicks: 120n,
+    flags: 1,
+    sourceTick: 150n,
   });
-  engine.installBootstrap(bootstrap());
-  const prepared = engine.prepareFrame(frame(1, [node(1)]), {
-    correlationSeq: 1n,
+  assert.deepEqual(sampled, {
+    animationStateId: 7,
+    elapsedTicks: 90n,
+    flags: 1,
+    phase: 0.75,
+    sourceTick: 150n,
   });
-  assert.equal(prepared.commit(), true);
-  assert.deepEqual(captures, []);
-  assert.equal(engine.currentView().getNode(1n).displayId, 1n);
-  await Promise.resolve();
-  assert.equal(captures.length, 1);
-  assert.equal(captures[0].dynamicNodeCount, 1);
+  assert.equal('elapsedSeconds' in sampled, false);
 });
 
 test('5000 nodes across 60 frames stay in a bounded dense typed-store pool', () => {
   const count = 5000;
-  const engine = new SceneDisplayEngineCore({
-    limits: { maximumNodes: count, maximumFramesPerCorrelation: 8 },
+  const engine = new SceneDisplayEngine({
+    limits: { maximumNodes: count, maximumFramesPerBatch: 8 },
   });
   engine.installBootstrap(bootstrap([], count));
-  const pool = engine.tree.dynamicPool;
-  assert.equal(pool.length, 3);
-  assert.equal(pool.every((store) => store.displayIds instanceof BigUint64Array), true);
-  assert.equal(pool.every((store) => store.localPositions instanceof Float32Array), true);
-  assert.equal(pool.every((store) => store.worldPositions instanceof Float64Array), true);
-
   for (let sequence = 1; sequence <= 60; sequence += 1) {
-    const synthetic = syntheticFrame(sequence, count);
-    assert.equal(engine.prepareFrame(synthetic, { correlationSeq: BigInt(sequence) }).commit(), true);
+    validateAndCommit(engine.prepareFrames([syntheticFrame(sequence, count)]));
   }
   const capture = engine.capture();
   assert.equal(capture.dynamicNodeCount, count);
@@ -311,7 +501,8 @@ test('5000 nodes across 60 frames stay in a bounded dense typed-store pool', () 
   assert.equal(capture.dynamicStoreCapacity, count);
   assert.equal(capture.residentNodeObjectCount, 0);
   assert.equal(capture.residentPoseObjectCount, 0);
-  assert.deepEqual(engine.tree.dynamicPool, pool);
+  assert.equal(capture.metrics.committedFrames, 60);
+  assert.equal(capture.metrics.committedFrameBatches, 60);
 });
 
 function syntheticFrame(sequence, count) {
@@ -340,13 +531,13 @@ function syntheticFrame(sequence, count) {
       out.localScale.set([1, 1, 1]);
       return out;
     },
-    readProfileStateAt(index, out) {
+    readProfileStateAt(_index, out) {
       out.typeId = 101;
       out.flags = 0;
       out.bytes = EMPTY_BYTES;
       return true;
     },
-    readInteractionAt(index, out) {
+    readInteractionAt(_index, out) {
       out.typeId = 201;
       out.flags = 0;
       out.bytes = EMPTY_BYTES;
@@ -356,5 +547,3 @@ function syntheticFrame(sequence, count) {
     eventAt() { throw new Error('unreachable'); },
   };
 }
-
-const EMPTY_BYTES = new Uint8Array([0]);

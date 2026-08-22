@@ -10,7 +10,7 @@ python-game immediate v5 input facade
        -> byte-identical v5 authority/raw record admission
        -> MW exporter emits one complete frame/correlation per committed tick
        -> OrderedPresentationSession applies ready/credit/ACK/reset
-       -> PresentationArchiveWriter appends exact Bootstrap/frame/correlation bytes
+       -> Python PresentationArchiveWriter appends exact Bootstrap/frame/correlation bytes
 ```
 
 业务 tick、projection、wire/raw record 与 presentation 只处理一次。Archive 在 raw tape 最终 SHA 可用后
@@ -22,13 +22,15 @@ seal manifest；每次 new epoch 使用新 checkpoint/segment，不能跨 presen
 V3 Bootstrap + MW visual profile
   -> static scene install
   -> correlation joins ordered complete frames
-  -> SceneDisplayEngineCore prepare
-  -> business store + renderer commit barrier
+  -> SceneDisplayEngine prepareFrames(non-empty batch)
+  -> business/tree assert + no-fail pointer-swap barrier
   -> ThreePresentationBackend + Arts FeatureOwner factories
 ```
 
-prepare 期间不得修改 live tree；业务与 renderer commit 同属原子 barrier。binary lane 是动态 render handle
-唯一写入者，v5 lane 只更新 business projection。资源与 FeatureOwner 归 Arts，通用 lifecycle 归 Engine。
+prepare 期间不得修改 live tree；business/tree/joint cursor 在同步 barrier 中共同推进，renderer 是 barrier 后
+可从 Engine current view 重建的派生层。presentation events 位于 prepared step 顶层并由产品 coordinator 在
+逻辑 commit 后 exactly-once 分发，不由 Three backend 发布。binary lane 是动态 render handle 唯一写入者，
+v5 lane 只更新 business projection。资源与 FeatureOwner 归 Arts，通用 lifecycle 归 Engine。
 
 ## Replay
 

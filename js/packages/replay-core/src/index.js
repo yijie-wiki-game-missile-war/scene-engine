@@ -312,6 +312,7 @@ export class CompositeReplaySession {
     this.authorityReady = false;
     this.presentationSession = null;
     this.authorityRecordIndex = null;
+    this.authorityEndRecordIndex = null;
     this.presentationIterator = null;
     this.baselineAuthorityOutbound = null;
     this.baselinePresentationPending = false;
@@ -393,8 +394,17 @@ export class CompositeReplaySession {
     }
     while (output.length < this.maximumTransmissionsPerPump) {
       if (!this.pendingJoined) {
+        if (this.authorityRecordIndex === this.authorityEndRecordIndex) {
+          this.exhausted = true;
+          break;
+        }
+        if (this.authorityRecordIndex > this.authorityEndRecordIndex) {
+          throw new ReplayCoreError('authority checkpoint range was exceeded');
+        }
         const authority = await this.authorityLane.readRecord(this.authorityRecordIndex);
-        if (authority == null) { this.exhausted = true; break; }
+        if (authority == null) {
+          throw new ReplayCoreError('authority lane ended before checkpoint boundary');
+        }
         const joined = await this.readPresentationJoin(authority);
         const tick = this.authorityLane.tickOf(authority);
         this.pendingJoined = {
@@ -532,6 +542,7 @@ export class CompositeReplaySession {
     this.opened = false;
     this.pendingJoined = null;
     this.presentationIterator = null;
+    this.authorityEndRecordIndex = null;
     this.baselineAuthorityOutbound = null;
     this.baselinePresentationPending = false;
     if (typeof this.authorityLane.close === 'function') await this.authorityLane.close(reason);
@@ -543,7 +554,9 @@ export class CompositeReplaySession {
       this.presentationArchive.openCheckpoint(checkpointId),
     ]);
     if (!authorityOpened || !authorityOpened.baseline
-        || typeof authorityOpened.nextRecordIndex !== 'bigint') {
+        || typeof authorityOpened.nextRecordIndex !== 'bigint'
+        || typeof authorityOpened.endRecordIndexExclusive !== 'bigint'
+        || authorityOpened.endRecordIndexExclusive < authorityOpened.nextRecordIndex) {
       throw new ReplayCoreError('authority checkpoint port returned invalid state');
     }
     const baselineCursor = normalizeCursor(authorityOpened.baseline.cursor);
@@ -560,6 +573,7 @@ export class CompositeReplaySession {
     this.authorityReady = false;
     this.baselineCursor = baselineCursor;
     this.authorityRecordIndex = authorityOpened.nextRecordIndex;
+    this.authorityEndRecordIndex = authorityOpened.endRecordIndexExclusive;
     const baselineAuthorityTransmissions = authorityTransmissions(
       this.authorityLane,
       authorityOpened.baseline,
@@ -666,6 +680,7 @@ export class CompositeReplaySession {
     this.authorityReady = false;
     this.pendingJoined = null;
     this.presentationIterator = null;
+    this.authorityEndRecordIndex = null;
     this.baselineAuthorityOutbound = null;
   }
 

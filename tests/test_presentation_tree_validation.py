@@ -4,13 +4,13 @@ import math
 
 import pytest
 
-from scene_engine import (
-    PresentationIdAllocator,
+from scene_engine.errors import PresentationTreeError
+from scene_engine.presentation_frame import (
     PresentationNodeV3,
-    PresentationTreeError,
     validate_presentation_frame_tree,
-    validate_presentation_node_tree,
 )
+from scene_engine.presentation_identity import PresentationIdAllocator
+from scene_engine.scene_bootstrap import validate_presentation_node_tree
 
 
 def node(

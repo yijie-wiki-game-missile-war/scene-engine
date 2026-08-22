@@ -78,7 +78,7 @@ def _writer(
         source_authority_sha256=source_authority_sha256,
         authority_cursor_codec_identity="test-authority-cursor@1",
         exporter_identity="test-exporter@1",
-        scene_engine_identity="scene-engine@0.3.0",
+        scene_engine_identity="scene-engine@0.4.0",
         visual_manifest_identity="visual@test",
         resource_manifest_identity="resource@test",
         limits=limits,
@@ -184,7 +184,7 @@ def test_python_streaming_writer_emits_node_compatible_archive_v3(tmp_path: Path
         source_authority_sha256="1" * 64,
         authority_cursor_codec_identity="test-authority-cursor@1",
         exporter_identity="test-exporter@1",
-        scene_engine_identity="scene-engine@0.3.0",
+        scene_engine_identity="scene-engine@0.4.0",
         visual_manifest_identity="visual@test",
         resource_manifest_identity="resource@test",
     )
@@ -272,7 +272,7 @@ def test_python_streaming_writer_can_bind_source_hash_at_seal(tmp_path: Path) ->
         source_authority_sha256=None,
         authority_cursor_codec_identity="test-authority-cursor@1",
         exporter_identity="test-exporter@1",
-        scene_engine_identity="scene-engine@0.3.0",
+        scene_engine_identity="scene-engine@0.4.0",
         visual_manifest_identity="visual@test",
         resource_manifest_identity="resource@test",
     )
@@ -313,7 +313,7 @@ def test_python_writer_caps_uncorrelated_frame_window_at_eight(tmp_path: Path) -
         source_authority_sha256="1" * 64,
         authority_cursor_codec_identity="test-authority-cursor@1",
         exporter_identity="test-exporter@1",
-        scene_engine_identity="scene-engine@0.3.0",
+        scene_engine_identity="scene-engine@0.4.0",
         visual_manifest_identity="visual@test",
         resource_manifest_identity="resource@test",
     )

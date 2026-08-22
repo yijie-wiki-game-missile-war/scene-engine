@@ -17,10 +17,6 @@ class RuntimeBusyError(SceneEngineError, RuntimeError):
     """A caller attempted to enter pump while another pump was active."""
 
 
-class CommandQueueFullError(SceneEngineError, RuntimeError):
-    """The bounded command queue cannot accept another intent."""
-
-
 class SimulationFatalError(SceneEngineError, RuntimeError):
     """Gameplay raised from a tick and the runtime became permanently fatal."""
 

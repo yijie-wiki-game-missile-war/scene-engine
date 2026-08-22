@@ -11,12 +11,11 @@ import math
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Protocol, Tuple
+from typing import Any, Optional, Protocol
 
 from .clock import MonotonicClock, SystemMonotonicClock
 from .errors import (
     AuthorityCommitFatalError,
-    CommandQueueFullError,
     ConfigurationError,
     PresentationExportError,
     RuntimeBusyError,
@@ -44,7 +43,6 @@ class RuntimeConfig:
     maximum_ticks_per_pump: int = 120
     maximum_frame_nodes: int = 10_000
     maximum_frame_bytes: int = 8 * 1024 * 1024
-    maximum_pending_commands: int = 1_024
     strict_authority_presentation: bool = False
 
     def __post_init__(self) -> None:
@@ -54,7 +52,6 @@ class RuntimeConfig:
             "maximum_ticks_per_pump",
             "maximum_frame_nodes",
             "maximum_frame_bytes",
-            "maximum_pending_commands",
         ):
             _require_positive_int(name, getattr(self, name))
         if self.display_frames_per_second > self.ticks_per_second:
@@ -79,7 +76,6 @@ class AuthorityCommitRequest:
 
     simulation: GameSimulation
     context: TickContext
-    commands: Tuple[Any, ...]
 
 
 class AuthorityCommitCallback(Protocol):
@@ -148,7 +144,6 @@ class RuntimeHealth:
     consecutive_display_export_failures: int
     last_successful_frame_seq: int
     presentation_epoch_valid: bool
-    pending_commands: int
     fatal_tick: Optional[Tick]
     fatal_cause: Optional[BaseException]
     last_display_export_error: Optional[BaseException]
@@ -237,8 +232,6 @@ class SceneEngineRuntime:
 
         self._status = _RUNNING
         self._active_tick: Optional[Tick] = None
-        self._commands: Dict[Tick, List[Any]] = {}
-        self._pending_command_count = 0
         self._ticks_attempted = 0
         self._ticks_committed = 0
         self._authority_commits_attempted = 0
@@ -309,42 +302,11 @@ class SceneEngineRuntime:
                 ),
                 last_successful_frame_seq=self._last_successful_frame_seq,
                 presentation_epoch_valid=self._presentation_epoch_valid,
-                pending_commands=self._pending_command_count,
                 fatal_tick=self._fatal_tick,
                 fatal_cause=self._fatal_cause,
                 last_display_export_error=self._last_display_export_error,
                 last_authority_commit_error=self._last_authority_commit_error,
             )
-
-    def enqueue_command(self, command: object) -> Tick:
-        """Assign ``command`` to the next not-yet-started tick boundary.
-
-        The returned effective tick makes the assignment explicit to the
-        caller.  The per-tick list is converted to a tuple before gameplay is
-        invoked, so commands arriving during a step can only join the following
-        tick.
-        """
-
-        with self._state_lock:
-            self._require_running()
-            if self._config.strict_authority_presentation:
-                raise ConfigurationError(
-                    "strict_authority_presentation accepts commands through the authority facade"
-                )
-            if (
-                self._pending_command_count
-                >= self._config.maximum_pending_commands
-            ):
-                raise CommandQueueFullError(
-                    "maximum_pending_commands has been reached"
-                )
-            if self._active_tick is None:
-                effective_tick = self._current_tick + 1
-            else:
-                effective_tick = self._active_tick + 1
-            self._commands.setdefault(effective_tick, []).append(command)
-            self._pending_command_count += 1
-            return effective_tick
 
     def pump(self) -> PumpResult:
         """Run overdue ticks in order, bounded by ``maximum_ticks_per_pump``."""
@@ -387,8 +349,6 @@ class SceneEngineRuntime:
                         break
                     tick = self._current_tick + 1
                     self._active_tick = tick
-                    commands: Tuple[Any, ...] = tuple(self._commands.pop(tick, ()))
-                    self._pending_command_count -= len(commands)
                     self._ticks_attempted += 1
                 ticks_attempted += 1
 
@@ -398,15 +358,13 @@ class SceneEngineRuntime:
                     elapsed_ticks=1,
                 )
                 try:
-                    self._simulation.step(context, commands)
+                    self._simulation.step(context)
                 except BaseException as exc:
                     with self._state_lock:
                         self._active_tick = None
                         self._status = _FATAL
                         self._fatal_tick = tick
                         self._fatal_cause = exc
-                        self._commands.clear()
-                        self._pending_command_count = 0
                     if not isinstance(exc, Exception):
                         # Preserve process-level signals such as KeyboardInterrupt
                         # and SystemExit while still making a retry impossible.
@@ -438,7 +396,6 @@ class SceneEngineRuntime:
                         AuthorityCommitRequest(
                             simulation=self._simulation,
                             context=context,
-                            commands=commands,
                         )
                     )
                     authority_commits_succeeded += 1
@@ -492,8 +449,6 @@ class SceneEngineRuntime:
             if self._status == _STOPPED:
                 return
             self._status = _STOPPED
-            self._commands.clear()
-            self._pending_command_count = 0
 
     def activate_presentation_epoch(
         self, *, scene_epoch: int, bootstrap_id: int
@@ -519,9 +474,8 @@ class SceneEngineRuntime:
     def export_committed_state(self, authority_commit: Any) -> Any:
         """Export one extra complete frame at the current committed tick.
 
-        Profile commands are admitted outside the engine command queue. A
-        successful same-tick command projection crosses this port after its
-        authority commit. It advances ``frame_seq`` but never the global tick.
+        A successful same-tick authority projection crosses this port after
+        its commit. It advances ``frame_seq`` but never the global tick.
         """
 
         with self._pump_lock:
@@ -569,8 +523,6 @@ class SceneEngineRuntime:
                 self._fatal_tick = request.context.tick
                 self._fatal_cause = exc
                 self._last_authority_commit_error = exc
-                self._commands.clear()
-                self._pending_command_count = 0
             if not isinstance(exc, Exception):
                 raise
             if isinstance(exc, AuthorityCommitFatalError):
@@ -670,3 +622,15 @@ def _non_reentrant_pump(lock: Any) -> Any:
         yield
     finally:
         lock.release()
+
+
+__all__ = [
+    "AuthorityCommitCallback",
+    "AuthorityCommitRequest",
+    "FrameExportCallback",
+    "PresentationExportRequest",
+    "PumpResult",
+    "RuntimeConfig",
+    "RuntimeHealth",
+    "SceneEngineRuntime",
+]

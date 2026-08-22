@@ -17,4 +17,17 @@ from .presentation_tree_validation import (
     validate_presentation_frame_tree,
 )
 
-__all__ = [name for name in globals() if not name.startswith("_")]
+__all__ = [
+    "OpaquePayloadV3",
+    "PresentationEventV3",
+    "PresentationFrameHeaderV3",
+    "PresentationFrameV3View",
+    "PresentationNodeRecordV3",
+    "PresentationNodeV3",
+    "PresentationSectionEntryV3",
+    "PresentationTreeValidationV3",
+    "PresentationWorldPoseV3",
+    "encode_presentation_frame_v3",
+    "parse_presentation_frame_v3",
+    "validate_presentation_frame_tree",
+]

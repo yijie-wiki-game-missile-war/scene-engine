@@ -12,7 +12,7 @@ export class ThreePresentationBackendError extends Error {
 }
 
 /**
- * Rebuildable Three.js mirror of an Engine PresentationSceneTree.
+ * Rebuildable Three.js projection of the current SceneDisplayEngine view.
  *
  * The backend deliberately retains no presentation node/entity records. Its
  * resident Map contains only renderer mechanics: anchors, visual handles,
@@ -24,7 +24,6 @@ export class ThreePresentationBackend {
     THREE = null,
     createAnchor = null,
     maximumPendingJobs = 20_000,
-    onEvents = null,
     onHealth = null,
     onVisualReady = null,
     resolveFactory,
@@ -43,7 +42,7 @@ export class ThreePresentationBackend {
     if (!Number.isSafeInteger(maximumPendingJobs) || maximumPendingJobs <= 0) {
       fail('three-pending-job-limit-invalid');
     }
-    for (const [name, value] of Object.entries({ onEvents, onHealth, onVisualReady })) {
+    for (const [name, value] of Object.entries({ onHealth, onVisualReady })) {
       if (value !== null && typeof value !== 'function') fail(`${name}-port-invalid`);
     }
 
@@ -52,7 +51,6 @@ export class ThreePresentationBackend {
     this.createAnchorPort = anchorFactory;
     this.resolveFactory = resolveFactory;
     this.resourceServices = Object.freeze({ ...resourceServices });
-    this.onEvents = onEvents;
     this.onHealth = onHealth;
     this.onVisualReady = onVisualReady;
     this.maximumPendingJobs = maximumPendingJobs;
@@ -67,7 +65,7 @@ export class ThreePresentationBackend {
   installBootstrap(plan, view) {
     this.requireOpen();
     assertPlanView(plan, view);
-    if (plan.kind !== 'bootstrap' && plan.kind !== 'reset') {
+    if (plan.kind !== 'bootstrap') {
       fail('three-bootstrap-plan-invalid');
     }
     this.rebuild(view);
@@ -77,12 +75,11 @@ export class ThreePresentationBackend {
     this.requireOpen();
     assertPlanView(plan, view);
     this.requireGeneration(view.generation);
-    this.publishEvents(plan.events, plan);
     const dirty = this.applyPlan(plan, view);
     if (dirty) this.finishMatrixBatch();
   }
 
-  /** Apply every ordered frame in one correlation with one root matrix pass. */
+  /** Apply every ordered frame step with one root matrix pass. */
   applyBatch(steps) {
     this.requireOpen();
     if (!Array.isArray(steps) || steps.length === 0) {
@@ -93,9 +90,6 @@ export class ThreePresentationBackend {
       assertPlanView(step.plan, step.view);
       this.requireGeneration(step.view.generation);
     }
-    // Events are output from already committed logical state. Publish all of
-    // them in frame order even if a visual callback later fails.
-    for (const { plan } of steps) this.publishEvents(plan.events, plan);
     let dirty = false;
     for (const { plan, view } of steps) dirty = this.applyPlan(plan, view) || dirty;
     if (dirty) this.finishMatrixBatch();
@@ -464,19 +458,6 @@ export class ThreePresentationBackend {
       this.finishMatrixBatch();
       this.publishVisualReady();
     });
-  }
-
-  publishEvents(events, plan) {
-    if (!events?.length) return;
-    try {
-      this.onEvents?.(events, Object.freeze({
-        correlationSeq: plan.correlationSeq,
-        frameSeq: plan.frameSeq,
-        sourceTick: plan.sourceTick,
-      }));
-    } catch (error) {
-      this.report(error);
-    }
   }
 
   publishVisualReady() {

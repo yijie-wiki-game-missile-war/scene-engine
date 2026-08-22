@@ -1,7 +1,7 @@
 {
   "name": "@scene-engine/presentation-archive-node",
-  "version": "0.3.0",
-  "description": "Node-only streaming reader and writer for Scene Engine Presentation Archive V3",
+  "version": "0.4.0",
+  "description": "Node-only streaming reader and validator for Scene Engine Presentation Archive V3",
   "type": "module",
   "sideEffects": false,
   "files": ["src"],
@@ -9,7 +9,7 @@
     ".": "./src/index.js"
   },
   "dependencies": {
-    "@scene-engine/presentation-codec": "0.3.0"
+    "@scene-engine/presentation-codec": "0.4.0"
   },
   "scripts": {
     "test": "node --test ./test/*.test.mjs"

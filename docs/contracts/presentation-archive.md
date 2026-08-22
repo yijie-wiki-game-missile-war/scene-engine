@@ -123,7 +123,7 @@ Node reader 只保留 `manifest()`、`checkpoints()`、`openCheckpoint()`、`ite
 hash 和 root。正常 playback 先信任产品层保存的 verified root identity，再通过 checkpoint directory 定位，
 并对实际读取的每个 block 做独立 hash 验证，而不是每次连接前全量扫描 archive。
 
-Python 与 Node writer 在 correlation 前最多暂存 8 个 frame，并要求 `frame_refs` 与刚写入的 pending
-frame 批次顺序、数量完全一致；第 9 个未关联 frame 在写 block 前即被拒绝。Node file sink 对短写循环到
-完整落盘，创建、构造验证或 `seal()` 任一步失败都会关闭其拥有的 index/segments handle；调用方也可用
-幂等 `closeIncomplete()` 在未发布 manifest 时显式终止 writer。
+Python writer 在 correlation 前最多暂存 8 个 frame，并要求 `frame_refs` 与刚写入的 pending frame 批次
+顺序、数量完全一致；第 9 个未关联 frame 在写 block 前即被拒绝。Node package 不提供 writer 或 file sink；
+其 reader conformance 测试读取由 Python 正式 writer 生成并提交的跨语言固定 fixture，覆盖 checkpoint/seek、
+zero-frame correlation、multi-segment/new epoch、corruption、truncation 与 hash 验证。

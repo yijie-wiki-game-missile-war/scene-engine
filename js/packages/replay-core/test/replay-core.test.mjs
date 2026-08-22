@@ -85,7 +85,11 @@ function createPorts() {
     authorityLane: {
       async openCheckpoint(id) {
         assert.equal(id, '1');
-        return { baseline: records[0], nextRecordIndex: 1n };
+        return {
+          baseline: records[0],
+          endRecordIndexExclusive: BigInt(records.length),
+          nextRecordIndex: 1n,
+        };
       },
       async readRecord(index) { return records[Number(index)] ?? null; },
       tickOf(record) { return record.tick; },
@@ -218,6 +222,33 @@ test('CompositeReplaySession jointly gates lanes and respects cumulative credit'
     'frame',
     'correlation',
   ]);
+});
+
+test('CompositeReplaySession stops at the selected authority checkpoint boundary', async () => {
+  const ports = createPorts();
+  ports.authorityLane.openCheckpoint = async () => ({
+    baseline: await ports.authorityLane.readRecord(0n),
+    endRecordIndexExclusive: 2n,
+    nextRecordIndex: 1n,
+  });
+  const target = new CompositeReplaySession({
+    ...ports,
+    viewerScope: 'viewer:test',
+    profileId: 'test-profile@1',
+    sessionLimits: { maximumInFlightFrames: 1 },
+    instant: true,
+  });
+  await target.open('1', { wallNowMs: 0 });
+  target.markAuthorityBaselineReady(cursor(0, 0));
+  target.handlePresentationControl(ready(), { wallNowMs: 0 });
+  await target.pump(0);
+  target.handlePresentationControl(ack(1), { wallNowMs: 0 });
+  await target.pump(0);
+  target.handlePresentationControl(ack(2), { wallNowMs: 0 });
+
+  assert.deepEqual(await target.pump(0), []);
+  assert.equal(target.status().authorityRecordIndex, 2n);
+  assert.equal(target.status().exhausted, true);
 });
 
 test('CompositeReplaySession retains raw outbound controls around presentation joins', async () => {

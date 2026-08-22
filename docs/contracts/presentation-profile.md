@@ -1,6 +1,6 @@
 # Scene Presentation V3 mechanical contract
 
-状态：Scene Engine `0.3.0`；破坏性 V3，production 不提供 V1/V2 decoder fallback。
+状态：Scene Engine `0.4.0`；破坏性 V3，production 不提供 V1/V2 decoder fallback。
 
 本文冻结通用 `SceneBootstrapV3`、`PresentationFrameV3`、opaque authority cursor 与
 `scene-presentation-control-v2@1`。所有整数和 IEEE-754 `float32` 均为 little-endian。section offset 从
@@ -176,21 +176,28 @@ JavaScript codec 的 `SceneBootstrapV3View` / `PresentationFrameV3View` 保留 r
 `displayIdAt/parentDisplayIdAt/.../readLocalPose/readProfileStateAt/readInteractionAt` borrowed accessors 读取；
 decode 不构造每节点 object/pose arrays。Bootstrap decoder 拥有 registry 上下文，因此必须立即验证 static
 node 的 visual/payload type；standalone Frame codec 只验证 frame 自身的结构，因为 frame bytes 不重复携带
-visual registry。Frame 的 registry/required-payload 校验必须在已安装 Bootstrap 上下文中由
-`PresentationSceneTree.prepareFrame(s)` 完成；live 与 Replay ingest 都不得绕过该 tree gate。
+visual registry。Frame 的 registry/required-payload 校验必须在已安装 Bootstrap 上下文中由唯一公共
+`SceneDisplayEngine.prepareFrames(frames)` 完成；live 与 Replay ingest 都不得绕过该 gate。内部
+`PresentationSceneTree` 是 static + dynamic node、parent/local/world pose、profile/interaction、metadata、
+frame sequence、source tick、projection 与 ID lifecycle 的唯一 owner；correlation 顺序只属于 session 和
+产品 coordinator，不进入 tree/view/capture。
 
-`PresentationSceneTree` 是 static + dynamic node、parent/local/world pose、profile/interaction、metadata、ID
-lifecycle 与 cursor 的唯一 owner。常驻状态是 bounded dense SoA typed storage；old/new dynamic set 通过按 ID
-双指针线性 merge 生成 create/remove/reparent/pose/visibility/visual/profile/animation/interaction change plan。
-`prepareFrames(frames,{correlationSeq})` 对一个 correlation 的零/多帧完整预演，保留有序 frozen
-`steps: [{plan, view}]`；prepare 失败零提交，`commit()` 只进行最终 state/cursor pointer swap。batch 数量必须受
-与 ordered session credit 相同的显式 `maximumFramesPerCorrelation` hard limit 约束。
+常驻状态是 bounded dense SoA typed storage；old/new dynamic set 通过按 ID 双指针线性 merge 生成
+create/remove/reparent/pose/visibility/visual/profile/animation/interaction change plan。
+`prepareFrames(frames)` 只接受 `1..maximumFramesPerBatch` 份完整 frame，并返回有序 frozen
+`steps: [{plan, view, events}]`。renderer plan 不含 events。prepared token 必须先同步调用
+`assertCommittable()`，之后 `commitValidated()` 只做最终 state pointer swap 与必要 counters；失败或放弃时
+调用 `abort()` 释放 borrowed payload。`commitValidated()` 不调用 capture observer、也不排 microtask；产品
+coordinator 必须先完成 business/tree/joint cursor 三个 pointer swap，再调用
+`schedulePostCommitCapture()` 排入 coalesced、受保护的 observer microtask。零 frame 的 business-only
+correlation 不调用 Engine frame prepare，但联合 pointer barrier 后仍可调度最新 Engine capture。
 
 ## Control、Archive 与 conformance
 
 control identity 仍为 `scene-presentation-control-v2@1`（canonical UTF-8 JSON）；V3 指的是 binary scene
 contract，不重解释 control schema。Archive identity 为 `scene-presentation-archive-v3@1`，Node 包为
-`@scene-engine/presentation-archive-node`，保存 exact V3 packet/correlation bytes并使用 checkpoint directory。
+`@scene-engine/presentation-archive-node`，其 Node production surface 只读取、验证和 seek；exact V3
+packet/correlation bytes 由 Python writer 保存并使用 checkpoint directory。
 
 Python/JavaScript 必须对 shared V3 golden 和 malformed corpus 得到相同 bytes/结论。任何不兼容 layout
 必须增加 schema version，并同步 workspace generated profile、writer/decoder、tree、Archive verifier、下游包

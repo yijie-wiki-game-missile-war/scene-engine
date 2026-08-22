@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Protocol, Tuple
+from typing import Protocol
 
 
 Tick = int
@@ -18,9 +18,5 @@ class TickContext:
 
 
 class GameSimulation(Protocol):
-    def step(
-        self,
-        context: TickContext,
-        commands: Tuple[Any, ...],
-    ) -> None:
+    def step(self, context: TickContext) -> None:
         """Normal return commits the tick; an escaping exception is fatal."""

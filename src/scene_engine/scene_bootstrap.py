@@ -20,4 +20,20 @@ from .presentation_tree_validation import (
     validate_presentation_node_tree,
 )
 
-__all__ = [name for name in globals() if not name.startswith("_")]
+__all__ = [
+    "AnimationStateRecordV3",
+    "EngineSessionIdentityV3",
+    "OpaquePayloadV3",
+    "PresentationNodeRecordV3",
+    "PresentationNodeV3",
+    "PresentationSectionEntryV3",
+    "PresentationTreeValidationV3",
+    "PresentationWorldPoseV3",
+    "SceneBootstrapHeaderV3",
+    "SceneBootstrapV3View",
+    "SceneMetadataV3",
+    "VisualTypeRecordV3",
+    "encode_scene_bootstrap_v3",
+    "parse_scene_bootstrap_v3",
+    "validate_presentation_node_tree",
+]
