@@ -55,6 +55,14 @@ function correlation(sequence, frame) {
   }, sequence, PRESENTATION_CONTROL_SERVER_TO_CLIENT);
 }
 
+function archiveFrame(sequence, bytes) {
+  return {
+    kind: 'frame',
+    entry: { frameSeq: BigInt(sequence), sourceTick: 0n, projectionId: 1n },
+    bytes,
+  };
+}
+
 function createPorts() {
   const records = [
     { tick: 0, cursor: cursor(0, 0), wire: new TextEncoder().encode('snapshot') },
@@ -138,6 +146,45 @@ test('AuthorityReplaySession owns baseline gate, instant playback, and generatio
   assert.equal(sought.generation, 2);
 });
 
+test('AuthorityReplaySession bounds copied output bytes per pump', async () => {
+  const { authorityLane } = createPorts();
+  const target = new AuthorityReplaySession({
+    authorityLane,
+    instant: true,
+    maximumBytesPerPump: 8,
+  });
+  await target.open('1', { wallNowMs: 0 });
+  target.markBaselineReady(cursor(0, 0));
+  assert.deepEqual((await target.pump(0)).map(({ data }) => new TextDecoder().decode(data)), [
+    'delta:1',
+  ]);
+  assert.deepEqual((await target.pump(0)).map(({ data }) => new TextDecoder().decode(data)), [
+    'delta:2',
+  ]);
+});
+
+test('AuthorityReplaySession replays baseline-adjacent and later outbound controls in tape order', async () => {
+  const { authorityLane } = createPorts();
+  const text = new TextEncoder();
+  authorityLane.transmissionsOf = (record) => Object.freeze([
+    Object.freeze({ kind: 'authority', data: record.wire }),
+    Object.freeze({
+      kind: 'authority-control',
+      data: text.encode(`control:${record.tick}`),
+    }),
+  ]);
+  const target = new AuthorityReplaySession({ authorityLane, instant: true });
+  assert.deepEqual(
+    (await target.open('1', { wallNowMs: 0 })).map(({ data }) => new TextDecoder().decode(data)),
+    ['snapshot'],
+  );
+  target.markBaselineReady(cursor(0, 0));
+  assert.deepEqual(
+    (await target.pump(0)).map(({ data }) => new TextDecoder().decode(data)),
+    ['control:0', 'delta:1', 'control:1', 'delta:2', 'control:2'],
+  );
+});
+
 test('CompositeReplaySession jointly gates lanes and respects cumulative credit', async () => {
   const target = new CompositeReplaySession({
     ...createPorts(),
@@ -173,6 +220,178 @@ test('CompositeReplaySession jointly gates lanes and respects cumulative credit'
   ]);
 });
 
+test('CompositeReplaySession retains raw outbound controls around presentation joins', async () => {
+  const ports = createPorts();
+  const text = new TextEncoder();
+  ports.authorityLane.transmissionsOf = (record) => Object.freeze([
+    Object.freeze({ kind: 'authority', data: record.wire }),
+    Object.freeze({
+      kind: 'authority-control',
+      data: text.encode(`control:${record.tick}`),
+    }),
+  ]);
+  const target = new CompositeReplaySession({
+    ...ports,
+    viewerScope: 'viewer:test',
+    profileId: 'test-profile@1',
+    sessionLimits: { maximumInFlightFrames: 1 },
+    instant: true,
+  });
+  await target.open('1', { wallNowMs: 0 });
+  target.markAuthorityBaselineReady(cursor(0, 0));
+  target.handlePresentationControl(ready(), { wallNowMs: 0 });
+  assert.deepEqual((await target.pump(0)).map(({ kind }) => kind), [
+    'frame',
+    'correlation',
+    'authority-control',
+  ]);
+  target.handlePresentationControl(ack(1), { wallNowMs: 0 });
+  assert.deepEqual((await target.pump(0)).map(({ kind }) => kind), [
+    'authority',
+    'frame',
+    'correlation',
+    'authority-control',
+  ]);
+});
+
+test('CompositeReplaySession never splits an authority primary from its presentation at a pump boundary', async () => {
+  const ports = createPorts();
+  ports.authorityLane.transmissionsOf = (record) => record.tick === 1
+    ? Object.freeze([
+      Object.freeze({ kind: 'authority', data: record.wire }),
+      Object.freeze({ kind: 'authority-control', data: new Uint8Array(1024) }),
+    ])
+    : Object.freeze([Object.freeze({ kind: 'authority', data: record.wire })]);
+  const target = new CompositeReplaySession({
+    ...ports,
+    viewerScope: 'viewer:test',
+    profileId: 'test-profile@1',
+    sessionLimits: { maximumInFlightFrames: 1 },
+    instant: true,
+    maximumBytesPerPump: 1024,
+    maximumTransmissionsPerPump: 3,
+  });
+  await target.open('1', { wallNowMs: 0 });
+  target.markAuthorityBaselineReady(cursor(0, 0));
+  target.handlePresentationControl(ready(), { wallNowMs: 0 });
+  await target.pump(0);
+  target.handlePresentationControl(ack(1), { wallNowMs: 0 });
+
+  assert.deepEqual((await target.pump(0)).map(({ kind }) => kind), [
+    'authority',
+    'frame',
+    'correlation',
+  ]);
+  assert.equal(target.status().authorityRecordIndex, 1n);
+  target.pause(1);
+  assert.deepEqual(await target.pump(100), []);
+  target.resume(101);
+  assert.deepEqual((await target.pump(101)).map(({ kind }) => kind), [
+    'authority-control',
+  ]);
+  assert.equal(target.status().authorityRecordIndex, 2n);
+});
+
+test('CompositeReplaySession bounds presentation joins while reading archive records', async () => {
+  const cases = [
+    {
+      limits: { maximumInFlightFrames: 1 },
+      pattern: /frame-count limit/u,
+      records() {
+        let secondPacketRead = false;
+        return {
+          list: [
+            archiveFrame(1, new Uint8Array([1])),
+            {
+              kind: 'frame',
+              entry: { frameSeq: 2n, sourceTick: 0n, projectionId: 1n },
+              get bytes() {
+                secondPacketRead = true;
+                throw new Error('second packet bytes must not be read');
+              },
+            },
+          ],
+          verify: () => assert.equal(secondPacketRead, false),
+        };
+      },
+    },
+    {
+      limits: { maximumPacketBytes: 9 },
+      pattern: /maximumPacketBytes/u,
+      records: () => ({ list: [archiveFrame(1, new Uint8Array(10))], verify() {} }),
+    },
+    {
+      limits: { maximumInFlightFrames: 8, maximumQueuedBytes: 10 },
+      pattern: /maximumQueuedBytes/u,
+      records: () => ({
+        list: [
+          archiveFrame(1, new Uint8Array(6)),
+          archiveFrame(2, new Uint8Array(6)),
+        ],
+        verify() {},
+      }),
+    },
+  ];
+  for (const item of cases) {
+    const ports = createPorts();
+    const generated = item.records();
+    ports.presentationArchive.iterateFrom = async function* iterateFrom() {
+      yield { kind: 'checkpoint' };
+      yield* generated.list;
+    };
+    const target = new CompositeReplaySession({
+      ...ports,
+      viewerScope: 'viewer:test',
+      profileId: 'test-profile@1',
+      sessionLimits: item.limits,
+    });
+    await assert.rejects(target.open('1', { wallNowMs: 0 }), item.pattern);
+    generated.verify();
+  }
+});
+
+test('CompositeReplaySession admits an 8 MiB payload plus its 24-byte packet header exactly', async () => {
+  const packet = new Uint8Array(8 * 1024 * 1024 + 24);
+  const correlationBytes = correlation(1, packet);
+  const createBoundaryPorts = () => {
+    const ports = createPorts();
+    ports.presentationArchive.iterateFrom = async function* iterateFrom() {
+      yield { kind: 'checkpoint' };
+      yield archiveFrame(1, packet);
+      yield {
+        kind: 'correlation',
+        entry: { correlationSeq: 1n },
+        bytes: correlationBytes,
+      };
+    };
+    return ports;
+  };
+  const accepted = new CompositeReplaySession({
+    ...createBoundaryPorts(),
+    viewerScope: 'viewer:test',
+    profileId: 'test-profile@1',
+    sessionLimits: {
+      maximumPacketBytes: packet.byteLength,
+      maximumQueuedBytes: 16 * 1024 * 1024,
+    },
+  });
+  await accepted.open('1', { wallNowMs: 0 });
+
+  const rejected = new CompositeReplaySession({
+    ...createBoundaryPorts(),
+    viewerScope: 'viewer:test',
+    profileId: 'test-profile@1',
+    sessionLimits: {
+      maximumPacketBytes: packet.byteLength - 1,
+      maximumQueuedBytes: 16 * 1024 * 1024,
+    },
+  });
+  await assert.rejects(
+    rejected.open('1', { wallNowMs: 0 }),
+    /maximumPacketBytes/u,
+  );
+});
+
 test('pause freezes both lanes and speed only scales wall-clock', async () => {
   const target = new CompositeReplaySession({
     ...createPorts(),
@@ -192,6 +411,78 @@ test('pause freezes both lanes and speed only scales wall-clock', async () => {
   ]);
   target.handlePresentationControl(ack(1), { wallNowMs: 108 });
   assert.deepEqual((await target.pump(109)).map(({ kind }) => kind), [
+    'authority',
+    'frame',
+    'correlation',
+  ]);
+});
+
+test('pause/resume shifts an already joined replay deadline by the paused duration', async () => {
+  const target = new CompositeReplaySession({
+    ...createPorts(),
+    viewerScope: 'viewer:test',
+    profileId: 'test-profile@1',
+  });
+  await target.open('1', { wallNowMs: 0 });
+  target.markAuthorityBaselineReady(cursor(0, 0));
+  target.handlePresentationControl(ready(), { wallNowMs: 0 });
+  assert.deepEqual((await target.pump(0)).map(({ kind }) => kind), ['frame', 'correlation']);
+  target.handlePresentationControl(ack(1), { wallNowMs: 0 });
+  assert.deepEqual(await target.pump(1), []);
+
+  target.pause(5);
+  target.resume(105);
+
+  assert.deepEqual(await target.pump(116), []);
+  assert.deepEqual((await target.pump(117)).map(({ kind }) => kind), [
+    'authority',
+    'frame',
+    'correlation',
+  ]);
+});
+
+test('speed changes rescale the remaining delay of an already joined replay record', async () => {
+  const target = new CompositeReplaySession({
+    ...createPorts(),
+    viewerScope: 'viewer:test',
+    profileId: 'test-profile@1',
+  });
+  await target.open('1', { wallNowMs: 0 });
+  target.markAuthorityBaselineReady(cursor(0, 0));
+  target.handlePresentationControl(ready(), { wallNowMs: 0 });
+  await target.pump(0);
+  target.handlePresentationControl(ack(1), { wallNowMs: 0 });
+  await target.pump(1);
+
+  target.setSpeed(2, 5);
+
+  assert.deepEqual(await target.pump(10), []);
+  assert.deepEqual((await target.pump(11)).map(({ kind }) => kind), [
+    'authority',
+    'frame',
+    'correlation',
+  ]);
+});
+
+test('speed changes while paused preserve and rescale the frozen remaining delay', async () => {
+  const target = new CompositeReplaySession({
+    ...createPorts(),
+    viewerScope: 'viewer:test',
+    profileId: 'test-profile@1',
+  });
+  await target.open('1', { wallNowMs: 0 });
+  target.markAuthorityBaselineReady(cursor(0, 0));
+  target.handlePresentationControl(ready(), { wallNowMs: 0 });
+  await target.pump(0);
+  target.handlePresentationControl(ack(1), { wallNowMs: 0 });
+  await target.pump(1);
+
+  target.pause(5);
+  target.setSpeed(2, 50);
+  target.resume(105);
+
+  assert.deepEqual(await target.pump(110), []);
+  assert.deepEqual((await target.pump(111)).map(({ kind }) => kind), [
     'authority',
     'frame',
     'correlation',

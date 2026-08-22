@@ -1,6 +1,6 @@
 {
   "name": "@scene-engine/presentation-session",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "module",
   "sideEffects": false,
   "files": ["src"],
@@ -8,7 +8,7 @@
     ".": "./src/index.js"
   },
   "dependencies": {
-    "@scene-engine/presentation-codec": "0.2.0"
+    "@scene-engine/presentation-codec": "0.3.0"
   },
   "scripts": {
     "test": "node --test ./test/*.test.mjs"

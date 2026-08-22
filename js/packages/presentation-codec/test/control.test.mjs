@@ -5,6 +5,7 @@ import {
   PRESENTATION_CONTROL_CLIENT_TO_SERVER,
   PRESENTATION_CONTROL_SERVER_TO_CLIENT,
   PresentationCodecError,
+  createAuthorityCursorEnvelope,
   cursorEnvelopeToJSON,
   encodePresentationControl,
   envelopeCursor,
@@ -74,4 +75,15 @@ test('control V2 rejects noncanonical base64 and unknown fields', () => {
   assert.throws(() => encodePresentationControl({ ...ready, legacy_cursor: {} }, {
     direction: PRESENTATION_CONTROL_CLIENT_TO_SERVER,
   }), /unknown or missing fields/u);
+});
+
+test('authority cursor envelope shares Bootstrap codec and byte limits', () => {
+  assert.throws(
+    () => createAuthorityCursorEnvelope('a'.repeat(161), new Uint8Array([1])),
+    PresentationCodecError,
+  );
+  assert.throws(
+    () => createAuthorityCursorEnvelope('cursor@1', new Uint8Array(16 * 1024 + 1)),
+    PresentationCodecError,
+  );
 });

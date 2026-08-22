@@ -7,8 +7,8 @@ this directory and keep Scene Engine-specific code, tests, and documentation her
 
 The current Missile War v5 producer, transport, raw tape, Replay, and Arts
 consumer remain governed by `../.engineer/contracts/mw-global-time-rule.md`.
-Nothing in this experimental project may silently replace or weaken that
-current 60 Hz chain.
+Nothing in this project may silently replace or weaken that current 60 Hz
+chain.
 
 The Python package name is `scene_engine`. Keep gameplay rules and
 Missile-War-specific state outside the package; integrate them through ports.

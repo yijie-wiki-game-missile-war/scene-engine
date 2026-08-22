@@ -36,7 +36,7 @@ gameplay.step(exactly one tick)
 
 `OrderedPresentationSession` 以 viewer、scene epoch、Bootstrap 和 profile 为作用域：
 
-- Bootstrap 只打开一次；匹配 V2 `presentation.ready` 前不释放 frame；
+- Bootstrap 只打开一次；匹配 V3 binary identity 的 `presentation.ready` 前不释放 frame；
 - admission 原子包含零/多份连续 complete frame 与一份 correlation；
 - session 校验 frame sequence/source tick、projection、frame SHA 和 opaque authority cursor；
 - cumulative ACK 只有与已发送 frame/correlation/cursor 完全匹配时才归还 credit；

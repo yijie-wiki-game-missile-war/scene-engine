@@ -1,3 +1,5 @@
+const NODE_VISIBLE = 1;
+
 export class SceneDisplayEngineError extends Error {
   constructor(code, message = code) {
     super(message);
@@ -6,346 +8,430 @@ export class SceneDisplayEngineError extends Error {
   }
 }
 
-export const DEFAULT_DISPLAY_CORE_LIMITS = Object.freeze({
-  maximumEntities: 10_000,
-  maximumFramesPerCommit: 256,
-  maximumPendingJobs: 10_000,
+export const DEFAULT_SCENE_TREE_LIMITS = Object.freeze({
+  maximumNodes: 10_000,
+  maximumTreeDepth: 64,
+  maximumFramesPerCorrelation: 8,
 });
 
-export class SceneDisplayEngineCore {
-  constructor({
-    renderer,
-    limits = {},
-    captureHook = null,
-    allowCheckpointCorrelationStart = false,
-  } = {}) {
-    if (!renderer || typeof renderer.prepare !== 'function') {
-      throw new SceneDisplayEngineError('renderer-port-invalid');
-    }
-    if (captureHook != null && typeof captureHook !== 'function') {
-      throw new SceneDisplayEngineError('capture-hook-invalid');
-    }
-    if (typeof allowCheckpointCorrelationStart !== 'boolean') {
-      throw new SceneDisplayEngineError('checkpoint-correlation-policy-invalid');
-    }
-    this.renderer = renderer;
+/**
+ * The sole installed presentation tree.
+ *
+ * Node state is retained in dense struct-of-arrays stores. There are no
+ * resident per-node records or pose arrays; node and payload views are made
+ * only when a caller asks for a specific slot. A bounded store pool lets a
+ * whole correlation batch be prepared without mutating the live store.
+ */
+export class PresentationSceneTree {
+  constructor({ limits = {} } = {}) {
     this.limits = normalizeLimits(limits);
-    this.captureHook = captureHook;
-    this.allowCheckpointCorrelationStart = allowCheckpointCorrelationStart;
-    this.bootstrap = null;
-    this.entities = new Map();
-    this.retired = new Set();
-    this.generation = 0;
-    this.lastFrameSeq = null;
-    this.lastSourceTick = null;
-    this.lastCorrelationSeq = 0n;
-    this.pendingJobs = new Set();
+    this.state = null;
+    this.dynamicPool = null;
+    this.pending = false;
     this.disposed = false;
-    this.fatal = null;
-    this.metrics = {
-      committedFrames: 0,
-      committedTransactions: 0,
-      prepareFailures: 0,
-      rendererCommitFailures: 0,
-      resets: 0,
-    };
   }
 
-  installBootstrap({ bootstrap, identity, staticInstaller = null } = {}) {
-    this.requireHealthy();
-    if (this.bootstrap) throw new SceneDisplayEngineError('bootstrap-already-installed');
-    if (!bootstrap || !identity) throw new SceneDisplayEngineError('bootstrap-invalid');
-    const normalizedIdentity = normalizeIdentity(identity);
-    if (staticInstaller != null && typeof staticInstaller.install !== 'function') {
-      throw new SceneDisplayEngineError('static-installer-invalid');
-    }
-    const staticInstallation = staticInstaller?.install(
-      bootstrap,
-      Object.freeze({
-        generation: this.generation + 1,
-        identity: normalizedIdentity,
-      }),
-    ) ?? null;
-    if (staticInstallation?.then) {
-      throw new SceneDisplayEngineError('static-installer-must-be-synchronous');
-    }
-    const visualOwnerTypes = new Map(
-      (bootstrap.visualRegistry ?? []).map((visual) => [
-        Number(visual.visualTypeId),
-        Number(visual.ownerTypeId),
-      ]),
-    );
-    this.bootstrap = Object.freeze({
-      bootstrap,
-      identity: normalizedIdentity,
-      staticInstaller,
-      visualOwnerTypes,
+  installBootstrap(bootstrap) {
+    this.requireOpen();
+    if (this.state) throw new SceneDisplayEngineError('bootstrap-already-installed');
+    const installed = buildInstalledState(bootstrap, this.limits, 1);
+    this.state = installed.state;
+    this.dynamicPool = installed.dynamicPool;
+    return bootstrapPlan(this.state, 'bootstrap', []);
+  }
+
+  prepareFrame(frame, options) {
+    const prepared = this.prepareFrames([frame], options);
+    const step = prepared.steps[0];
+    return Object.freeze({
+      plan: step.plan,
+      view: step.view,
+      steps: prepared.steps,
+      abort: prepared.abort,
+      commit: prepared.commit,
     });
-    this.generation += 1;
-    return this.bootstrap;
   }
 
-  async prepareCommit({ frames, correlationSeq, businessPrepared = null } = {}) {
+  prepareFrames(frames, { correlationSeq } = {}) {
     this.requireReady();
-    if (!Array.isArray(frames)
-        || frames.length > this.limits.maximumFramesPerCommit) {
-      throw new SceneDisplayEngineError('frame-batch-invalid');
+    if (this.pending) throw new SceneDisplayEngineError('frame-prepare-in-flight');
+    if (!Array.isArray(frames)) throw new SceneDisplayEngineError('frame-batch-invalid');
+    if (frames.length > this.limits.maximumFramesPerCorrelation) {
+      throw new SceneDisplayEngineError('frame-batch-limit-exceeded');
     }
     const sequence = positiveBigInt(correlationSeq, 'correlationSeq');
-    const checkpointStart = (
-      this.allowCheckpointCorrelationStart
-      && this.metrics.committedTransactions === 0
-      && this.lastCorrelationSeq === 0n
-    );
-    if (!checkpointStart && sequence !== this.lastCorrelationSeq + 1n) {
+    if (sequence !== this.state.lastCorrelationSeq + 1n) {
       throw new SceneDisplayEngineError('correlation-sequence-gap');
     }
-    if (businessPrepared != null
-        && typeof businessPrepared.commitNoThrow !== 'function') {
-      throw new SceneDisplayEngineError('business-commit-port-invalid');
-    }
-    const candidate = this.buildCandidate(frames);
-    const plan = Object.freeze({
-      correlationSeq: sequence,
-      frameSteps: Object.freeze(candidate.steps),
-      generation: this.generation,
-      finalEntities: readonlyMap(candidate.entities),
-      retiredDisplayIds: Object.freeze([...candidate.retired]),
-      sourceTick: candidate.lastSourceTick,
-    });
-    let rendererPrepared;
+
+    const expected = this.state;
+    const available = this.dynamicPool.filter((store) => store !== expected.dynamicStore);
+    const steps = [];
+    let previous = expected;
     try {
-      rendererPrepared = await this.renderer.prepare(plan, Object.freeze({
-        bootstrap: this.bootstrap.bootstrap,
-        generation: this.generation,
-        identity: this.bootstrap.identity,
-        isGenerationActive: (generation) => (
-          !this.disposed && !this.fatal && this.generation === generation
-        ),
-        trackJob: (job) => this.trackJob(job),
-      }));
+      for (let index = 0; index < frames.length; index += 1) {
+        const frame = frames[index];
+        const target = available[index % available.length];
+        const candidate = prepareFrameCandidate(
+          previous,
+          target,
+          frame,
+          sequence,
+          this.limits,
+        );
+        const plan = framePlan(previous, candidate, frame, sequence);
+        steps.push(Object.freeze({
+          plan,
+          // Step views borrow the already-validated complete frame. This keeps
+          // transient lifecycle observable without retaining N dense stores
+          // for an N-frame correlation.
+          view: new PresentationSceneView(candidate, frame),
+        }));
+        previous = candidate;
+      }
     } catch (error) {
-      this.metrics.prepareFailures += 1;
-      throw new SceneDisplayEngineError(
-        'renderer-prepare-failed',
-        error?.message ?? 'renderer prepare failed',
-      );
+      for (const store of available) store.releaseBorrowedPayloads();
+      throw error;
     }
-    if (!rendererPrepared || typeof rendererPrepared.commitNoThrow !== 'function'
-        || typeof rendererPrepared.abort !== 'function') {
-      await rendererPrepared?.abort?.();
-      throw new SceneDisplayEngineError('renderer-prepared-commit-invalid');
-    }
+
+    const finalState = frames.length === 0
+      ? Object.freeze({ ...expected, lastCorrelationSeq: sequence })
+      : previous;
+    const frozenSteps = Object.freeze(steps);
     let settled = false;
-    const expectedGeneration = this.generation;
+    this.pending = true;
     return Object.freeze({
-      abort: async () => {
+      steps: frozenSteps,
+      abort: () => {
         if (settled) return;
         settled = true;
-        await rendererPrepared.abort();
+        this.pending = false;
+        for (const store of available) store.releaseBorrowedPayloads();
       },
-      commitNoThrow: () => {
+      commit: () => {
         if (settled) return false;
-        if (this.disposed || this.generation !== expectedGeneration || this.fatal) {
-          settled = true;
-          void rendererPrepared.abort();
-          return false;
-        }
         settled = true;
-        try {
-          businessPrepared?.commitNoThrow();
-          this.entities = candidate.entities;
-          this.retired = candidate.retired;
-          this.lastFrameSeq = candidate.lastFrameSeq;
-          this.lastSourceTick = candidate.lastSourceTick;
-          this.lastCorrelationSeq = sequence;
-          rendererPrepared.commitNoThrow();
-        } catch (error) {
-          this.metrics.rendererCommitFailures += 1;
-          this.fatal = error instanceof Error ? error : new Error(String(error));
-          return false;
-        }
-        this.metrics.committedFrames += frames.length;
-        this.metrics.committedTransactions += 1;
-        this.captureHook?.(this.capture());
+        this.pending = false;
+        if (this.disposed || this.state !== expected) return false;
+        // The commit barrier is intentionally only an immutable state/cursor
+        // pointer swap. All validation and plans were completed above.
+        this.state = finalState;
         return true;
       },
-      plan,
     });
   }
 
-  buildCandidate(frames) {
-    let entities = new Map(this.entities);
-    const retired = new Set(this.retired);
-    let previousFrameSeq = this.lastFrameSeq;
-    let previousTick = this.lastSourceTick;
-    const steps = [];
-    for (const frame of frames) {
-      const header = normalizeFrameHeader(frame?.header);
-      if (header.sceneEpoch !== this.bootstrap.identity.sceneEpoch
-          || header.bootstrapId !== this.bootstrap.identity.bootstrapId) {
-        throw new SceneDisplayEngineError('frame-bootstrap-identity-mismatch');
-      }
-      if (previousFrameSeq != null && header.frameSeq !== previousFrameSeq + 1n) {
-        throw new SceneDisplayEngineError('frame-sequence-gap');
-      }
-      if (previousTick != null && header.sourceTick !== previousTick
-          && header.sourceTick !== previousTick + 1n) {
-        throw new SceneDisplayEngineError('frame-source-tick-gap');
-      }
-      if (!Array.isArray(frame.entities) || frame.entities.length > this.limits.maximumEntities) {
-        throw new SceneDisplayEngineError('frame-entity-count-invalid');
-      }
-      const next = new Map();
-      let previousId = 0n;
-      const creates = [];
-      const updates = [];
-      for (let index = 0; index < frame.entities.length; index += 1) {
-        const rawEntity = frame.entities[index];
-        const entity = normalizeEntity(
-          rawEntity,
-          frame.ownerStates?.[index],
-          header,
-          this.bootstrap.visualOwnerTypes.get(Number(rawEntity?.visualTypeId)),
-        );
-        const displayId = entity.displayId;
-        if (displayId <= previousId) {
-          throw new SceneDisplayEngineError('frame-display-id-order-invalid');
-        }
-        if (retired.has(displayId) && !entities.has(displayId)) {
-          throw new SceneDisplayEngineError('display-id-reused');
-        }
-        next.set(displayId, entity);
-        if (entities.has(displayId)) updates.push(entity);
-        else creates.push(entity);
-        previousId = displayId;
-      }
-      const removes = [];
-      for (const displayId of entities.keys()) {
-        if (!next.has(displayId)) {
-          removes.push(displayId);
-          retired.add(displayId);
-        }
-      }
-      steps.push(Object.freeze({
-        creates: Object.freeze(creates),
-        events: Object.freeze([...(frame.events ?? [])]),
-        frameSeq: header.frameSeq,
-        removes: Object.freeze(removes),
-        sourceTick: header.sourceTick,
-        updates: Object.freeze(updates),
-      }));
-      entities = next;
-      previousFrameSeq = header.frameSeq;
-      previousTick = header.sourceTick;
-    }
-    return {
-      entities,
-      retired,
-      steps,
-      lastFrameSeq: previousFrameSeq,
-      lastSourceTick: previousTick,
-    };
+  currentView() {
+    this.requireReady();
+    return new PresentationSceneView(this.state);
   }
 
-  async reset({ bootstrap, identity, staticInstaller = null } = {}) {
-    this.requireHealthy();
-    const nextIdentity = normalizeIdentity(identity);
-    const nextGeneration = this.generation + 1;
-    const prepared = typeof this.renderer.prepareReset === 'function'
-      ? await this.renderer.prepareReset(Object.freeze({
-        bootstrap,
-        generation: nextGeneration,
-        identity: nextIdentity,
-        staticInstaller,
-      }))
-      : null;
-    if (prepared && (typeof prepared.commitNoThrow !== 'function'
-        || typeof prepared.abort !== 'function')) {
-      await prepared?.abort?.();
-      throw new SceneDisplayEngineError('renderer-reset-commit-invalid');
-    }
-    this.generation = nextGeneration;
-    this.bootstrap = Object.freeze({
+  getNode(displayId) {
+    this.requireReady();
+    return nodeById(this.state, displayId);
+  }
+
+  getWorldPose(displayId, out) {
+    this.requireReady();
+    const located = locateNode(this.state, positiveBigInt(displayId, 'displayId'));
+    if (!located) return false;
+    located.store.readWorldPose(located.slot, out);
+    return true;
+  }
+
+  getInteraction(displayId) {
+    this.requireReady();
+    const located = locateNode(this.state, positiveBigInt(displayId, 'displayId'));
+    return located ? located.store.payloadAt(located.slot, 'interaction') : null;
+  }
+
+  getProfile(displayId) {
+    this.requireReady();
+    const located = locateNode(this.state, positiveBigInt(displayId, 'displayId'));
+    return located ? located.store.payloadAt(located.slot, 'profile') : null;
+  }
+
+  getSceneMetadata(metadataTypeId) {
+    this.requireReady();
+    return metadataByType(this.state.metadata, metadataTypeId);
+  }
+
+  reset(bootstrap) {
+    this.requireReady();
+    if (this.pending) throw new SceneDisplayEngineError('frame-prepare-in-flight');
+    const oldState = this.state;
+    const installed = buildInstalledState(
       bootstrap,
-      identity: nextIdentity,
-      staticInstaller,
-      visualOwnerTypes: new Map(
-        (bootstrap.visualRegistry ?? []).map((visual) => [
-          Number(visual.visualTypeId),
-          Number(visual.ownerTypeId),
-        ]),
-      ),
-    });
-    this.entities = new Map();
-    this.retired = new Set();
-    this.lastFrameSeq = null;
-    this.lastSourceTick = null;
-    this.lastCorrelationSeq = 0n;
-    prepared?.commitNoThrow();
-    this.metrics.resets += 1;
+      this.limits,
+      oldState.generation + 1,
+    );
+    const removals = allIdsChildFirst(oldState);
+    this.state = installed.state;
+    this.dynamicPool = installed.dynamicPool;
+    return bootstrapPlan(this.state, 'reset', removals);
   }
 
-  sampleAnimation({ animationStartTick, durationTicks, flags = 0, sourceTick }) {
-    return samplePresentationAnimation({
-      animationStartTick,
-      durationTicks,
-      flags,
-      sourceTick,
-    });
-  }
-
-  trackJob(job) {
-    this.requireHealthy();
-    if (!job || typeof job.then !== 'function') {
-      throw new SceneDisplayEngineError('async-job-invalid');
-    }
-    if (this.pendingJobs.size >= this.limits.maximumPendingJobs) {
-      throw new SceneDisplayEngineError('async-job-overflow');
-    }
-    const tracked = Promise.resolve(job).finally(() => this.pendingJobs.delete(tracked));
-    this.pendingJobs.add(tracked);
-    return tracked;
-  }
-
-  async whenIdle() {
-    while (this.pendingJobs.size > 0) {
-      await Promise.allSettled([...this.pendingJobs]);
-    }
-  }
-
-  capture() {
-    return Object.freeze({
-      entityCount: this.entities.size,
-      generation: this.generation,
-      identity: this.bootstrap?.identity ?? null,
-      lastCorrelationSeq: this.lastCorrelationSeq,
-      lastFrameSeq: this.lastFrameSeq,
-      lastSourceTick: this.lastSourceTick,
-      metrics: Object.freeze({ ...this.metrics }),
-      retiredCount: this.retired.size,
-    });
-  }
-
-  async dispose() {
+  dispose() {
     if (this.disposed) return;
     this.disposed = true;
-    this.generation += 1;
-    await this.renderer.dispose?.();
-    await this.whenIdle();
-    this.entities.clear();
-    this.retired.clear();
+    this.pending = false;
+    this.state = null;
+    this.dynamicPool = null;
+  }
+
+  requireOpen() {
+    if (this.disposed) throw new SceneDisplayEngineError('scene-tree-disposed');
   }
 
   requireReady() {
-    this.requireHealthy();
-    if (!this.bootstrap) throw new SceneDisplayEngineError('bootstrap-missing');
+    this.requireOpen();
+    if (!this.state) throw new SceneDisplayEngineError('bootstrap-missing');
+  }
+}
+
+export class SceneDisplayEngineCore {
+  constructor({ limits = {}, captureHook = null } = {}) {
+    if (captureHook != null && typeof captureHook !== 'function') {
+      throw new SceneDisplayEngineError('capture-hook-invalid');
+    }
+    this.tree = new PresentationSceneTree({ limits });
+    this.captureHook = captureHook;
+    this.captureScheduled = false;
+    this.disposed = false;
+    this.metrics = { committedFrames: 0, committedCorrelations: 0, prepareFailures: 0, resets: 0 };
   }
 
-  requireHealthy() {
-    if (this.disposed) throw new SceneDisplayEngineError('display-core-disposed');
-    if (this.fatal) throw new SceneDisplayEngineError('display-core-fatal', this.fatal.message);
+  installBootstrap(bootstrap) {
+    const plan = this.tree.installBootstrap(bootstrap);
+    this.scheduleCapture();
+    return plan;
   }
+
+  prepareFrame(frame, options) {
+    let prepared;
+    try {
+      prepared = this.tree.prepareFrame(frame, options);
+    } catch (error) {
+      this.metrics.prepareFailures += 1;
+      throw error;
+    }
+    return this.wrapPrepared(prepared, 1);
+  }
+
+  prepareFrames(frames, options) {
+    let prepared;
+    try {
+      prepared = this.tree.prepareFrames(frames, options);
+    } catch (error) {
+      this.metrics.prepareFailures += 1;
+      throw error;
+    }
+    return this.wrapPrepared(prepared, frames.length);
+  }
+
+  wrapPrepared(prepared, frameCount) {
+    let settled = false;
+    const result = {
+      steps: prepared.steps,
+      abort: () => {
+        if (settled) return;
+        settled = true;
+        prepared.abort();
+      },
+      commit: () => {
+        if (settled) return false;
+        settled = true;
+        const committed = prepared.commit();
+        if (committed) {
+          this.metrics.committedFrames += frameCount;
+          this.metrics.committedCorrelations += 1;
+          this.scheduleCapture();
+        }
+        return committed;
+      },
+    };
+    if (prepared.plan) {
+      result.plan = prepared.plan;
+      result.view = prepared.view;
+    }
+    return Object.freeze(result);
+  }
+
+  currentView() { return this.tree.currentView(); }
+  getNode(displayId) { return this.tree.getNode(displayId); }
+  getWorldPose(displayId, out) { return this.tree.getWorldPose(displayId, out); }
+  getInteraction(displayId) { return this.tree.getInteraction(displayId); }
+  getProfile(displayId) { return this.tree.getProfile(displayId); }
+  getSceneMetadata(metadataTypeId) { return this.tree.getSceneMetadata(metadataTypeId); }
+
+  reset(bootstrap) {
+    const plan = this.tree.reset(bootstrap);
+    this.metrics.resets += 1;
+    this.scheduleCapture();
+    return plan;
+  }
+
+  capture() {
+    const state = this.tree.state;
+    return Object.freeze({
+      generation: state?.generation ?? 0,
+      nodeCount: state ? state.staticStore.count + state.dynamicStore.count : 0,
+      staticNodeCount: state?.staticStore.count ?? 0,
+      dynamicNodeCount: state?.dynamicStore.count ?? 0,
+      maxSeenDisplayId: state?.maxSeenDisplayId ?? 0n,
+      lastFrameSeq: state?.lastFrameSeq ?? null,
+      lastSourceTick: state?.lastSourceTick ?? null,
+      lastCorrelationSeq: state?.lastCorrelationSeq ?? 0n,
+      denseDynamicStoreCount: this.tree.dynamicPool?.length ?? 0,
+      dynamicStoreCapacity: state?.dynamicStore.capacity ?? 0,
+      residentNodeObjectCount: 0,
+      residentPoseObjectCount: 0,
+      metrics: Object.freeze({ ...this.metrics }),
+    });
+  }
+
+  scheduleCapture() {
+    if (!this.captureHook || this.captureScheduled) return;
+    this.captureScheduled = true;
+    queueMicrotask(() => {
+      this.captureScheduled = false;
+      if (this.disposed) return;
+      try { this.captureHook(this.capture()); } catch { /* observers cannot alter state */ }
+    });
+  }
+
+  dispose() {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.tree.dispose();
+  }
+}
+
+export class PresentationSceneView {
+  constructor(state, borrowedDynamicView = null) {
+    this.state = state;
+    this.borrowedDynamicView = borrowedDynamicView;
+    this.generation = state.generation;
+    this.sceneEpoch = state.sceneEpoch;
+    this.bootstrapId = state.bootstrapId;
+    this.profileId = state.profileId;
+    this.nodeCount = state.staticStore.count
+      + (borrowedDynamicView?.nodeCount ?? state.dynamicStore.count);
+    this.staticNodeCount = state.staticStore.count;
+    this.dynamicNodeCount = borrowedDynamicView?.nodeCount ?? state.dynamicStore.count;
+    this.frameSeq = state.lastFrameSeq;
+    this.sourceTick = state.lastSourceTick;
+    this.projectionId = state.lastProjectionId;
+    this.correlationSeq = state.lastCorrelationSeq;
+    this.sceneMetadataCount = state.metadata.count;
+    Object.freeze(this);
+  }
+
+  nodeAt(index) {
+    if (!Number.isInteger(index) || index < 0 || index >= this.nodeCount) {
+      throw new SceneDisplayEngineError('node-index-invalid');
+    }
+    if (index < this.staticNodeCount) {
+      return new PresentationNodeSlotView(this.state.staticStore, index);
+    }
+    if (this.borrowedDynamicView) {
+      return new BorrowedFrameNodeSlotView(
+        this.borrowedDynamicView,
+        index - this.staticNodeCount,
+      );
+    }
+    return new PresentationNodeSlotView(
+      this.state.dynamicStore,
+      index - this.staticNodeCount,
+    );
+  }
+
+  getNode(displayId) {
+    const id = positiveBigInt(displayId, 'displayId');
+    const staticSlot = this.state.staticStore.index.get(id);
+    if (staticSlot !== -1) return new PresentationNodeSlotView(this.state.staticStore, staticSlot);
+    if (!this.borrowedDynamicView) return nodeById(this.state, id);
+    const slot = borrowedNodeSlot(this.borrowedDynamicView, id);
+    return slot === -1 ? null : new BorrowedFrameNodeSlotView(this.borrowedDynamicView, slot);
+  }
+
+  getInteraction(displayId) {
+    if (this.borrowedDynamicView) return this.getNode(displayId)?.interaction ?? null;
+    const located = locateNode(this.state, positiveBigInt(displayId, 'displayId'));
+    return located ? located.store.payloadAt(located.slot, 'interaction') : null;
+  }
+
+  getProfile(displayId) {
+    if (this.borrowedDynamicView) return this.getNode(displayId)?.profile ?? null;
+    const located = locateNode(this.state, positiveBigInt(displayId, 'displayId'));
+    return located ? located.store.payloadAt(located.slot, 'profile') : null;
+  }
+
+  sceneMetadataAt(index) {
+    return metadataAt(this.state.metadata, index);
+  }
+
+  getSceneMetadata(metadataTypeId) {
+    return metadataByType(this.state.metadata, metadataTypeId);
+  }
+
+  getWorldPose(displayId, out) {
+    if (this.borrowedDynamicView) {
+      return readBorrowedWorldPose(this.state, this.borrowedDynamicView, displayId, out);
+    }
+    const located = locateNode(this.state, positiveBigInt(displayId, 'displayId'));
+    if (!located) return false;
+    located.store.readWorldPose(located.slot, out);
+    return true;
+  }
+
+  *[Symbol.iterator]() {
+    for (let index = 0; index < this.nodeCount; index += 1) yield this.nodeAt(index);
+  }
+}
+
+export class PresentationNodeSlotView {
+  constructor(store, slot) {
+    this.store = store;
+    this.slot = slot;
+    Object.freeze(this);
+  }
+
+  get displayId() { return this.store.displayIds[this.slot]; }
+  get parentDisplayId() { return this.store.parentDisplayIds[this.slot]; }
+  get visualTypeId() { return this.store.visualTypeIds[this.slot]; }
+  get flags() { return this.store.flags[this.slot]; }
+  get isStatic() { return this.store.isStatic; }
+  get localPosition() { return tupleView(this.store.localPositions, this.slot, 3); }
+  get localRotationXyzw() { return tupleView(this.store.localRotations, this.slot, 4); }
+  get localScale() { return tupleView(this.store.localScales, this.slot, 3); }
+  get animationStateId() { return this.store.animationStateIds[this.slot]; }
+  get animationStartTick() { return this.store.animationStartTicks[this.slot]; }
+  get animationFlags() { return this.store.animationFlags[this.slot]; }
+  get profile() { return this.store.payloadAt(this.slot, 'profile'); }
+  get interaction() { return this.store.payloadAt(this.slot, 'interaction'); }
+}
+
+export class BorrowedFrameNodeSlotView {
+  constructor(view, slot) {
+    this.view = view;
+    this.slot = slot;
+    Object.freeze(this);
+  }
+
+  get displayId() { return this.view.displayIdAt(this.slot); }
+  get parentDisplayId() { return this.view.parentDisplayIdAt(this.slot); }
+  get visualTypeId() { return this.view.visualTypeIdAt(this.slot); }
+  get flags() { return this.view.flagsAt(this.slot); }
+  get isStatic() { return false; }
+  get localPosition() { return readBorrowedLocalTuple(this.view, this.slot, 'position'); }
+  get localRotationXyzw() { return readBorrowedLocalTuple(this.view, this.slot, 'rotation'); }
+  get localScale() { return readBorrowedLocalTuple(this.view, this.slot, 'scale'); }
+  get animationStateId() { return this.view.animationStateIdAt(this.slot); }
+  get animationStartTick() { return this.view.animationStartTickAt(this.slot); }
+  get animationFlags() { return this.view.animationFlagsAt(this.slot); }
+  get profile() { return borrowedPayloadAt(this.view, this.slot, 'profile'); }
+  get interaction() { return borrowedPayloadAt(this.view, this.slot, 'interaction'); }
 }
 
 export function samplePresentationAnimation({
@@ -359,10 +445,7 @@ export function samplePresentationAnimation({
   const duration = positiveBigInt(durationTicks, 'durationTicks');
   if (source < start) throw new SceneDisplayEngineError('animation-before-start');
   const elapsed = source - start;
-  const looping = Boolean(flags & 1);
-  const sampled = looping
-    ? elapsed % duration
-    : (elapsed > duration ? duration : elapsed);
+  const sampled = flags & 1 ? elapsed % duration : (elapsed > duration ? duration : elapsed);
   return Object.freeze({
     elapsedSeconds: Number(elapsed) / 60,
     elapsedTicks: elapsed,
@@ -371,78 +454,868 @@ export function samplePresentationAnimation({
   });
 }
 
+class DenseNodeStore {
+  constructor(capacity, isStatic) {
+    this.capacity = capacity;
+    this.isStatic = isStatic;
+    this.count = 0;
+    this.sourceRaw = null;
+    this.displayIds = new BigUint64Array(capacity);
+    this.parentDisplayIds = new BigUint64Array(capacity);
+    this.visualTypeIds = new Uint32Array(capacity);
+    this.flags = new Uint32Array(capacity);
+    this.localPositions = new Float32Array(capacity * 3);
+    this.localRotations = new Float32Array(capacity * 4);
+    this.localScales = new Float32Array(capacity * 3);
+    this.animationStateIds = new Uint32Array(capacity);
+    this.animationStartTicks = new BigUint64Array(capacity);
+    this.animationFlags = new Uint32Array(capacity);
+    this.profileTypeIds = new Uint32Array(capacity);
+    this.profileFlags = new Uint32Array(capacity);
+    this.profileBytes = new Array(capacity).fill(null);
+    this.interactionTypeIds = new Uint32Array(capacity);
+    this.interactionFlags = new Uint32Array(capacity);
+    this.interactionBytes = new Array(capacity).fill(null);
+    this.depths = new Uint16Array(capacity);
+    this.worldPositions = new Float64Array(capacity * 3);
+    this.worldRotations = new Float64Array(capacity * 4);
+    this.worldScales = new Float64Array(capacity * 3);
+    this.index = new DenseIdIndex(capacity);
+  }
+
+  reset(view) {
+    this.releaseBorrowedPayloads();
+    this.count = 0;
+    this.sourceRaw = view?.raw ?? view?.data ?? null;
+    this.index.clear();
+  }
+
+  releaseBorrowedPayloads() {
+    for (let index = 0; index < this.count; index += 1) {
+      this.profileBytes[index] = null;
+      this.interactionBytes[index] = null;
+    }
+    this.sourceRaw = null;
+  }
+
+  payloadAt(slot, kind) {
+    const profile = kind === 'profile';
+    const typeId = (profile ? this.profileTypeIds : this.interactionTypeIds)[slot];
+    if (typeId === 0) return null;
+    return Object.freeze({
+      typeId,
+      flags: (profile ? this.profileFlags : this.interactionFlags)[slot],
+      bytes: (profile ? this.profileBytes : this.interactionBytes)[slot],
+    });
+  }
+
+  readWorldPose(slot, out) {
+    validatePoseOut(out);
+    copyTuple(this.worldPositions, slot * 3, out.position, 3);
+    copyTuple(this.worldRotations, slot * 4, out.rotationXyzw, 4);
+    copyTuple(this.worldScales, slot * 3, out.scale, 3);
+    return out;
+  }
+}
+
+class DenseIdIndex {
+  constructor(capacity) {
+    let size = 4;
+    while (size < capacity * 2) size *= 2;
+    this.keys = new BigUint64Array(size);
+    this.slots = new Int32Array(size);
+    this.mask = size - 1;
+  }
+
+  clear() { this.keys.fill(0n); }
+
+  get(id) {
+    let bucket = hashId(id, this.mask);
+    for (;;) {
+      const key = this.keys[bucket];
+      if (key === 0n) return -1;
+      if (key === id) return this.slots[bucket];
+      bucket = (bucket + 1) & this.mask;
+    }
+  }
+
+  set(id, slot) {
+    let bucket = hashId(id, this.mask);
+    for (;;) {
+      const key = this.keys[bucket];
+      if (key === 0n) {
+        this.keys[bucket] = id;
+        this.slots[bucket] = slot;
+        return;
+      }
+      if (key === id) throw new SceneDisplayEngineError('display-id-duplicate');
+      bucket = (bucket + 1) & this.mask;
+    }
+  }
+}
+
+function buildInstalledState(bootstrap, limits, generation) {
+  assertBootstrapView(bootstrap);
+  if (bootstrap.nodeCount > limits.maximumNodes) {
+    throw new SceneDisplayEngineError('bootstrap-node-count-invalid');
+  }
+  const maximumDynamicNodes = uint32(
+    Number(bootstrap.header.maximumDynamicNodes),
+    'maximumDynamicNodes',
+  );
+  if (maximumDynamicNodes > limits.maximumNodes - bootstrap.nodeCount) {
+    throw new SceneDisplayEngineError('bootstrap-dynamic-limit-invalid');
+  }
+  const visuals = new Map();
+  for (let index = 0; index < bootstrap.visualTypeCount; index += 1) {
+    const item = bootstrap.visualTypeAt(index);
+    uint32(item.flags, 'visualFlags');
+    visuals.set(positiveUint32(item.visualTypeId, 'visualTypeId'), Object.freeze({
+      profileTypeId: uint32(item.profileTypeId, 'profileTypeId'),
+      interactionTypeId: uint32(item.interactionTypeId, 'interactionTypeId'),
+    }));
+  }
+  const animations = new Set();
+  for (let index = 0; index < bootstrap.animationStateCount; index += 1) {
+    const animation = bootstrap.animationStateAt(index);
+    uint32(animation.flags, 'animationFlags');
+    positiveUint32(animation.durationTicks, 'durationTicks');
+    animations.add(positiveUint32(
+      animation.animationStateId,
+      'animationStateId',
+    ));
+  }
+  const registry = Object.freeze({ visuals, animations });
+  const metadata = buildMetadataStore(bootstrap);
+  const staticStore = new DenseNodeStore(bootstrap.nodeCount, true);
+  fillStore(staticStore, bootstrap, registry, null, limits.maximumTreeDepth, null);
+  const dynamicPool = Array.from(
+    // live + two alternating scratch stores are sufficient for any bounded
+    // batch because step views borrow each complete input frame.
+    { length: 3 },
+    () => new DenseNodeStore(maximumDynamicNodes, false),
+  );
+  const dynamicStore = dynamicPool[0];
+  dynamicStore.reset(null);
+  const maximumStaticDisplayId = staticStore.count
+    ? staticStore.displayIds[staticStore.count - 1] : 0n;
+  return {
+    dynamicPool,
+    state: Object.freeze({
+      generation,
+      sceneEpoch: positiveBigInt(bootstrap.header.sceneEpoch, 'sceneEpoch'),
+      bootstrapId: positiveBigInt(bootstrap.header.bootstrapId, 'bootstrapId'),
+      profileId: canonicalText(bootstrap.identity?.profileId, 'profileId'),
+      viewerScope: canonicalText(bootstrap.identity?.viewerScope, 'viewerScope'),
+      maximumDynamicNodes,
+      maximumStaticDisplayId,
+      maxSeenDisplayId: maximumStaticDisplayId,
+      staticStore,
+      dynamicStore,
+      registry,
+      metadata,
+      lastFrameSeq: 0n,
+      lastSourceTick: null,
+      lastProjectionId: null,
+      lastCorrelationSeq: 0n,
+    }),
+  };
+}
+
+function prepareFrameCandidate(previous, target, frame, correlationSeq, limits) {
+  const header = normalizeFrameHeader(frame?.header);
+  if (header.sceneEpoch !== previous.sceneEpoch || header.bootstrapId !== previous.bootstrapId) {
+    throw new SceneDisplayEngineError('frame-bootstrap-identity-mismatch');
+  }
+  if (header.frameSeq !== previous.lastFrameSeq + 1n) {
+    throw new SceneDisplayEngineError('frame-sequence-gap');
+  }
+  if (previous.lastSourceTick != null && header.sourceTick !== previous.lastSourceTick
+      && header.sourceTick !== previous.lastSourceTick + 1n) {
+    throw new SceneDisplayEngineError('frame-source-tick-gap');
+  }
+  assertNodeView(frame);
+  if (frame.nodeCount > previous.maximumDynamicNodes) {
+    throw new SceneDisplayEngineError('frame-node-count-invalid');
+  }
+  fillStore(
+    target,
+    frame,
+    previous.registry,
+    previous.staticStore,
+    limits.maximumTreeDepth,
+    header.sourceTick,
+  );
+  if (target.count && target.displayIds[0] <= previous.maximumStaticDisplayId) {
+    throw new SceneDisplayEngineError('dynamic-id-overlaps-static-range');
+  }
+  const maxSeenDisplayId = validateIdLifetime(
+    previous.dynamicStore,
+    target,
+    previous.maxSeenDisplayId,
+  );
+  return Object.freeze({
+    ...previous,
+    dynamicStore: target,
+    maxSeenDisplayId,
+    lastFrameSeq: header.frameSeq,
+    lastSourceTick: header.sourceTick,
+    lastProjectionId: header.projectionId,
+    lastCorrelationSeq: correlationSeq,
+  });
+}
+
+function fillStore(store, view, registry, staticStore, maximumDepth, sourceTick) {
+  if (view.nodeCount > store.capacity) throw new SceneDisplayEngineError('frame-node-count-invalid');
+  store.reset(view);
+  const pose = {
+    localPosition: new Float32Array(3),
+    localRotationXyzw: new Float32Array(4),
+    localScale: new Float32Array(3),
+  };
+  const profile = {};
+  const interaction = {};
+  let previousId = 0n;
+  for (let slot = 0; slot < view.nodeCount; slot += 1) {
+    const displayId = positiveBigInt(view.displayIdAt(slot), 'displayId');
+    const parentDisplayId = nonnegativeBigInt(view.parentDisplayIdAt(slot), 'parentDisplayId');
+    if (displayId <= previousId || (parentDisplayId !== 0n && parentDisplayId >= displayId)) {
+      throw new SceneDisplayEngineError('node-order-or-parent-invalid');
+    }
+    if (staticStore && staticStore.index.get(displayId) !== -1) {
+      throw new SceneDisplayEngineError('dynamic-id-overlaps-static-range');
+    }
+    const visualTypeId = positiveUint32(view.visualTypeIdAt(slot), 'visualTypeId');
+    const visual = registry.visuals.get(visualTypeId);
+    if (!visual) throw new SceneDisplayEngineError('visual-type-unknown');
+    const flags = uint32(view.flagsAt(slot), 'flags');
+    if (flags & ~NODE_VISIBLE) throw new SceneDisplayEngineError('node-flags-invalid');
+    const animationStateId = uint32(
+      view.animationStateIdAt(slot),
+      'animationStateId',
+    );
+    if (animationStateId !== 0 && !registry.animations.has(animationStateId)) {
+      throw new SceneDisplayEngineError('animation-state-unknown');
+    }
+    const animationStartTick = nonnegativeBigInt(
+      view.animationStartTickAt(slot),
+      'animationStartTick',
+    );
+    if (sourceTick != null && animationStartTick > sourceTick) {
+      throw new SceneDisplayEngineError('animation-before-frame');
+    }
+    const animationFlags = uint32(
+      view.animationFlagsAt(slot),
+      'animationFlags',
+    );
+    if (animationFlags & ~7) throw new SceneDisplayEngineError('animation-flags-invalid');
+    view.readLocalPose(slot, pose);
+    validateLocalPose(pose);
+    const hasProfile = view.readProfileStateAt(slot, profile);
+    const hasInteraction = view.readInteractionAt(slot, interaction);
+    if (Number(hasProfile ? profile.typeId : 0) !== visual.profileTypeId) {
+      throw new SceneDisplayEngineError('profile-type-mismatch');
+    }
+    if (Number(hasInteraction ? interaction.typeId : 0) !== visual.interactionTypeId) {
+      throw new SceneDisplayEngineError('interaction-type-mismatch');
+    }
+
+    store.displayIds[slot] = displayId;
+    store.parentDisplayIds[slot] = parentDisplayId;
+    store.visualTypeIds[slot] = visualTypeId;
+    store.flags[slot] = flags;
+    copyInto(store.localPositions, slot * 3, pose.localPosition, 3);
+    copyInto(store.localRotations, slot * 4, pose.localRotationXyzw, 4);
+    copyInto(store.localScales, slot * 3, pose.localScale, 3);
+    store.animationStateIds[slot] = animationStateId;
+    store.animationStartTicks[slot] = animationStartTick;
+    store.animationFlags[slot] = animationFlags;
+    writePayload(store, slot, 'profile', hasProfile ? profile : null);
+    writePayload(store, slot, 'interaction', hasInteraction ? interaction : null);
+    deriveWorldPose(store, slot, parentDisplayId, staticStore, maximumDepth);
+    store.index.set(displayId, slot);
+    store.count = slot + 1;
+    previousId = displayId;
+  }
+}
+
+function deriveWorldPose(store, slot, parentDisplayId, staticStore, maximumDepth) {
+  if (parentDisplayId === 0n) {
+    store.depths[slot] = 1;
+    copyTuple(store.localPositions, slot * 3, store.worldPositions.subarray(slot * 3), 3);
+    copyTuple(store.localRotations, slot * 4, store.worldRotations.subarray(slot * 4), 4);
+    copyTuple(store.localScales, slot * 3, store.worldScales.subarray(slot * 3), 3);
+    return;
+  }
+  let parentStore = store;
+  let parentSlot = store.index.get(parentDisplayId);
+  if (parentSlot === -1 && staticStore) {
+    parentStore = staticStore;
+    parentSlot = staticStore.index.get(parentDisplayId);
+  }
+  if (parentSlot === -1) throw new SceneDisplayEngineError('dangling-parent');
+  const depth = parentStore.depths[parentSlot] + 1;
+  if (depth > maximumDepth) throw new SceneDisplayEngineError('tree-depth-exceeded');
+  store.depths[slot] = depth;
+  composeWorldPose(parentStore, parentSlot, store, slot);
+}
+
+function composeWorldPose(parent, parentSlot, child, childSlot) {
+  const pp = parentSlot * 3;
+  const pr = parentSlot * 4;
+  const ps = parentSlot * 3;
+  const cp = childSlot * 3;
+  const cr = childSlot * 4;
+  const cs = childSlot * 3;
+  const sx = parent.worldScales[ps] * child.localPositions[cp];
+  const sy = parent.worldScales[ps + 1] * child.localPositions[cp + 1];
+  const sz = parent.worldScales[ps + 2] * child.localPositions[cp + 2];
+  const x = parent.worldRotations[pr];
+  const y = parent.worldRotations[pr + 1];
+  const z = parent.worldRotations[pr + 2];
+  const w = parent.worldRotations[pr + 3];
+  const tx = 2 * (y * sz - z * sy);
+  const ty = 2 * (z * sx - x * sz);
+  const tz = 2 * (x * sy - y * sx);
+  child.worldPositions[cp] = parent.worldPositions[pp] + sx + w * tx + (y * tz - z * ty);
+  child.worldPositions[cp + 1] = parent.worldPositions[pp + 1] + sy + w * ty + (z * tx - x * tz);
+  child.worldPositions[cp + 2] = parent.worldPositions[pp + 2] + sz + w * tz + (x * ty - y * tx);
+  multiplyQuaternionAt(parent.worldRotations, pr, child.localRotations, cr,
+    child.worldRotations, cr);
+  child.worldScales[cs] = parent.worldScales[ps] * child.localScales[cs];
+  child.worldScales[cs + 1] = parent.worldScales[ps + 1] * child.localScales[cs + 1];
+  child.worldScales[cs + 2] = parent.worldScales[ps + 2] * child.localScales[cs + 2];
+}
+
+function validateIdLifetime(oldStore, nextStore, initialMaxSeen) {
+  let oldIndex = 0;
+  let nextIndex = 0;
+  let maxSeen = initialMaxSeen;
+  while (nextIndex < nextStore.count) {
+    const nextId = nextStore.displayIds[nextIndex];
+    while (oldIndex < oldStore.count && oldStore.displayIds[oldIndex] < nextId) oldIndex += 1;
+    const exists = oldIndex < oldStore.count && oldStore.displayIds[oldIndex] === nextId;
+    if (!exists) {
+      if (nextId <= maxSeen) throw new SceneDisplayEngineError('display-id-reused');
+      maxSeen = nextId;
+    }
+    nextIndex += 1;
+  }
+  return maxSeen;
+}
+
+function framePlan(previous, candidate, frame, correlationSeq) {
+  const oldStore = previous.dynamicStore;
+  const nextStore = candidate.dynamicStore;
+  const creates = [];
+  const removals = [];
+  const reparent = [];
+  const localPose = [];
+  const visibility = [];
+  const visualReplace = [];
+  const profile = [];
+  const animation = [];
+  const interaction = [];
+  let oldIndex = 0;
+  let nextIndex = 0;
+  while (oldIndex < oldStore.count || nextIndex < nextStore.count) {
+    const oldId = oldIndex < oldStore.count ? oldStore.displayIds[oldIndex] : null;
+    const nextId = nextIndex < nextStore.count ? nextStore.displayIds[nextIndex] : null;
+    if (nextId == null || (oldId != null && oldId < nextId)) {
+      removals.push(oldIndex);
+      oldIndex += 1;
+      continue;
+    }
+    if (oldId == null || nextId < oldId) {
+      creates.push(nextId);
+      nextIndex += 1;
+      continue;
+    }
+    if (oldStore.parentDisplayIds[oldIndex] !== nextStore.parentDisplayIds[nextIndex]) {
+      reparent.push(nextId);
+    }
+    if (!poseAtEquals(oldStore, oldIndex, nextStore, nextIndex)) localPose.push(nextId);
+    if ((oldStore.flags[oldIndex] & NODE_VISIBLE) !== (nextStore.flags[nextIndex] & NODE_VISIBLE)) {
+      visibility.push(nextId);
+    }
+    if (oldStore.visualTypeIds[oldIndex] !== nextStore.visualTypeIds[nextIndex]) {
+      visualReplace.push(nextId);
+    }
+    if (!payloadAtEquals(oldStore, oldIndex, nextStore, nextIndex, 'profile')) profile.push(nextId);
+    if (!payloadAtEquals(oldStore, oldIndex, nextStore, nextIndex, 'interaction')) {
+      interaction.push(nextId);
+    }
+    if (oldStore.animationStateIds[oldIndex] !== nextStore.animationStateIds[nextIndex]
+        || oldStore.animationStartTicks[oldIndex] !== nextStore.animationStartTicks[nextIndex]
+        || oldStore.animationFlags[oldIndex] !== nextStore.animationFlags[nextIndex]) {
+      animation.push(nextId);
+    }
+    oldIndex += 1;
+    nextIndex += 1;
+  }
+  removals.sort((left, right) => oldStore.depths[right] - oldStore.depths[left]
+    || (oldStore.displayIds[left] < oldStore.displayIds[right] ? 1 : -1));
+  return freezePlan({
+    kind: 'frame',
+    generation: candidate.generation,
+    createIds: creates,
+    removeIds: removals.map((slot) => oldStore.displayIds[slot]),
+    reparentIds: reparent,
+    localPoseDirtyIds: localPose,
+    visibilityDirtyIds: visibility,
+    visualReplaceIds: visualReplace,
+    profileStateDirtyIds: profile,
+    animationDirtyIds: animation,
+    interactionDirtyIds: interaction,
+    events: materializeEvents(frame),
+    frameSeq: candidate.lastFrameSeq,
+    sourceTick: candidate.lastSourceTick,
+    correlationSeq,
+  });
+}
+
+function bootstrapPlan(state, kind, removeIds) {
+  const createIds = [];
+  for (let slot = 0; slot < state.staticStore.count; slot += 1) {
+    createIds.push(state.staticStore.displayIds[slot]);
+  }
+  return freezePlan({
+    kind,
+    generation: state.generation,
+    createIds,
+    removeIds,
+    reparentIds: [],
+    localPoseDirtyIds: [],
+    visibilityDirtyIds: [],
+    visualReplaceIds: [],
+    profileStateDirtyIds: [],
+    animationDirtyIds: [],
+    interactionDirtyIds: [],
+    events: [],
+    frameSeq: null,
+    sourceTick: null,
+    correlationSeq: 0n,
+  });
+}
+
+function allIdsChildFirst(state) {
+  const values = [];
+  for (const store of [state.staticStore, state.dynamicStore]) {
+    for (let slot = 0; slot < store.count; slot += 1) {
+      values.push({ id: store.displayIds[slot], depth: store.depths[slot] });
+    }
+  }
+  values.sort((left, right) => right.depth - left.depth
+    || (left.id < right.id ? 1 : -1));
+  return values.map((value) => value.id);
+}
+
+function materializeEvents(frame) {
+  if (!Number.isInteger(frame.eventCount) || frame.eventCount < 0
+      || typeof frame.eventAt !== 'function') {
+    throw new SceneDisplayEngineError('frame-events-invalid');
+  }
+  const events = [];
+  for (let index = 0; index < frame.eventCount; index += 1) {
+    const event = frame.eventAt(index);
+    events.push(Object.freeze({
+      eventId: positiveBigInt(event.eventId, 'eventId'),
+      eventTypeId: positiveUint32(event.eventTypeId, 'eventTypeId'),
+      flags: eventFlags(event.flags),
+      sourceDisplayId: nonnegativeBigInt(event.sourceDisplayId, 'sourceDisplayId'),
+      targetDisplayId: nonnegativeBigInt(event.targetDisplayId, 'targetDisplayId'),
+      startTick: nonnegativeBigInt(event.startTick, 'startTick'),
+      payload: borrowedBytes(event.payload),
+    }));
+  }
+  return Object.freeze(events);
+}
+
+function locateNode(state, displayId) {
+  let slot = state.staticStore.index.get(displayId);
+  if (slot !== -1) return { store: state.staticStore, slot };
+  slot = state.dynamicStore.index.get(displayId);
+  return slot === -1 ? null : { store: state.dynamicStore, slot };
+}
+
+function borrowedNodeSlot(view, displayId) {
+  let low = 0;
+  let high = view.nodeCount - 1;
+  while (low <= high) {
+    const middle = (low + high) >> 1;
+    const candidate = view.displayIdAt(middle);
+    if (candidate === displayId) return middle;
+    if (candidate < displayId) low = middle + 1;
+    else high = middle - 1;
+  }
+  return -1;
+}
+
+function borrowedPayloadAt(view, slot, kind) {
+  const value = {};
+  const present = kind === 'profile'
+    ? view.readProfileStateAt(slot, value)
+    : view.readInteractionAt(slot, value);
+  return present ? Object.freeze({
+    typeId: value.typeId,
+    flags: value.flags,
+    bytes: value.bytes,
+  }) : null;
+}
+
+function readBorrowedLocalTuple(view, slot, kind) {
+  const pose = {
+    localPosition: new Float32Array(3),
+    localRotationXyzw: new Float32Array(4),
+    localScale: new Float32Array(3),
+  };
+  view.readLocalPose(slot, pose);
+  if (kind === 'position') return pose.localPosition;
+  if (kind === 'rotation') return pose.localRotationXyzw;
+  return pose.localScale;
+}
+
+function readBorrowedWorldPose(state, view, displayId, out) {
+  validatePoseOut(out);
+  const id = positiveBigInt(displayId, 'displayId');
+  const staticSlot = state.staticStore.index.get(id);
+  if (staticSlot !== -1) {
+    state.staticStore.readWorldPose(staticSlot, out);
+    return true;
+  }
+  let slot = borrowedNodeSlot(view, id);
+  if (slot === -1) return false;
+  const chain = [];
+  let based = false;
+  while (slot !== -1) {
+    chain.push(slot);
+    const parentId = view.parentDisplayIdAt(slot);
+    if (parentId === 0n) {
+      setIdentityPose(out);
+      based = true;
+      break;
+    }
+    const parentStaticSlot = state.staticStore.index.get(parentId);
+    if (parentStaticSlot !== -1) {
+      state.staticStore.readWorldPose(parentStaticSlot, out);
+      based = true;
+      break;
+    }
+    const parentSlot = borrowedNodeSlot(view, parentId);
+    if (parentSlot === -1 || parentSlot >= slot) {
+      throw new SceneDisplayEngineError('dangling-parent');
+    }
+    slot = parentSlot;
+  }
+  if (!based) throw new SceneDisplayEngineError('dangling-parent');
+  const local = {
+    localPosition: new Float32Array(3),
+    localRotationXyzw: new Float32Array(4),
+    localScale: new Float32Array(3),
+  };
+  for (let index = chain.length - 1; index >= 0; index -= 1) {
+    view.readLocalPose(chain[index], local);
+    composePoseOutput(out, local);
+  }
+  return true;
+}
+
+function setIdentityPose(out) {
+  out.position[0] = 0; out.position[1] = 0; out.position[2] = 0;
+  out.rotationXyzw[0] = 0; out.rotationXyzw[1] = 0;
+  out.rotationXyzw[2] = 0; out.rotationXyzw[3] = 1;
+  out.scale[0] = 1; out.scale[1] = 1; out.scale[2] = 1;
+}
+
+function composePoseOutput(parent, local) {
+  const px = parent.position[0]; const py = parent.position[1];
+  const pz = parent.position[2];
+  const qx = parent.rotationXyzw[0]; const qy = parent.rotationXyzw[1];
+  const qz = parent.rotationXyzw[2]; const qw = parent.rotationXyzw[3];
+  const sx = parent.scale[0]; const sy = parent.scale[1]; const sz = parent.scale[2];
+  const lx = sx * local.localPosition[0];
+  const ly = sy * local.localPosition[1];
+  const lz = sz * local.localPosition[2];
+  const tx = 2 * (qy * lz - qz * ly);
+  const ty = 2 * (qz * lx - qx * lz);
+  const tz = 2 * (qx * ly - qy * lx);
+  parent.position[0] = px + lx + qw * tx + (qy * tz - qz * ty);
+  parent.position[1] = py + ly + qw * ty + (qz * tx - qx * tz);
+  parent.position[2] = pz + lz + qw * tz + (qx * ty - qy * tx);
+  const rx = local.localRotationXyzw[0]; const ry = local.localRotationXyzw[1];
+  const rz = local.localRotationXyzw[2]; const rw = local.localRotationXyzw[3];
+  parent.rotationXyzw[0] = qw * rx + qx * rw + qy * rz - qz * ry;
+  parent.rotationXyzw[1] = qw * ry - qx * rz + qy * rw + qz * rx;
+  parent.rotationXyzw[2] = qw * rz + qx * ry - qy * rx + qz * rw;
+  parent.rotationXyzw[3] = qw * rw - qx * rx - qy * ry - qz * rz;
+  parent.scale[0] = sx * local.localScale[0];
+  parent.scale[1] = sy * local.localScale[1];
+  parent.scale[2] = sz * local.localScale[2];
+}
+
+function buildMetadataStore(bootstrap) {
+  if (!Number.isInteger(bootstrap.metadataCount) || bootstrap.metadataCount < 0
+      || typeof bootstrap.metadataAt !== 'function') {
+    throw new SceneDisplayEngineError('scene-metadata-view-invalid');
+  }
+  const typeIds = new Uint32Array(bootstrap.metadataCount);
+  const flags = new Uint32Array(bootstrap.metadataCount);
+  const byteRefs = new Array(bootstrap.metadataCount);
+  let previous = 0;
+  for (let index = 0; index < bootstrap.metadataCount; index += 1) {
+    const item = bootstrap.metadataAt(index);
+    const typeId = positiveUint32(item.typeId, 'metadataTypeId');
+    if (typeId <= previous) throw new SceneDisplayEngineError('scene-metadata-order-invalid');
+    typeIds[index] = typeId;
+    flags[index] = uint32(item.flags, 'metadataFlags');
+    if (flags[index] !== 0) throw new SceneDisplayEngineError('metadata-flags-invalid');
+    byteRefs[index] = borrowedBytes(item.bytes);
+    if (byteRefs[index].byteLength === 0) {
+      throw new SceneDisplayEngineError('metadata-bytes-invalid');
+    }
+    previous = typeId;
+  }
+  return Object.freeze({ count: bootstrap.metadataCount, typeIds, flags, byteRefs });
+}
+
+function metadataAt(store, index) {
+  if (!Number.isInteger(index) || index < 0 || index >= store.count) {
+    throw new SceneDisplayEngineError('scene-metadata-index-invalid');
+  }
+  return Object.freeze({
+    typeId: store.typeIds[index],
+    flags: store.flags[index],
+    bytes: store.byteRefs[index],
+  });
+}
+
+function metadataByType(store, metadataTypeId) {
+  const typeId = positiveUint32(metadataTypeId, 'metadataTypeId');
+  let low = 0;
+  let high = store.count - 1;
+  while (low <= high) {
+    const middle = (low + high) >> 1;
+    const candidate = store.typeIds[middle];
+    if (candidate === typeId) return metadataAt(store, middle);
+    if (candidate < typeId) low = middle + 1;
+    else high = middle - 1;
+  }
+  return null;
+}
+
+function nodeById(state, displayId) {
+  const located = locateNode(state, positiveBigInt(displayId, 'displayId'));
+  return located ? new PresentationNodeSlotView(located.store, located.slot) : null;
+}
+
+function writePayload(store, slot, kind, payload) {
+  const profile = kind === 'profile';
+  const typeIds = profile ? store.profileTypeIds : store.interactionTypeIds;
+  const flags = profile ? store.profileFlags : store.interactionFlags;
+  const byteRefs = profile ? store.profileBytes : store.interactionBytes;
+  if (!payload) {
+    typeIds[slot] = 0;
+    flags[slot] = 0;
+    byteRefs[slot] = null;
+    return;
+  }
+  typeIds[slot] = positiveUint32(payload.typeId, `${kind}TypeId`);
+  flags[slot] = uint32(payload.flags, `${kind}Flags`);
+  if (flags[slot] !== 0) throw new SceneDisplayEngineError(`${kind}-flags-invalid`);
+  byteRefs[slot] = borrowedBytes(payload.bytes);
+  if (byteRefs[slot].byteLength === 0) {
+    throw new SceneDisplayEngineError(`${kind}-bytes-invalid`);
+  }
+}
+
+function poseAtEquals(left, leftSlot, right, rightSlot) {
+  return tupleAtEquals(left.localPositions, leftSlot * 3, right.localPositions, rightSlot * 3, 3)
+    && tupleAtEquals(left.localRotations, leftSlot * 4, right.localRotations, rightSlot * 4, 4)
+    && tupleAtEquals(left.localScales, leftSlot * 3, right.localScales, rightSlot * 3, 3);
+}
+
+function payloadAtEquals(left, leftSlot, right, rightSlot, kind) {
+  const profile = kind === 'profile';
+  const leftTypes = profile ? left.profileTypeIds : left.interactionTypeIds;
+  const rightTypes = profile ? right.profileTypeIds : right.interactionTypeIds;
+  const leftFlags = profile ? left.profileFlags : left.interactionFlags;
+  const rightFlags = profile ? right.profileFlags : right.interactionFlags;
+  const leftBytes = profile ? left.profileBytes : left.interactionBytes;
+  const rightBytes = profile ? right.profileBytes : right.interactionBytes;
+  return leftTypes[leftSlot] === rightTypes[rightSlot]
+    && leftFlags[leftSlot] === rightFlags[rightSlot]
+    && bytesEqual(leftBytes[leftSlot], rightBytes[rightSlot]);
+}
+
+function freezePlan(value) {
+  const result = { ...value };
+  for (const field of ['createIds', 'removeIds', 'reparentIds', 'localPoseDirtyIds',
+    'visibilityDirtyIds', 'visualReplaceIds', 'profileStateDirtyIds',
+    'animationDirtyIds', 'interactionDirtyIds', 'events']) {
+    result[field] = Object.freeze([...(value[field] ?? [])]);
+  }
+  return Object.freeze(result);
+}
+
+function validateLocalPose(pose) {
+  for (const value of pose.localPosition) finite(value, 'localPosition');
+  let norm = 0;
+  for (const value of pose.localRotationXyzw) {
+    finite(value, 'localRotationXyzw');
+    norm += value * value;
+  }
+  for (const value of pose.localScale) {
+    if (finite(value, 'localScale') <= 0) throw new SceneDisplayEngineError('node-scale-invalid');
+  }
+  if (Math.abs(Math.sqrt(norm) - 1) > 1e-3) {
+    throw new SceneDisplayEngineError('node-quaternion-invalid');
+  }
+}
+
+function assertBootstrapView(value) {
+  if (!value?.header || !value?.identity || !Number.isInteger(value.nodeCount)
+      || !Number.isInteger(value.visualTypeCount) || !Number.isInteger(value.animationStateCount)
+      || typeof value.displayIdAt !== 'function' || typeof value.visualTypeAt !== 'function'
+      || typeof value.animationStateAt !== 'function') {
+    throw new SceneDisplayEngineError('bootstrap-view-invalid');
+  }
+}
+
+function assertNodeView(value) {
+  for (const method of ['displayIdAt', 'parentDisplayIdAt', 'visualTypeIdAt', 'flagsAt',
+    'animationStateIdAt', 'animationStartTickAt', 'animationFlagsAt', 'readLocalPose',
+    'readProfileStateAt', 'readInteractionAt']) {
+    if (!value || typeof value[method] !== 'function') {
+      throw new SceneDisplayEngineError('frame-view-invalid');
+    }
+  }
+  if (!Number.isInteger(value.nodeCount) || value.nodeCount < 0) {
+    throw new SceneDisplayEngineError('frame-view-invalid');
+  }
+}
+
 function normalizeFrameHeader(header) {
   if (!header) throw new SceneDisplayEngineError('frame-header-invalid');
   return Object.freeze({
     bootstrapId: positiveBigInt(header.bootstrapId, 'bootstrapId'),
     frameSeq: positiveBigInt(header.frameSeq, 'frameSeq'),
+    projectionId: positiveBigInt(header.projectionId, 'projectionId'),
     sceneEpoch: positiveBigInt(header.sceneEpoch, 'sceneEpoch'),
     sourceTick: nonnegativeBigInt(header.sourceTick, 'sourceTick'),
   });
 }
 
-function normalizeEntity(value, ownerState, header, registryOwnerTypeId) {
-  if (!value) throw new SceneDisplayEngineError('frame-entity-invalid');
-  return Object.freeze({
-    animationFlags: Number(value.animationFlags ?? 0),
-    animationStartTick: nonnegativeBigInt(value.animationStartTick ?? 0, 'animationStartTick'),
-    animationStateId: Number(value.animationStateId ?? 0),
-    displayId: positiveBigInt(value.displayId, 'displayId'),
-    flags: Number(value.flags ?? 0),
-    ownerState: ownerState ?? null,
-    ownerTypeId: Number(
-      registryOwnerTypeId ?? value.ownerTypeId ?? ownerState?.ownerTypeId ?? 0,
-    ),
-    position: tuple(value.position, 3, 'position'),
-    projectionId: positiveBigInt(value.projectionId ?? header.frameSeq, 'projectionId'),
-    rotationXyzw: tuple(value.rotationXyzw, 4, 'rotationXyzw'),
-    scale: tuple(value.scale, 3, 'scale'),
-    sourceTick: header.sourceTick,
-    visualTypeId: Number(value.visualTypeId),
-  });
-}
-
-function tuple(value, length, field) {
-  if (!value || value.length !== length) throw new SceneDisplayEngineError(`${field}-invalid`);
-  const result = Array.from(value, Number);
-  if (!result.every(Number.isFinite)) throw new SceneDisplayEngineError(`${field}-invalid`);
-  return Object.freeze(result);
-}
-
-function normalizeIdentity(value) {
-  return Object.freeze({
-    bootstrapId: positiveBigInt(value.bootstrapId, 'bootstrapId'),
-    profileId: canonicalText(value.profileId, 'profileId'),
-    sceneEpoch: positiveBigInt(value.sceneEpoch, 'sceneEpoch'),
-    viewerScope: canonicalText(value.viewerScope, 'viewerScope'),
-  });
-}
-
 function normalizeLimits(changes) {
-  const limits = { ...DEFAULT_DISPLAY_CORE_LIMITS, ...changes };
-  for (const [field, value] of Object.entries(limits)) {
-    if (!Number.isSafeInteger(value) || value <= 0) {
-      throw new SceneDisplayEngineError(`${field}-invalid`);
-    }
+  const limits = { ...DEFAULT_SCENE_TREE_LIMITS, ...changes };
+  for (const [field, value] of Object.entries(limits)) positiveInteger(value, field);
+  if (limits.maximumTreeDepth > 0xffff) {
+    throw new SceneDisplayEngineError('maximumTreeDepth-invalid');
   }
   return Object.freeze(limits);
 }
 
-function readonlyMap(source) {
-  const copy = new Map(source);
-  return Object.freeze({
-    get size() { return copy.size; },
-    get: (key) => copy.get(key),
-    has: (key) => copy.has(key),
-    entries: () => copy.entries(),
-    keys: () => copy.keys(),
-    values: () => copy.values(),
-    [Symbol.iterator]: () => copy[Symbol.iterator](),
-  });
+function validatePoseOut(out) {
+  if (!out || !out.position || !out.rotationXyzw || !out.scale) {
+    throw new SceneDisplayEngineError('world-pose-output-invalid');
+  }
+  if (out.position.length < 3 || out.rotationXyzw.length < 4 || out.scale.length < 3) {
+    throw new SceneDisplayEngineError('world-pose-output-invalid');
+  }
+}
+
+function tupleView(values, slot, stride) {
+  const offset = slot * stride;
+  return values.subarray(offset, offset + stride);
+}
+
+function copyInto(target, offset, source, count) {
+  for (let index = 0; index < count; index += 1) target[offset + index] = source[index];
+}
+
+function copyTuple(source, offset, target, count) {
+  for (let index = 0; index < count; index += 1) target[index] = source[offset + index];
+}
+
+function tupleAtEquals(left, leftOffset, right, rightOffset, count) {
+  for (let index = 0; index < count; index += 1) {
+    if (left[leftOffset + index] !== right[rightOffset + index]) return false;
+  }
+  return true;
+}
+
+function bytesEqual(left, right) {
+  if (left == null || right == null) return left === right;
+  if (left.byteLength !== right.byteLength) return false;
+  for (let index = 0; index < left.byteLength; index += 1) {
+    if (left[index] !== right[index]) return false;
+  }
+  return true;
+}
+
+function multiplyQuaternionAt(left, leftOffset, right, rightOffset, target, targetOffset) {
+  const ax = left[leftOffset]; const ay = left[leftOffset + 1];
+  const az = left[leftOffset + 2]; const aw = left[leftOffset + 3];
+  const bx = right[rightOffset]; const by = right[rightOffset + 1];
+  const bz = right[rightOffset + 2]; const bw = right[rightOffset + 3];
+  target[targetOffset] = aw * bx + ax * bw + ay * bz - az * by;
+  target[targetOffset + 1] = aw * by - ax * bz + ay * bw + az * bx;
+  target[targetOffset + 2] = aw * bz + ax * by - ay * bx + az * bw;
+  target[targetOffset + 3] = aw * bw - ax * bx - ay * by - az * bz;
+}
+
+function hashId(id, mask) {
+  return Number((id ^ (id >> 32n)) & BigInt(mask));
+}
+
+function borrowedBytes(value) {
+  if (value instanceof Uint8Array) return value;
+  if (value instanceof ArrayBuffer) return new Uint8Array(value);
+  if (ArrayBuffer.isView(value)) {
+    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  }
+  throw new SceneDisplayEngineError('payload-bytes-invalid');
 }
 
 function canonicalText(value, field) {
-  if (typeof value !== 'string' || value.length === 0 || value.trim() !== value) {
+  if (typeof value !== 'string' || !value || value.trim() !== value) {
+    throw new SceneDisplayEngineError(`${field}-invalid`);
+  }
+  return value;
+}
+
+function finite(value, field) {
+  if (!Number.isFinite(value)) throw new SceneDisplayEngineError(`${field}-invalid`);
+  return value;
+}
+
+function positiveInteger(value, field) {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new SceneDisplayEngineError(`${field}-invalid`);
+  }
+  return value;
+}
+
+function uint32(value, field) {
+  if (!Number.isInteger(value) || value < 0 || value > 0xffff_ffff) {
+    throw new SceneDisplayEngineError(`${field}-invalid`);
+  }
+  return value;
+}
+
+function positiveUint32(value, field) {
+  const result = uint32(value, field);
+  if (result === 0) throw new SceneDisplayEngineError(`${field}-invalid`);
+  return result;
+}
+
+function eventFlags(value) {
+  const result = uint32(value, 'eventFlags');
+  if (result & ~1) throw new SceneDisplayEngineError('eventFlags-invalid');
+  return result;
+}
+
+function nonnegativeInteger(value, field) {
+  if (!Number.isSafeInteger(value) || value < 0) {
     throw new SceneDisplayEngineError(`${field}-invalid`);
   }
   return value;
@@ -457,7 +1330,7 @@ function positiveBigInt(value, field) {
 function nonnegativeBigInt(value, field) {
   try {
     const result = BigInt(value);
-    if (result < 0n) throw new Error('negative');
+    if (result < 0n || result > (1n << 64n) - 1n) throw new Error('range');
     return result;
   } catch {
     throw new SceneDisplayEngineError(`${field}-invalid`);

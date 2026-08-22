@@ -3,6 +3,7 @@ import { mkdir, open, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import {
+  PRESENTATION_CONTROL_MAXIMUM_BYTES,
   PRESENTATION_CONTROL_SERVER_TO_CLIENT,
   canonicalJSON,
   parsePresentationControl,
@@ -11,13 +12,14 @@ import {
 const MANIFEST_NAME = 'presentation-manifest.json';
 const INDEX_NAME = 'presentation-index.bin';
 const SEGMENTS_NAME = 'presentation-segments.bin';
-const MANIFEST_SCHEMA = 'scene-presentation-archive-v2@1';
+const MANIFEST_SCHEMA = 'scene-presentation-archive-v3@1';
 const INDEX_MAGIC = 'SEIX';
-const INDEX_VERSION = 2;
-const INDEX_HEADER_BYTES = 64;
+const INDEX_VERSION = 3;
+const INDEX_HEADER_BYTES = 112;
 const INDEX_ENTRY_BYTES = 112;
+const CHECKPOINT_DIRECTORY_ENTRY_BYTES = 48;
 const BLOCK_MAGIC = 'SEAB';
-const BLOCK_VERSION = 2;
+const BLOCK_VERSION = 3;
 const BLOCK_HEADER_BYTES = 64;
 const BLOCK_KIND_CHECKPOINT = 1;
 const BLOCK_KIND_FRAME = 2;
@@ -25,6 +27,7 @@ const BLOCK_KIND_CORRELATION = 3;
 const COMPRESSION_NONE = 0;
 const SHA256_BYTES = 32;
 const MAX_SAFE_BIGINT = BigInt(Number.MAX_SAFE_INTEGER);
+const MAXIMUM_PENDING_FRAMES = 8;
 
 export class PresentationArchiveError extends Error {
   constructor(message) {
@@ -60,8 +63,20 @@ export class FileByteRangeSource {
     const position = bigintToSafeNumber(offset, 'byte range offset');
     positiveSafeInteger(length, 'byte range length');
     const buffer = Buffer.allocUnsafe(length);
-    const { bytesRead } = await this.handle.read(buffer, 0, length, position);
-    if (bytesRead !== length) throw new PresentationArchiveError('byte range is truncated');
+    let bytesRead = 0;
+    while (bytesRead < length) {
+      const result = await this.handle.read(
+        buffer,
+        bytesRead,
+        length - bytesRead,
+        position + bytesRead,
+      );
+      if (!Number.isSafeInteger(result?.bytesRead) || result.bytesRead <= 0
+          || result.bytesRead > length - bytesRead) {
+        throw new PresentationArchiveError('byte range is truncated');
+      }
+      bytesRead += result.bytesRead;
+    }
     return new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength).slice();
   }
 
@@ -81,8 +96,13 @@ class FileByteSink {
   static async create(path, prefixBytes = 0) {
     const handle = await open(path, 'w+');
     const sink = new FileByteSink(handle);
-    if (prefixBytes > 0) await sink.append(new Uint8Array(prefixBytes));
-    return sink;
+    try {
+      if (prefixBytes > 0) await sink.append(new Uint8Array(prefixBytes));
+      return sink;
+    } catch (error) {
+      await sink.close().catch(() => {});
+      throw error;
+    }
   }
 
   constructor(handle) {
@@ -95,7 +115,7 @@ class FileByteSink {
     this.requireOpen();
     const bytes = readonlyBytes(value, 'byte sink append');
     const start = this.offset;
-    await this.handle.write(bytes, 0, bytes.byteLength, bigintToSafeNumber(start, 'sink offset'));
+    await writeAll(this.handle, bytes, bigintToSafeNumber(start, 'sink offset'));
     this.offset += BigInt(bytes.byteLength);
     return start;
   }
@@ -107,7 +127,7 @@ class FileByteSink {
     if (offset + BigInt(bytes.byteLength) > this.offset) {
       throw new PresentationArchiveError('writeAt exceeds appended bytes');
     }
-    await this.handle.write(bytes, 0, bytes.byteLength, numeric);
+    await writeAll(this.handle, bytes, numeric);
   }
 
   async sync() {
@@ -130,9 +150,16 @@ class FileByteSink {
 export class PresentationArchiveWriter {
   static async createDirectory(directory, options) {
     await mkdir(directory, { recursive: true });
-    const segments = await FileByteSink.create(join(directory, SEGMENTS_NAME));
-    const index = await FileByteSink.create(join(directory, INDEX_NAME), INDEX_HEADER_BYTES);
-    return new PresentationArchiveWriter({ directory, segments, index, ...options });
+    let segments = null;
+    let index = null;
+    try {
+      segments = await FileByteSink.create(join(directory, SEGMENTS_NAME));
+      index = await FileByteSink.create(join(directory, INDEX_NAME), INDEX_HEADER_BYTES);
+      return new PresentationArchiveWriter({ directory, segments, index, ...options });
+    } catch (error) {
+      await Promise.allSettled([segments?.close(), index?.close()]);
+      throw error;
+    }
   }
 
   constructor({
@@ -174,6 +201,7 @@ export class PresentationArchiveWriter {
     this.entryCount = 0n;
     this.segmentCount = 0;
     this.checkpointCount = 0;
+    this.checkpointDirectory = [];
     this.frameCount = 0n;
     this.correlationCount = 0n;
     this.current = null;
@@ -186,6 +214,7 @@ export class PresentationArchiveWriter {
     this.startTick = null;
     this.endTick = null;
     this.sealed = false;
+    this.closed = false;
   }
 
   async startSegment({
@@ -231,6 +260,14 @@ export class PresentationArchiveWriter {
     this.lastCorrelationSeq = 0n;
     this.startTick ??= tick;
     this.endTick = tick;
+    this.checkpointDirectory.push(Object.freeze({
+      checkpointId: checkpoint,
+      segmentId: this.current.segmentId,
+      indexEntryNumber: this.entryCount,
+      sceneEpoch: epoch,
+      bootstrapId: bootstrap,
+      sourceTick: tick,
+    }));
     await this.appendBlock({
       kind: BLOCK_KIND_CHECKPOINT,
       recordSeq: checkpoint,
@@ -244,6 +281,11 @@ export class PresentationArchiveWriter {
 
   async appendFrame({ frameSeq, sourceTick, projectionId, packet }) {
     this.requireSegment();
+    if (this.pendingFrames.size >= MAXIMUM_PENDING_FRAMES) {
+      throw new PresentationArchiveError(
+        `uncorrelated frame window exceeds ${MAXIMUM_PENDING_FRAMES}`,
+      );
+    }
     const sequence = positiveBigInt(frameSeq, 'frameSeq');
     if (sequence !== this.lastFrameSeq + 1n) {
       throw new PresentationArchiveError('frame sequence gap');
@@ -268,9 +310,6 @@ export class PresentationArchiveWriter {
       projectionId: projection,
       sha256: entry.sha256,
     });
-    if (this.pendingFrames.size > this.limits.maximumEntries) {
-      throw new PresentationArchiveError('unbounded uncorrelated frame window');
-    }
     this.lastFrameSeq = sequence;
     this.frameCount += 1n;
     this.current.frameCount += 1;
@@ -279,6 +318,10 @@ export class PresentationArchiveWriter {
 
   async appendCorrelation({ correlation }) {
     this.requireSegment();
+    const correlationLength = byteView(correlation, 'correlation').byteLength;
+    if (correlationLength === 0 || correlationLength > PRESENTATION_CONTROL_MAXIMUM_BYTES) {
+      throw new PresentationArchiveError('archive correlation byte length is invalid');
+    }
     const raw = readonlyBytes(correlation, 'correlation');
     const message = parsePresentationControl(raw, {
       direction: PRESENTATION_CONTROL_SERVER_TO_CLIENT,
@@ -295,11 +338,19 @@ export class PresentationArchiveWriter {
     if (sequence !== this.lastCorrelationSeq + 1n) {
       throw new PresentationArchiveError('correlation sequence gap');
     }
+    if (BigInt(message.session_seq) !== sequence) {
+      throw new PresentationArchiveError('correlation session sequence mismatch');
+    }
     const tick = nonnegativeBigInt(payload.source_tick, 'sourceTick');
     if (this.endTick != null && tick !== this.endTick && tick !== this.endTick + 1n) {
       throw new PresentationArchiveError('correlation source tick gap');
     }
     const projection = positiveBigInt(payload.projection_id, 'projectionId');
+    const expectedFrameSeqs = [...this.pendingFrames.keys()];
+    if (payload.frame_refs.length !== expectedFrameSeqs.length
+        || payload.frame_refs.some((ref, index) => ref.frame_seq !== expectedFrameSeqs[index])) {
+      throw new PresentationArchiveError('correlation frame batch is not exact and ordered');
+    }
     for (const ref of payload.frame_refs) {
       const frame = this.pendingFrames.get(ref.frame_seq);
       if (!frame || frame.sha256 !== ref.sha256) {
@@ -345,12 +396,42 @@ export class PresentationArchiveWriter {
 
   async seal() {
     this.requireWritable();
+    try {
+      return await this.sealOwnedArchive();
+    } catch (error) {
+      try {
+        await this.closeIncomplete();
+      } catch (closeError) {
+        throw new AggregateError([error, closeError], 'archive seal and cleanup failed');
+      }
+      throw error;
+    }
+  }
+
+  async sealOwnedArchive() {
     if (this.current) await this.sealSegment();
     if (this.segmentCount === 0) throw new PresentationArchiveError('archive has no segments');
+    const indexEntriesDigest = this.indexHash.copy().digest();
+    const checkpointDirectoryHash = createHash('sha256');
+    const orderedCheckpoints = [...this.checkpointDirectory].sort(
+      (left, right) => left.checkpointId < right.checkpointId ? -1 : 1,
+    );
+    for (const checkpoint of orderedCheckpoints) {
+      const encoded = encodeCheckpointDirectoryEntry(checkpoint);
+      await this.index.append(encoded);
+      this.indexHash.update(encoded);
+      checkpointDirectoryHash.update(encoded);
+    }
+    const checkpointDirectoryDigest = checkpointDirectoryHash.digest();
     const indexDigest = this.indexHash.digest();
+    const checkpointDirectoryOffset = BigInt(INDEX_HEADER_BYTES)
+      + this.entryCount * BigInt(INDEX_ENTRY_BYTES);
     const indexHeader = encodeIndexHeader({
       entryCount: this.entryCount,
-      payloadSha256: indexDigest,
+      checkpointCount: BigInt(this.checkpointCount),
+      checkpointDirectoryOffset,
+      indexEntriesSha256: indexEntriesDigest,
+      checkpointDirectorySha256: checkpointDirectoryDigest,
     });
     await this.index.writeAt(0n, indexHeader);
     const segmentsDigest = this.segmentsHash.digest();
@@ -359,6 +440,7 @@ export class PresentationArchiveWriter {
     await this.segments.sync();
     const manifest = {
       archive_root_sha256: archiveRootSha256,
+      checkpoint_directory_sha256: checkpointDirectoryDigest.toString('hex'),
       checkpoint_count: this.checkpointCount,
       compression_codecs: ['none'],
       correlation_count: this.correlationCount.toString(),
@@ -372,6 +454,7 @@ export class PresentationArchiveWriter {
         maximum_segments: this.limits.maximumSegments,
       },
       index_payload_sha256: indexDigest.toString('hex'),
+      index_entries_sha256: indexEntriesDigest.toString('hex'),
       schema_identity: MANIFEST_SCHEMA,
       segment_count: this.segmentCount,
       segments_sha256: segmentsDigest.toString('hex'),
@@ -382,9 +465,26 @@ export class PresentationArchiveWriter {
       encoding: 'utf8',
       flag: 'wx',
     });
-    await Promise.all([this.index.close(), this.segments.close()]);
+    await this.closeOwnedSinks();
     this.sealed = true;
     return Object.freeze(manifest);
+  }
+
+  async closeIncomplete() {
+    if (this.closed) return;
+    await this.closeOwnedSinks();
+    this.sealed = true;
+  }
+
+  async closeOwnedSinks() {
+    if (this.closed) return;
+    this.closed = true;
+    const results = await Promise.allSettled([this.index.close(), this.segments.close()]);
+    const failures = results.filter((result) => result.status === 'rejected');
+    if (failures.length === 1) throw failures[0].reason;
+    if (failures.length > 1) {
+      throw new AggregateError(failures.map((result) => result.reason), 'archive sink close failed');
+    }
   }
 
   async appendBlock({
@@ -396,10 +496,11 @@ export class PresentationArchiveWriter {
     frameSeq,
     projectionId,
   }) {
-    const bytes = readonlyBytes(payload, 'archive block');
-    if (bytes.byteLength === 0 || bytes.byteLength > this.limits.maximumBlockBytes) {
+    const payloadView = byteView(payload, 'archive block');
+    if (payloadView.byteLength === 0 || payloadView.byteLength > this.limits.maximumBlockBytes) {
       throw new PresentationArchiveError('archive block byte length is invalid');
     }
+    const bytes = new Uint8Array(payloadView);
     if (this.entryCount >= BigInt(this.limits.maximumEntries)) {
       throw new PresentationArchiveError('archive exceeds maximumEntries');
     }
@@ -441,29 +542,51 @@ export class PresentationArchiveWriter {
   }
 
   requireWritable() {
-    if (this.sealed) throw new PresentationArchiveError('archive writer is sealed');
+    if (this.sealed || this.closed) throw new PresentationArchiveError('archive writer is sealed');
+  }
+}
+
+async function writeAll(handle, bytes, position) {
+  let written = 0;
+  while (written < bytes.byteLength) {
+    const result = await handle.write(
+      bytes,
+      written,
+      bytes.byteLength - written,
+      position + written,
+    );
+    if (!Number.isSafeInteger(result?.bytesWritten) || result.bytesWritten <= 0
+        || result.bytesWritten > bytes.byteLength - written) {
+      throw new PresentationArchiveError('archive file write made no valid progress');
+    }
+    written += result.bytesWritten;
   }
 }
 
 export class PresentationArchiveReader {
   static async openDirectory(directory, options = {}) {
-    const [manifestRaw, index, segments] = await Promise.all([
-      readFile(join(directory, MANIFEST_NAME), 'utf8'),
-      FileByteRangeSource.open(join(directory, INDEX_NAME)),
-      FileByteRangeSource.open(join(directory, SEGMENTS_NAME)),
-    ]);
-    let manifest;
+    let index = null;
+    let segments = null;
     try {
-      manifest = JSON.parse(manifestRaw);
+      const manifestRaw = await readFile(join(directory, MANIFEST_NAME), 'utf8');
+      let manifest;
+      try {
+        manifest = JSON.parse(manifestRaw);
+      } catch (error) {
+        throw new PresentationArchiveError('archive manifest is invalid JSON', { cause: error });
+      }
+      if (`${canonicalJSON(manifest)}\n` !== manifestRaw) {
+        throw new PresentationArchiveError('archive manifest is not canonical');
+      }
+      index = await FileByteRangeSource.open(join(directory, INDEX_NAME));
+      segments = await FileByteRangeSource.open(join(directory, SEGMENTS_NAME));
+      const reader = new PresentationArchiveReader({ manifest, index, segments, ...options });
+      await reader.open();
+      return reader;
     } catch (error) {
-      throw new PresentationArchiveError('archive manifest is invalid JSON', { cause: error });
+      await Promise.allSettled([index?.close(), segments?.close()]);
+      throw error;
     }
-    if (`${canonicalJSON(manifest)}\n` !== manifestRaw) {
-      throw new PresentationArchiveError('archive manifest is not canonical');
-    }
-    const reader = new PresentationArchiveReader({ manifest, index, segments, ...options });
-    await reader.open();
-    return reader;
   }
 
   constructor({ manifest, index, segments, limits = {} }) {
@@ -472,6 +595,7 @@ export class PresentationArchiveReader {
     this.segments = segments;
     this.limits = normalizeLimits(limits);
     this.indexHeader = null;
+    this.checkpointDirectory = null;
     this.segmentsSize = null;
     this.closed = false;
   }
@@ -492,8 +616,16 @@ export class PresentationArchiveReader {
     if (this.indexHeader.entryCount !== BigInt(this._manifest.entry_count)) {
       throw new PresentationArchiveError('archive index entry count mismatch');
     }
-    const expectedIndexSize = BigInt(INDEX_HEADER_BYTES)
+    if (this.indexHeader.checkpointCount !== BigInt(this._manifest.checkpoint_count)) {
+      throw new PresentationArchiveError('archive checkpoint directory count mismatch');
+    }
+    const expectedDirectoryOffset = BigInt(INDEX_HEADER_BYTES)
       + this.indexHeader.entryCount * BigInt(INDEX_ENTRY_BYTES);
+    if (this.indexHeader.checkpointDirectoryOffset !== expectedDirectoryOffset) {
+      throw new PresentationArchiveError('archive checkpoint directory offset is invalid');
+    }
+    const expectedIndexSize = expectedDirectoryOffset
+      + this.indexHeader.checkpointCount * BigInt(CHECKPOINT_DIRECTORY_ENTRY_BYTES);
     if (indexSize !== expectedIndexSize) {
       throw new PresentationArchiveError('archive index is truncated or has trailing bytes');
     }
@@ -501,47 +633,58 @@ export class PresentationArchiveReader {
     if (this.indexHeader.entryCount > BigInt(this.limits.maximumEntries)) {
       throw new PresentationArchiveError('archive exceeds local maximumEntries');
     }
+    if (this.indexHeader.checkpointCount > BigInt(this.limits.maximumSegments)) {
+      throw new PresentationArchiveError('archive exceeds local maximumSegments');
+    }
+    const directoryLength = bigintToSafeNumber(
+      this.indexHeader.checkpointCount * BigInt(CHECKPOINT_DIRECTORY_ENTRY_BYTES),
+      'checkpoint directory length',
+    );
+    const directoryBytes = await this.index.read(
+      this.indexHeader.checkpointDirectoryOffset,
+      directoryLength,
+    );
+    const directoryDigest = createHash('sha256').update(directoryBytes).digest('hex');
+    if (directoryDigest !== this._manifest.checkpoint_directory_sha256
+        || directoryDigest !== this.indexHeader.checkpointDirectorySha256.toString('hex')) {
+      throw new PresentationArchiveError('archive checkpoint directory hash mismatch');
+    }
+    const checkpoints = [];
+    let previousCheckpointId = 0n;
+    for (let offset = 0; offset < directoryBytes.byteLength;
+      offset += CHECKPOINT_DIRECTORY_ENTRY_BYTES) {
+      const checkpoint = decodeCheckpointDirectoryEntry(
+        directoryBytes.subarray(offset, offset + CHECKPOINT_DIRECTORY_ENTRY_BYTES),
+      );
+      if (checkpoint.checkpointId <= previousCheckpointId
+          || checkpoint.segmentId > this._manifest.segment_count
+          || checkpoint.indexEntryNumber >= this.indexHeader.entryCount) {
+        throw new PresentationArchiveError('archive checkpoint directory is not canonical');
+      }
+      checkpoints.push(checkpoint);
+      previousCheckpointId = checkpoint.checkpointId;
+    }
+    this.checkpointDirectory = Object.freeze(checkpoints);
     this.segmentsSize = segmentsSize;
   }
 
   async checkpoints() {
-    const checkpoints = [];
-    for (let index = 0n; index < this.indexHeader.entryCount; index += 1n) {
-      const entry = await this.readIndexEntry(index);
-      if (entry.kind === BLOCK_KIND_CHECKPOINT) checkpoints.push(freezePublicEntry(entry));
-    }
-    return Object.freeze(checkpoints);
+    return Object.freeze(this.checkpointDirectory.map(freezePublicCheckpoint));
   }
 
   async openCheckpoint(checkpointId) {
     const target = decimalU64(checkpointId, 'checkpointId');
-    for (let index = 0n; index < this.indexHeader.entryCount; index += 1n) {
-      const entry = await this.readIndexEntry(index);
-      if (entry.kind === BLOCK_KIND_CHECKPOINT && entry.recordSeq === target) {
-        return Object.freeze({
-          checkpoint: freezePublicEntry(entry),
-          bootstrapPacket: await this.readBlock(entry),
-          nextEntryIndex: index + 1n,
-        });
-      }
+    const checkpoint = binarySearchCheckpoint(this.checkpointDirectory, target);
+    if (checkpoint == null) {
+      throw new PresentationArchiveError('archive checkpoint does not exist');
     }
-    throw new PresentationArchiveError('archive checkpoint does not exist');
-  }
-
-  async readFrame(frameSeq, options = {}) {
-    return this.readBySequence(
-      BLOCK_KIND_FRAME,
-      positiveBigInt(frameSeq, 'frameSeq'),
-      options,
-    );
-  }
-
-  async readCorrelation(correlationSeq, options = {}) {
-    return this.readBySequence(
-      BLOCK_KIND_CORRELATION,
-      positiveBigInt(correlationSeq, 'correlationSeq'),
-      options,
-    );
+    const entry = await this.readIndexEntry(checkpoint.indexEntryNumber);
+    assertCheckpointDirectoryMatch(checkpoint, entry);
+    return Object.freeze({
+      checkpoint: freezePublicEntry(entry),
+      bootstrapPacket: await this.readBlock(entry),
+      nextEntryIndex: checkpoint.indexEntryNumber + 1n,
+    });
   }
 
   async *iterateFrom(checkpointId) {
@@ -564,7 +707,8 @@ export class PresentationArchiveReader {
   }
 
   async verify() {
-    const indexHash = createHash('sha256');
+    const indexEntriesHash = createHash('sha256');
+    const indexPayloadHash = createHash('sha256');
     const segmentsHash = createHash('sha256');
     let expectedOffset = 0n;
     let currentSegment = 0;
@@ -573,14 +717,18 @@ export class PresentationArchiveReader {
     let lastFrameSeq = 0n;
     let lastCorrelationSeq = 0n;
     let lastSourceTick = null;
+    let segmentFrames = 0;
+    let segmentCorrelations = 0;
     let checkpoints = 0;
     let frames = 0n;
     let correlations = 0n;
     const checkpointIds = new Set();
+    const checkpointIndexEntries = new Map();
     for (let index = 0n; index < this.indexHeader.entryCount; index += 1n) {
       const offset = BigInt(INDEX_HEADER_BYTES) + index * BigInt(INDEX_ENTRY_BYTES);
       const rawEntry = await this.index.read(offset, INDEX_ENTRY_BYTES);
-      indexHash.update(rawEntry);
+      indexEntriesHash.update(rawEntry);
+      indexPayloadHash.update(rawEntry);
       const entry = decodeIndexEntry(rawEntry);
       validateEntryLimits(entry, this.limits);
       if (entry.dataOffset !== expectedOffset) {
@@ -588,6 +736,11 @@ export class PresentationArchiveReader {
       }
       expectedOffset += BigInt(entry.dataLength);
       if (entry.segmentId !== currentSegment) {
+        if (currentSegment !== 0 && (segmentFrames === 0 || segmentCorrelations === 0)) {
+          throw new PresentationArchiveError(
+            'archive segment requires a complete frame and correlation',
+          );
+        }
         if (entry.segmentId !== currentSegment + 1 || entry.kind !== BLOCK_KIND_CHECKPOINT) {
           throw new PresentationArchiveError('archive segment boundary is invalid');
         }
@@ -597,10 +750,20 @@ export class PresentationArchiveReader {
         lastFrameSeq = 0n;
         lastCorrelationSeq = 0n;
         lastSourceTick = entry.sourceTick;
+        segmentFrames = 0;
+        segmentCorrelations = 0;
         if (checkpointIds.has(entry.recordSeq.toString())) {
           throw new PresentationArchiveError('archive checkpoint ID is duplicated');
         }
         checkpointIds.add(entry.recordSeq.toString());
+        checkpointIndexEntries.set(entry.recordSeq.toString(), Object.freeze({
+          checkpointId: entry.recordSeq,
+          segmentId: entry.segmentId,
+          indexEntryNumber: index,
+          sceneEpoch: entry.sceneEpoch,
+          bootstrapId: entry.bootstrapId,
+          sourceTick: entry.sourceTick,
+        }));
         if (
           entry.recordSeq === 0n || entry.correlationSeq !== 0n ||
           entry.frameSeq !== 0n || entry.projectionId !== 0n
@@ -633,6 +796,7 @@ export class PresentationArchiveReader {
         }
         lastFrameSeq = entry.recordSeq;
         frames += 1n;
+        segmentFrames += 1;
       } else if (entry.kind === BLOCK_KIND_CORRELATION) {
         if (
           entry.recordSeq !== lastCorrelationSeq + 1n ||
@@ -643,6 +807,7 @@ export class PresentationArchiveReader {
         }
         lastCorrelationSeq = entry.recordSeq;
         correlations += 1n;
+        segmentCorrelations += 1;
       }
       const rawBlock = await this.segments.read(entry.dataOffset, entry.dataLength);
       segmentsHash.update(rawBlock);
@@ -650,6 +815,29 @@ export class PresentationArchiveReader {
     }
     if (expectedOffset !== this.segmentsSize) {
       throw new PresentationArchiveError('archive segments are truncated or have trailing bytes');
+    }
+    if (currentSegment !== 0 && (segmentFrames === 0 || segmentCorrelations === 0)) {
+      throw new PresentationArchiveError(
+        'archive segment requires a complete frame and correlation',
+      );
+    }
+    const checkpointDirectoryHash = createHash('sha256');
+    let previousCheckpointId = 0n;
+    for (let index = 0n; index < this.indexHeader.checkpointCount; index += 1n) {
+      const offset = this.indexHeader.checkpointDirectoryOffset
+        + index * BigInt(CHECKPOINT_DIRECTORY_ENTRY_BYTES);
+      const rawCheckpoint = await this.index.read(offset, CHECKPOINT_DIRECTORY_ENTRY_BYTES);
+      checkpointDirectoryHash.update(rawCheckpoint);
+      indexPayloadHash.update(rawCheckpoint);
+      const checkpoint = decodeCheckpointDirectoryEntry(rawCheckpoint);
+      if (checkpoint.checkpointId <= previousCheckpointId) {
+        throw new PresentationArchiveError('archive checkpoint directory is not sorted');
+      }
+      const expected = checkpointIndexEntries.get(checkpoint.checkpointId.toString());
+      if (expected == null || !checkpointDirectoryEquals(checkpoint, expected)) {
+        throw new PresentationArchiveError('archive checkpoint directory/index mismatch');
+      }
+      previousCheckpointId = checkpoint.checkpointId;
     }
     if (
       currentSegment !== this._manifest.segment_count ||
@@ -659,10 +847,20 @@ export class PresentationArchiveReader {
     ) {
       throw new PresentationArchiveError('archive manifest record counts mismatch');
     }
-    const indexDigest = indexHash.digest();
+    const indexEntriesDigest = indexEntriesHash.digest();
+    const checkpointDirectoryDigest = checkpointDirectoryHash.digest();
+    const indexDigest = indexPayloadHash.digest();
     const segmentsDigest = segmentsHash.digest();
-    if (!indexDigest.equals(this.indexHeader.payloadSha256)
-        || indexDigest.toString('hex') !== this._manifest.index_payload_sha256) {
+    if (!indexEntriesDigest.equals(this.indexHeader.indexEntriesSha256)
+        || indexEntriesDigest.toString('hex') !== this._manifest.index_entries_sha256) {
+      throw new PresentationArchiveError('archive index entries hash mismatch');
+    }
+    if (!checkpointDirectoryDigest.equals(this.indexHeader.checkpointDirectorySha256)
+        || checkpointDirectoryDigest.toString('hex')
+          !== this._manifest.checkpoint_directory_sha256) {
+      throw new PresentationArchiveError('archive checkpoint directory hash mismatch');
+    }
+    if (indexDigest.toString('hex') !== this._manifest.index_payload_sha256) {
       throw new PresentationArchiveError('archive index payload hash mismatch');
     }
     if (segmentsDigest.toString('hex') !== this._manifest.segments_sha256) {
@@ -684,33 +882,6 @@ export class PresentationArchiveReader {
       this.closed = true;
       await Promise.all([this.index.close(), this.segments.close()]);
     }
-  }
-
-  async readBySequence(kind, sequence, { segmentId = null } = {}) {
-    const segment = segmentId == null
-      ? null
-      : positiveSafeInteger(segmentId, 'segmentId');
-    let match = null;
-    for (let index = 0n; index < this.indexHeader.entryCount; index += 1n) {
-      const entry = await this.readIndexEntry(index);
-      if (
-        entry.kind !== kind || entry.recordSeq !== sequence ||
-        (segment !== null && entry.segmentId !== segment)
-      ) continue;
-      if (match) {
-        throw new PresentationArchiveError(
-          'archive sequence is ambiguous across segments; segmentId is required',
-        );
-      }
-      match = entry;
-    }
-    if (match) {
-      return Object.freeze({
-        entry: freezePublicEntry(match),
-        bytes: await this.readBlock(match),
-      });
-    }
-    throw new PresentationArchiveError('archive record does not exist');
   }
 
   async readIndexEntry(index) {
@@ -744,15 +915,24 @@ export class PresentationArchiveReader {
   }
 }
 
-function encodeIndexHeader({ entryCount, payloadSha256 }) {
+function encodeIndexHeader({
+  entryCount,
+  checkpointCount,
+  checkpointDirectoryOffset,
+  indexEntriesSha256,
+  checkpointDirectorySha256,
+}) {
   const buffer = Buffer.alloc(INDEX_HEADER_BYTES);
   buffer.write(INDEX_MAGIC, 0, 4, 'ascii');
   buffer.writeUInt16LE(INDEX_VERSION, 4);
   buffer.writeUInt16LE(INDEX_HEADER_BYTES, 6);
   buffer.writeUInt16LE(INDEX_ENTRY_BYTES, 8);
-  buffer.writeUInt16LE(0, 10);
+  buffer.writeUInt16LE(CHECKPOINT_DIRECTORY_ENTRY_BYTES, 10);
   buffer.writeBigUInt64LE(entryCount, 12);
-  payloadSha256.copy(buffer, 20);
+  buffer.writeBigUInt64LE(checkpointCount, 20);
+  buffer.writeBigUInt64LE(checkpointDirectoryOffset, 28);
+  indexEntriesSha256.copy(buffer, 36);
+  checkpointDirectorySha256.copy(buffer, 68);
   return buffer;
 }
 
@@ -762,14 +942,49 @@ function decodeIndexHeader(value) {
       || buffer.readUInt16LE(4) !== INDEX_VERSION
       || buffer.readUInt16LE(6) !== INDEX_HEADER_BYTES
       || buffer.readUInt16LE(8) !== INDEX_ENTRY_BYTES
-      || buffer.readUInt16LE(10) !== 0
-      || !buffer.subarray(52).equals(Buffer.alloc(12))) {
+      || buffer.readUInt16LE(10) !== CHECKPOINT_DIRECTORY_ENTRY_BYTES
+      || !buffer.subarray(100).equals(Buffer.alloc(12))) {
     throw new PresentationArchiveError('archive index header is invalid');
   }
   return Object.freeze({
     entryCount: buffer.readBigUInt64LE(12),
-    payloadSha256: buffer.subarray(20, 52),
+    checkpointCount: buffer.readBigUInt64LE(20),
+    checkpointDirectoryOffset: buffer.readBigUInt64LE(28),
+    indexEntriesSha256: buffer.subarray(36, 68),
+    checkpointDirectorySha256: buffer.subarray(68, 100),
   });
+}
+
+function encodeCheckpointDirectoryEntry(value) {
+  const buffer = Buffer.alloc(CHECKPOINT_DIRECTORY_ENTRY_BYTES);
+  buffer.writeBigUInt64LE(value.checkpointId, 0);
+  buffer.writeUInt32LE(value.segmentId, 8);
+  buffer.writeBigUInt64LE(value.indexEntryNumber, 16);
+  buffer.writeBigUInt64LE(value.sceneEpoch, 24);
+  buffer.writeBigUInt64LE(value.bootstrapId, 32);
+  buffer.writeBigUInt64LE(value.sourceTick, 40);
+  return buffer;
+}
+
+function decodeCheckpointDirectoryEntry(value) {
+  const buffer = Buffer.from(value);
+  if (buffer.byteLength !== CHECKPOINT_DIRECTORY_ENTRY_BYTES
+      || buffer.readUInt32LE(12) !== 0) {
+    throw new PresentationArchiveError('archive checkpoint directory entry is invalid');
+  }
+  const checkpoint = Object.freeze({
+    checkpointId: buffer.readBigUInt64LE(0),
+    segmentId: buffer.readUInt32LE(8),
+    indexEntryNumber: buffer.readBigUInt64LE(16),
+    sceneEpoch: buffer.readBigUInt64LE(24),
+    bootstrapId: buffer.readBigUInt64LE(32),
+    sourceTick: buffer.readBigUInt64LE(40),
+  });
+  if (checkpoint.checkpointId === 0n || checkpoint.segmentId === 0
+      || checkpoint.sceneEpoch === 0n || checkpoint.bootstrapId === 0n) {
+    throw new PresentationArchiveError('archive checkpoint directory entry is invalid');
+  }
+  return checkpoint;
 }
 
 function encodeIndexEntry(value) {
@@ -856,6 +1071,7 @@ function validateManifest(value) {
     'archive_root_sha256',
     'authority_cursor_codec_identity',
     'checkpoint_count',
+    'checkpoint_directory_sha256',
     'compression_codecs',
     'correlation_count',
     'end_tick',
@@ -864,6 +1080,7 @@ function validateManifest(value) {
     'frame_count',
     'hard_limits',
     'index_payload_sha256',
+    'index_entries_sha256',
     'profile_identity',
     'resource_manifest_identity',
     'scene_engine_identity',
@@ -884,6 +1101,8 @@ function validateManifest(value) {
   }
   for (const field of [
     'archive_root_sha256',
+    'checkpoint_directory_sha256',
+    'index_entries_sha256',
     'index_payload_sha256',
     'segments_sha256',
     'source_authority_sha256',
@@ -965,6 +1184,50 @@ function freezePublicEntry(entry) {
   });
 }
 
+function freezePublicCheckpoint(checkpoint) {
+  return Object.freeze({
+    checkpointId: checkpoint.checkpointId,
+    segmentId: checkpoint.segmentId,
+    indexEntryNumber: checkpoint.indexEntryNumber,
+    sceneEpoch: checkpoint.sceneEpoch,
+    bootstrapId: checkpoint.bootstrapId,
+    sourceTick: checkpoint.sourceTick,
+  });
+}
+
+function binarySearchCheckpoint(checkpoints, checkpointId) {
+  let lower = 0;
+  let upper = checkpoints.length - 1;
+  while (lower <= upper) {
+    const middle = lower + Math.floor((upper - lower) / 2);
+    const candidate = checkpoints[middle];
+    if (candidate.checkpointId === checkpointId) return candidate;
+    if (candidate.checkpointId < checkpointId) lower = middle + 1;
+    else upper = middle - 1;
+  }
+  return null;
+}
+
+function assertCheckpointDirectoryMatch(checkpoint, entry) {
+  if (entry.kind !== BLOCK_KIND_CHECKPOINT
+      || entry.recordSeq !== checkpoint.checkpointId
+      || entry.segmentId !== checkpoint.segmentId
+      || entry.sceneEpoch !== checkpoint.sceneEpoch
+      || entry.bootstrapId !== checkpoint.bootstrapId
+      || entry.sourceTick !== checkpoint.sourceTick) {
+    throw new PresentationArchiveError('archive checkpoint directory/index mismatch');
+  }
+}
+
+function checkpointDirectoryEquals(left, right) {
+  return left.checkpointId === right.checkpointId
+    && left.segmentId === right.segmentId
+    && left.indexEntryNumber === right.indexEntryNumber
+    && left.sceneEpoch === right.sceneEpoch
+    && left.bootstrapId === right.bootstrapId
+    && left.sourceTick === right.sourceTick;
+}
+
 function normalizeLimits(changes) {
   const result = { ...DEFAULT_ARCHIVE_LIMITS, ...changes };
   for (const [name, value] of Object.entries(result)) positiveSafeInteger(value, name);
@@ -987,12 +1250,16 @@ function sha256Identity(value, field) {
 }
 
 function readonlyBytes(value, label) {
-  let view;
-  if (value instanceof Uint8Array) view = value;
-  else if (value instanceof ArrayBuffer) view = new Uint8Array(value);
-  else if (ArrayBuffer.isView(value)) view = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
-  else throw new PresentationArchiveError(`${label} must be bytes`);
-  return new Uint8Array(view);
+  return new Uint8Array(byteView(value, label));
+}
+
+function byteView(value, label) {
+  if (value instanceof Uint8Array) return value;
+  if (value instanceof ArrayBuffer) return new Uint8Array(value);
+  if (ArrayBuffer.isView(value)) {
+    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  }
+  throw new PresentationArchiveError(`${label} must be bytes`);
 }
 
 function digestHex(value) {

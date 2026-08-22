@@ -3,19 +3,24 @@
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
 from typing import Any, Deque, Dict, Iterable, Tuple
 
 from .authority_cursor import AuthorityCursorEnvelope
+from .binary_schema import PACKET_HEADER_BYTES
 from .errors import PresentationBackpressureError, PresentationTransportError
 from .presentation_control_v2 import (
     PRESENTATION_CONTROL_CLIENT_TO_SERVER,
     PRESENTATION_CONTROL_SERVER_TO_CLIENT,
     cursor_envelope_from_json,
-    cursor_envelope_to_json,
-    encode_presentation_control_v2,
     parse_presentation_control_v2,
+)
+
+
+DEFAULT_MAXIMUM_PRESENTATION_PAYLOAD_BYTES = 8 * 1024 * 1024
+DEFAULT_MAXIMUM_PRESENTATION_PACKET_BYTES = (
+    DEFAULT_MAXIMUM_PRESENTATION_PAYLOAD_BYTES + PACKET_HEADER_BYTES
 )
 
 
@@ -25,9 +30,10 @@ class PresentationSessionLimits:
     maximum_queued_correlations: int = 256
     maximum_queued_frames: int = 256
     maximum_queued_bytes: int = 32 * 1024 * 1024
+    maximum_queued_tick_span: int = 600
     baseline_ready_timeout_ticks: int = 300
     acknowledgement_timeout_ticks: int = 600
-    maximum_packet_bytes: int = 8 * 1024 * 1024
+    maximum_packet_bytes: int = DEFAULT_MAXIMUM_PRESENTATION_PACKET_BYTES
 
     def __post_init__(self) -> None:
         for field in self.__dataclass_fields__:
@@ -73,6 +79,38 @@ class PresentationTransmission:
 
 
 @dataclass(frozen=True)
+class PresentationResetRequired:
+    """Product-neutral description of a required presentation reset.
+
+    The generic session deliberately does not allocate the next scene epoch or
+    Bootstrap identity.  A product coordinator uses this cursor to choose and
+    inject the next identities when it creates the replacement session and
+    encodes any product-facing reset control.
+    """
+
+    reason: str
+    scene_epoch: int
+    bootstrap_id: int
+    viewer_scope: str
+    last_acknowledged_cursor: AuthorityCursorEnvelope | None
+    last_acknowledged_frame_seq: int
+    last_acknowledged_correlation_seq: int
+    required: bool = field(default=True, init=False)
+
+
+class PresentationResetRequiredError(PresentationTransportError):
+    """A timeout invalidated one session and produced reset metadata."""
+
+    def __init__(
+        self,
+        message: str,
+        reset_required: PresentationResetRequired,
+    ) -> None:
+        super().__init__(message)
+        self.reset_required = reset_required
+
+
+@dataclass(frozen=True)
 class _Admission:
     correlation_seq: int
     authority_cursor: AuthorityCursorEnvelope
@@ -80,6 +118,7 @@ class _Admission:
     correlation: bytes
     byte_count: int
     cumulative_frame_seq: int
+    source_tick: int
 
 
 class OrderedPresentationSession:
@@ -123,12 +162,13 @@ class OrderedPresentationSession:
         )
         self._last_acked_frame_seq = initial_frame_seq
         self._last_acked_correlation_seq = initial_correlation_seq
+        self._last_acked_authority_cursor: AuthorityCursorEnvelope | None = None
         tick = _non_negative(initial_tick, "initial_tick")
         self._opened_tick: int | None = None
         self._last_progress_tick = tick
-        self._client_messages: Dict[int, bytes] = {}
         self._last_client_session_seq = 0
-        self._server_session_seq = 0
+        self._last_client_message_bytes: bytes | None = None
+        self._reset_required: PresentationResetRequired | None = None
         self._ready = False
         self._valid = True
         self._bootstrap_opened = False
@@ -152,6 +192,10 @@ class OrderedPresentationSession:
     @property
     def queued_bytes(self) -> int:
         return self._queued_bytes
+
+    @property
+    def reset_required(self) -> PresentationResetRequired | None:
+        return self._reset_required
 
     def open_bootstrap(self, *, current_tick: int) -> PresentationTransmission:
         self._require_valid()
@@ -184,6 +228,10 @@ class OrderedPresentationSession:
         if correlation_seq != self._last_correlation_seq + 1:
             raise PresentationTransportError("correlation sequence gap")
         records = tuple(frames)
+        if len(records) > self.limits.maximum_in_flight_frames:
+            raise PresentationBackpressureError(
+                "correlation frame batch exceeds in-flight credit window"
+            )
         for record in records:
             if not isinstance(record, PresentationFramePacket):
                 raise PresentationTransportError(
@@ -191,22 +239,21 @@ class OrderedPresentationSession:
                 )
             if len(record.packet) > self.limits.maximum_packet_bytes:
                 raise PresentationTransportError("frame packet exceeds byte limit")
+        source_tick = int(payload["source_tick"])
+        if self._last_admitted_tick is not None and source_tick not in (
+            self._last_admitted_tick,
+            self._last_admitted_tick + 1,
+        ):
+            raise PresentationTransportError("source tick gap")
         previous_frame = self._last_admitted_frame_seq
-        previous_tick = self._last_admitted_tick
         for record in records:
             if record.frame_seq != previous_frame + 1:
                 raise PresentationTransportError("frame sequence gap")
-            if previous_tick is not None and record.source_tick not in (
-                previous_tick,
-                previous_tick + 1,
-            ):
-                raise PresentationTransportError("source tick gap")
-            if record.source_tick != int(payload["source_tick"]):
+            if record.source_tick != source_tick:
                 raise PresentationTransportError("correlation source_tick mismatch")
             if record.projection_id != int(payload["projection_id"]):
                 raise PresentationTransportError("correlation projection_id mismatch")
             previous_frame = record.frame_seq
-            previous_tick = record.source_tick
         refs = payload["frame_refs"]
         if payload["presentation_required"] != bool(records):
             raise PresentationTransportError("presentation_required mismatch")
@@ -224,6 +271,14 @@ class OrderedPresentationSession:
             or self._queued_bytes + added_bytes > self.limits.maximum_queued_bytes
         ):
             raise PresentationBackpressureError("viewer presentation queue is full")
+        oldest_tick = self._oldest_queued_tick()
+        if (
+            oldest_tick is not None
+            and source_tick - oldest_tick > self.limits.maximum_queued_tick_span
+        ):
+            raise PresentationBackpressureError(
+                "viewer presentation queue exceeds tick-span limit"
+            )
         cursor = cursor_envelope_from_json(payload["authority_cursor"])
         admission = _Admission(
             correlation_seq,
@@ -232,6 +287,7 @@ class OrderedPresentationSession:
             raw,
             added_bytes,
             previous_frame,
+            source_tick,
         )
         if admission.cumulative_frame_seq == 0:
             raise PresentationTransportError(
@@ -243,9 +299,11 @@ class OrderedPresentationSession:
         self._last_correlation_seq = correlation_seq
         if records:
             self._last_admitted_frame_seq = records[-1].frame_seq
-            self._last_admitted_tick = records[-1].source_tick
+        self._last_admitted_tick = source_tick
 
-    def handle_client_control(self, data: bytes, *, current_tick: int) -> bytes | None:
+    def handle_client_control(
+        self, data: bytes, *, current_tick: int
+    ) -> PresentationResetRequired | None:
         self._require_valid()
         tick = _non_negative(current_tick, "current_tick")
         raw = _bytes(data, "control")
@@ -269,6 +327,7 @@ class OrderedPresentationSession:
             if baseline != self.authority_baseline:
                 raise PresentationTransportError("ready authority baseline mismatch")
             self._ready = True
+            self._last_acked_authority_cursor = self.authority_baseline
             self._last_progress_tick = tick
             return None
         if message_type == "presentation.resync_request":
@@ -286,6 +345,7 @@ class OrderedPresentationSession:
         in_flight_frames = sum(len(item.frames) for item in self._in_flight)
         available = self.limits.maximum_in_flight_frames - in_flight_frames
         sent = []
+        started_ack_window = not self._in_flight
         while self._pending:
             candidate = self._pending[0]
             if len(candidate.frames) > available:
@@ -306,6 +366,8 @@ class OrderedPresentationSession:
                 )
             )
             available -= len(candidate.frames)
+        if started_ack_window and self._in_flight:
+            self._last_progress_tick = _non_negative(current_tick, "current_tick")
         return tuple(sent)
 
     def check_timeout(self, *, current_tick: int) -> None:
@@ -316,15 +378,17 @@ class OrderedPresentationSession:
             and self._opened_tick is not None
             and tick - self._opened_tick > self.limits.baseline_ready_timeout_ticks
         ):
-            self._invalidate("ready-timeout")
-            raise PresentationTransportError("presentation ready timed out")
+            reset_required = self._invalidate("ready-timeout")
+            raise PresentationResetRequiredError(
+                "presentation ready timed out", reset_required
+            )
         if self._in_flight and (
             tick - self._last_progress_tick
             > self.limits.acknowledgement_timeout_ticks
         ):
-            self._invalidate("ack-timeout")
-            raise PresentationTransportError(
-                "presentation acknowledgement timed out"
+            reset_required = self._invalidate("ack-timeout")
+            raise PresentationResetRequiredError(
+                "presentation acknowledgement timed out", reset_required
             )
 
     def _ack(self, message: Dict[str, Any], *, tick: int) -> None:
@@ -356,21 +420,21 @@ class OrderedPresentationSession:
             self._queued_bytes -= admission.byte_count
         self._last_acked_frame_seq = frame_seq
         self._last_acked_correlation_seq = correlation_seq
+        self._last_acked_authority_cursor = target.authority_cursor
         self._last_progress_tick = tick
 
     def _is_duplicate(self, message: Dict[str, Any], raw: bytes) -> bool:
         sequence = int(message["session_seq"])
-        existing = self._client_messages.get(sequence)
-        if existing is not None:
-            if existing != raw:
+        if sequence == self._last_client_session_seq:
+            if self._last_client_message_bytes != raw:
                 raise PresentationTransportError(
                     "session sequence retry changed bytes"
                 )
             return True
         if sequence != self._last_client_session_seq + 1:
             raise PresentationTransportError("client session sequence gap")
-        self._client_messages[sequence] = raw
         self._last_client_session_seq = sequence
+        self._last_client_message_bytes = raw
         return False
 
     def _assert_envelope(self, message: Dict[str, Any]) -> None:
@@ -381,30 +445,32 @@ class OrderedPresentationSession:
         if int(message["bootstrap_id"]) != self.bootstrap_id:
             raise PresentationTransportError("stale bootstrap_id")
 
-    def _invalidate(self, reason: str) -> bytes:
+    def _invalidate(self, reason: str) -> PresentationResetRequired:
+        if self._reset_required is not None:
+            return self._reset_required
         self._valid = False
         self._ready = False
-        self._server_session_seq += 1
-        return encode_presentation_control_v2(
-            {
-                "bootstrap_id": str(self.bootstrap_id),
-                "message_id": "presentation-reset-{}".format(
-                    self._server_session_seq
-                ),
-                "payload": {
-                    "next_bootstrap_id": str(self.bootstrap_id + 1),
-                    "next_scene_epoch": str(self.scene_epoch + 1),
-                    "reason": reason,
-                },
-                "protocol": "scene-presentation-control-v2",
-                "scene_epoch": str(self.scene_epoch),
-                "schema_version": 1,
-                "session_seq": self._server_session_seq,
-                "type": "presentation.reset",
-                "viewer_scope": self.viewer_scope,
-            },
-            direction=PRESENTATION_CONTROL_SERVER_TO_CLIENT,
+        self._pending.clear()
+        self._in_flight.clear()
+        self._queued_frames = 0
+        self._queued_bytes = 0
+        self._reset_required = PresentationResetRequired(
+            reason=_text(reason, "reset reason"),
+            scene_epoch=self.scene_epoch,
+            bootstrap_id=self.bootstrap_id,
+            viewer_scope=self.viewer_scope,
+            last_acknowledged_cursor=self._last_acked_authority_cursor,
+            last_acknowledged_frame_seq=self._last_acked_frame_seq,
+            last_acknowledged_correlation_seq=self._last_acked_correlation_seq,
         )
+        return self._reset_required
+
+    def _oldest_queued_tick(self) -> int | None:
+        if self._in_flight:
+            return self._in_flight[0].source_tick
+        if self._pending:
+            return self._pending[0].source_tick
+        return None
 
     def _require_valid(self) -> None:
         if not self._valid:
@@ -441,8 +507,12 @@ def _non_negative(value: Any, label: str) -> int:
 
 
 __all__ = [
+    "DEFAULT_MAXIMUM_PRESENTATION_PACKET_BYTES",
+    "DEFAULT_MAXIMUM_PRESENTATION_PAYLOAD_BYTES",
     "OrderedPresentationSession",
     "PresentationFramePacket",
+    "PresentationResetRequired",
+    "PresentationResetRequiredError",
     "PresentationSessionLimits",
     "PresentationTransmission",
 ]

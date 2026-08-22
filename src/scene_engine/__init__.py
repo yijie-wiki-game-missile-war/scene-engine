@@ -1,10 +1,4 @@
-"""Scene Engine generic runtime and presentation platform.
-
-Production consumers use the opaque-cursor V2 control/session, Archive V2,
-Bootstrap V2, complete frames, and fixed-step runtime exported here.  The
-latest-frame mailbox and legacy host are deliberately isolated under
-``scene_engine.experimental``.
-"""
+"""Scene Engine V3 runtime and presentation platform."""
 
 from .authority_cursor import (
     AuthorityCursorCodec,
@@ -16,12 +10,13 @@ from .clock import ManualClock, MonotonicClock, SystemMonotonicClock
 from .errors import (
     AuthorityCommitFatalError,
     ConfigurationError,
-    DisplayExportError,
     PacketError,
     PresentationArchiveError,
     PresentationBackpressureError,
     PresentationControlError,
+    PresentationExportError,
     PresentationFrameError,
+    PresentationTreeError,
     PresentationTransportError,
     RuntimeBusyError,
     RuntimeStoppedError,
@@ -29,16 +24,14 @@ from .errors import (
     SceneEngineError,
     SimulationFatalError,
 )
-from .identity import DisplayIdentityTracker
 from .packet_codec import (
     PacketHeaderV1,
     PacketView,
-    decode_display_frame_packet,
-    decode_presentation_frame_packet,
-    decode_scene_bootstrap_packet,
-    decode_scene_bootstrap_v2_packet,
-    encode_display_frame_packet,
-    encode_scene_bootstrap_packet,
+    decode_presentation_frame_v3_packet,
+    decode_scene_bootstrap_v3_packet,
+    encode_packet,
+    encode_presentation_frame_v3_packet,
+    encode_scene_bootstrap_v3_packet,
     parse_packet,
 )
 from .presentation_archive import (
@@ -60,53 +53,51 @@ from .presentation_control_v2 import (
     parse_presentation_control_v2,
     validate_presentation_control_v2,
 )
-from .presentation_frame import (
-    InteractionMappingV1,
-    InteractionRecordV1,
-    OwnerStateRecordV1,
-    OwnerStateV1,
-    PresentationEntityRecordV2,
-    PresentationEntityV2,
-    PresentationEventV1,
-    PresentationFrameHeaderV2,
-    PresentationFrameView,
-    SealedPresentationFrame,
-    encode_presentation_frame,
-    parse_presentation_frame,
+from .presentation_identity import PresentationIdAllocator
+from .presentation_tree_validation import (
+    PresentationTreeValidationV3,
+    PresentationWorldPoseV3,
+    validate_presentation_frame_tree,
+    validate_presentation_node_tree,
 )
 from .presentation_session import (
+    DEFAULT_MAXIMUM_PRESENTATION_PACKET_BYTES,
+    DEFAULT_MAXIMUM_PRESENTATION_PAYLOAD_BYTES,
     OrderedPresentationSession,
     PresentationFramePacket,
+    PresentationResetRequired,
+    PresentationResetRequiredError,
     PresentationSessionLimits,
     PresentationTransmission,
+)
+from .presentation_v3 import (
+    AnimationStateRecordV3,
+    EngineSessionIdentityV3,
+    OpaquePayloadV3,
+    PresentationEventV3,
+    PresentationFrameHeaderV3,
+    PresentationFrameV3View,
+    PresentationNodeRecordV3,
+    PresentationNodeV3,
+    PresentationSectionEntryV3,
+    SceneBootstrapHeaderV3,
+    SceneBootstrapV3View,
+    SceneMetadataV3,
+    VisualTypeRecordV3,
+    encode_presentation_frame_v3,
+    encode_scene_bootstrap_v3,
+    parse_presentation_frame_v3,
+    parse_scene_bootstrap_v3,
 )
 from .runtime import (
     AuthorityCommitCallback,
     AuthorityCommitRequest,
-    DisplayExportRequest,
+    PresentationExportRequest,
     PumpResult,
     RuntimeConfig,
     RuntimeHealth,
     SceneEngineRuntime,
 )
-from .scene_bootstrap import (
-    AdjacencyRecordV1,
-    AnimationRegistryRecordV1,
-    BootstrapIdentityV1,
-    SceneBootstrapHeaderV1,
-    SceneBootstrapView,
-    StaticNodeRecordV1,
-    TopologyNodeRecordV1,
-    VisualRegistryRecordV1,
-    encode_scene_bootstrap,
-    parse_scene_bootstrap,
-)
-from .scene_bootstrap_v2 import (
-    EngineSessionIdentityV2,
-    SceneBootstrapV2View,
-    encode_scene_bootstrap_v2,
-    parse_scene_bootstrap_v2,
-)
-from .types import DisplayPose, GameSimulation, TickContext
+from .types import GameSimulation, TickContext
 
 __all__ = [name for name in globals() if not name.startswith("_")]

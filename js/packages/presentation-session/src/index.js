@@ -1,9 +1,10 @@
 import {
+  PRESENTATION_CONTROL_MAXIMUM_BYTES,
   PRESENTATION_CONTROL_CLIENT_TO_SERVER,
   PRESENTATION_CONTROL_SERVER_TO_CLIENT,
+  SCENE_PACKET_HEADER_BYTES,
   cursorEnvelopeFromJSON,
   cursorEnvelopeToJSON,
-  encodePresentationControl,
   parsePresentationControl,
   sha256HexBytes,
 } from '@scene-engine/presentation-codec';
@@ -27,9 +28,12 @@ export const DEFAULT_PRESENTATION_SESSION_LIMITS = Object.freeze({
   maximumQueuedCorrelations: 256,
   maximumQueuedFrames: 256,
   maximumQueuedBytes: 32 * 1024 * 1024,
+  maximumQueuedTickSpan: 600,
   baselineReadyDeadlineMs: 5_000,
   presentationAckDeadlineMs: 10_000,
-  maximumPacketBytes: 8 * 1024 * 1024,
+  // Codec limits describe stored payload bytes after the 24-byte SEDF
+  // envelope. Session limits describe the complete wire packet.
+  maximumPacketBytes: 8 * 1024 * 1024 + SCENE_PACKET_HEADER_BYTES,
 });
 
 export function createPresentationFramePacket({
@@ -46,6 +50,14 @@ export function createPresentationFramePacket({
   return Object.freeze({ frameSeq, sourceTick, projectionId, packet: bytes });
 }
 
+export class PresentationResetRequiredError extends PresentationSessionError {
+  constructor(message, resetRequired) {
+    super(message);
+    this.name = 'PresentationResetRequiredError';
+    this.resetRequired = resetRequired;
+  }
+}
+
 export class OrderedPresentationSession {
   constructor({
     bootstrapPacket,
@@ -59,11 +71,12 @@ export class OrderedPresentationSession {
     initialFrameSeq = 0,
   }) {
     this.limits = normalizeLimits(limits);
-    this.bootstrapPacket = readonlyBytes(bootstrapPacket, 'bootstrap packet');
-    if (this.bootstrapPacket.byteLength === 0
-        || this.bootstrapPacket.byteLength > this.limits.maximumPacketBytes) {
+    const bootstrapByteLength = byteView(bootstrapPacket, 'bootstrap packet').byteLength;
+    if (bootstrapByteLength === 0
+        || bootstrapByteLength > this.limits.maximumPacketBytes) {
       throw new PresentationSessionError('bootstrap packet byte length is invalid');
     }
+    this.bootstrapPacket = readonlyBytes(bootstrapPacket, 'bootstrap packet');
     this.sceneEpoch = positiveSafeInteger(sceneEpoch, 'sceneEpoch');
     this.bootstrapId = positiveSafeInteger(bootstrapId, 'bootstrapId');
     this.viewerScope = canonicalText(viewerScope, 'viewerScope');
@@ -78,9 +91,10 @@ export class OrderedPresentationSession {
     this.lastCorrelationSeq = nonnegativeSafeInteger(initialCorrelationSeq, 'initialCorrelationSeq');
     this.lastAckedFrameSeq = initialFrameSeq;
     this.lastAckedCorrelationSeq = initialCorrelationSeq;
-    this.clientMessages = new Map();
+    this.lastAckedAuthorityCursor = null;
     this.lastClientSessionSeq = 0;
-    this.serverSessionSeq = 0;
+    this.lastClientMessageBytes = null;
+    this.resetRequired = null;
     this.ready = false;
     this.valid = true;
     this.bootstrapOpened = false;
@@ -107,7 +121,23 @@ export class OrderedPresentationSession {
     if (!frames || typeof frames[Symbol.iterator] !== 'function') {
       throw new PresentationSessionError('frames must be iterable');
     }
-    const records = [...frames].map((frame) => createPresentationFramePacket(frame));
+    const records = [];
+    for (const frame of frames) {
+      if (records.length >= this.limits.maximumInFlightFrames) {
+        throw new PresentationBackpressureError(
+          'correlation frame batch exceeds in-flight credit window',
+        );
+      }
+      const packetLength = byteView(frame?.packet, 'frame packet').byteLength;
+      if (packetLength === 0 || packetLength > this.limits.maximumPacketBytes) {
+        throw new PresentationSessionError('frame packet exceeds byte limit');
+      }
+      records.push(createPresentationFramePacket(frame));
+    }
+    const correlationLength = byteView(correlation, 'correlation').byteLength;
+    if (correlationLength === 0 || correlationLength > PRESENTATION_CONTROL_MAXIMUM_BYTES) {
+      throw new PresentationSessionError('correlation byte length is invalid');
+    }
     const raw = readonlyBytes(correlation, 'correlation');
     const message = parsePresentationControl(raw, {
       direction: PRESENTATION_CONTROL_SERVER_TO_CLIENT,
@@ -121,31 +151,25 @@ export class OrderedPresentationSession {
     if (correlationSeq !== this.lastCorrelationSeq + 1) {
       throw new PresentationSessionError('correlation sequence gap');
     }
+    const sourceTick = decimalToSafeInteger(payload.source_tick, 'source_tick', {
+      allowZero: true,
+    });
+    if (this.lastAdmittedTick != null && sourceTick !== this.lastAdmittedTick
+        && sourceTick !== this.lastAdmittedTick + 1) {
+      throw new PresentationSessionError('source tick gap');
+    }
     let previousFrame = this.lastAdmittedFrameSeq;
-    let previousTick = this.lastAdmittedTick;
     for (const record of records) {
-      if (record.packet.byteLength > this.limits.maximumPacketBytes) {
-        throw new PresentationSessionError('frame packet exceeds byte limit');
-      }
       if (record.frameSeq !== previousFrame + 1) {
         throw new PresentationSessionError('frame sequence gap');
       }
-      if (previousTick != null && record.sourceTick !== previousTick
-          && record.sourceTick !== previousTick + 1) {
-        throw new PresentationSessionError('source tick gap');
-      }
-      if (record.sourceTick !== decimalToSafeInteger(
-        payload.source_tick,
-        'source_tick',
-        { allowZero: true },
-      )) {
+      if (record.sourceTick !== sourceTick) {
         throw new PresentationSessionError('correlation source_tick mismatch');
       }
       if (record.projectionId !== decimalToSafeInteger(payload.projection_id, 'projection_id')) {
         throw new PresentationSessionError('correlation projection_id mismatch');
       }
       previousFrame = record.frameSeq;
-      previousTick = record.sourceTick;
     }
     if (payload.presentation_required !== (records.length > 0)) {
       throw new PresentationSessionError('presentation_required mismatch');
@@ -170,6 +194,13 @@ export class OrderedPresentationSession {
         || this.queuedBytes + addedBytes > this.limits.maximumQueuedBytes) {
       throw new PresentationBackpressureError('viewer presentation queue is full');
     }
+    const oldestTick = this.oldestQueuedTick();
+    if (oldestTick != null
+        && sourceTick - oldestTick > this.limits.maximumQueuedTickSpan) {
+      throw new PresentationBackpressureError(
+        'viewer presentation queue exceeds tick-span limit',
+      );
+    }
     if (previousFrame === 0) {
       throw new PresentationSessionError('first presentation correlation must contain a frame');
     }
@@ -180,6 +211,7 @@ export class OrderedPresentationSession {
       correlation: raw,
       byteCount: addedBytes,
       cumulativeFrameSeq: previousFrame,
+      sourceTick,
     });
     this.pending.push(admission);
     this.queuedFrames += records.length;
@@ -187,19 +219,23 @@ export class OrderedPresentationSession {
     this.lastCorrelationSeq = correlationSeq;
     if (records.length > 0) {
       this.lastAdmittedFrameSeq = records.at(-1).frameSeq;
-      this.lastAdmittedTick = records.at(-1).sourceTick;
     }
+    this.lastAdmittedTick = sourceTick;
   }
 
   handleClientControl(data, { wallNowMs }) {
     this.requireValid();
     const now = finiteNow(wallNowMs);
+    const controlLength = byteView(data, 'control').byteLength;
+    if (controlLength === 0 || controlLength > PRESENTATION_CONTROL_MAXIMUM_BYTES) {
+      throw new PresentationSessionError('control byte length is invalid');
+    }
     const raw = readonlyBytes(data, 'control');
     const message = parsePresentationControl(raw, {
       direction: PRESENTATION_CONTROL_CLIENT_TO_SERVER,
     });
     this.assertEnvelope(message);
-    if (this.isDuplicate(message, raw)) return [];
+    if (this.isDuplicate(message, raw)) return null;
     if (message.type === 'presentation.ready') {
       if (!this.bootstrapOpened) throw new PresentationSessionError('ready arrived before bootstrap');
       if (this.ready) throw new PresentationSessionError('presentation is already ready');
@@ -213,15 +249,16 @@ export class OrderedPresentationSession {
         throw new PresentationSessionError('ready authority baseline mismatch');
       }
       this.ready = true;
+      this.lastAckedAuthorityCursor = this.authorityBaseline;
       this.lastProgressAtMs = now;
-      return [];
+      return null;
     }
     if (message.type === 'presentation.resync_request') {
-      return [this.invalidate('client-resync')];
+      return this.invalidate('client-resync');
     }
     if (!this.ready) throw new PresentationSessionError('ack arrived before ready');
     this.acknowledge(message, now);
-    return [];
+    return null;
   }
 
   drainSendable({ wallNowMs }) {
@@ -234,6 +271,7 @@ export class OrderedPresentationSession {
     );
     let available = this.limits.maximumInFlightFrames - inFlightFrames;
     const transmissions = [];
+    const startedAckWindow = this.inFlight.length === 0;
     while (this.pending.length > 0) {
       const candidate = this.pending[0];
       if (candidate.frames.length > available) break;
@@ -253,6 +291,7 @@ export class OrderedPresentationSession {
       }));
       available -= candidate.frames.length;
     }
+    if (startedAckWindow && this.inFlight.length > 0) this.lastProgressAtMs = finiteNow(wallNowMs);
     return transmissions;
   }
 
@@ -260,13 +299,19 @@ export class OrderedPresentationSession {
     const now = finiteNow(wallNowMs);
     if (this.bootstrapOpened && !this.ready && this.openedAtMs != null
         && now - this.openedAtMs > this.limits.baselineReadyDeadlineMs) {
-      this.invalidate('ready-timeout');
-      throw new PresentationSessionError('presentation ready timed out');
+      const resetRequired = this.invalidate('ready-timeout');
+      throw new PresentationResetRequiredError(
+        'presentation ready timed out',
+        resetRequired,
+      );
     }
     if (this.inFlight.length > 0 && this.lastProgressAtMs != null
         && now - this.lastProgressAtMs > this.limits.presentationAckDeadlineMs) {
-      this.invalidate('ack-timeout');
-      throw new PresentationSessionError('presentation acknowledgement timed out');
+      const resetRequired = this.invalidate('ack-timeout');
+      throw new PresentationResetRequiredError(
+        'presentation acknowledgement timed out',
+        resetRequired,
+      );
     }
   }
 
@@ -297,14 +342,14 @@ export class OrderedPresentationSession {
     }
     this.lastAckedFrameSeq = frameSeq;
     this.lastAckedCorrelationSeq = correlationSeq;
+    this.lastAckedAuthorityCursor = target.authorityCursor;
     this.lastProgressAtMs = now;
   }
 
   isDuplicate(message, raw) {
     const sequence = message.session_seq;
-    const existing = this.clientMessages.get(sequence);
-    if (existing) {
-      if (!bytesEqual(existing, raw)) {
+    if (sequence === this.lastClientSessionSeq) {
+      if (!bytesEqual(this.lastClientMessageBytes, raw)) {
         throw new PresentationSessionError('session sequence retry changed bytes');
       }
       return true;
@@ -312,8 +357,8 @@ export class OrderedPresentationSession {
     if (sequence !== this.lastClientSessionSeq + 1) {
       throw new PresentationSessionError('client session sequence gap');
     }
-    this.clientMessages.set(sequence, raw);
     this.lastClientSessionSeq = sequence;
+    this.lastClientMessageBytes = raw;
     return false;
   }
 
@@ -330,27 +375,30 @@ export class OrderedPresentationSession {
   }
 
   invalidate(reason) {
+    if (this.resetRequired != null) return this.resetRequired;
     this.valid = false;
     this.ready = false;
-    this.serverSessionSeq += 1;
-    return Object.freeze({
-      kind: 'reset',
-      data: encodePresentationControl({
-        bootstrap_id: String(this.bootstrapId),
-        message_id: `presentation-reset-${this.serverSessionSeq}`,
-        payload: {
-          next_bootstrap_id: String(this.bootstrapId + 1),
-          next_scene_epoch: String(this.sceneEpoch + 1),
-          reason,
-        },
-        protocol: 'scene-presentation-control-v2',
-        scene_epoch: String(this.sceneEpoch),
-        schema_version: 1,
-        session_seq: this.serverSessionSeq,
-        type: 'presentation.reset',
-        viewer_scope: this.viewerScope,
-      }, { direction: PRESENTATION_CONTROL_SERVER_TO_CLIENT }),
+    this.pending.length = 0;
+    this.inFlight.length = 0;
+    this.queuedFrames = 0;
+    this.queuedBytes = 0;
+    this.resetRequired = Object.freeze({
+      required: true,
+      reason: canonicalText(reason, 'reset reason'),
+      sceneEpoch: this.sceneEpoch,
+      bootstrapId: this.bootstrapId,
+      viewerScope: this.viewerScope,
+      lastAcknowledgedCursor: this.lastAckedAuthorityCursor,
+      lastAcknowledgedFrameSeq: this.lastAckedFrameSeq,
+      lastAcknowledgedCorrelationSeq: this.lastAckedCorrelationSeq,
     });
+    return this.resetRequired;
+  }
+
+  oldestQueuedTick() {
+    if (this.inFlight.length > 0) return this.inFlight[0].sourceTick;
+    if (this.pending.length > 0) return this.pending[0].sourceTick;
+    return null;
   }
 
   requireValid() {
@@ -378,12 +426,16 @@ function cursorEquals(left, right) {
 }
 
 function readonlyBytes(value, label) {
-  let view;
-  if (value instanceof Uint8Array) view = value;
-  else if (value instanceof ArrayBuffer) view = new Uint8Array(value);
-  else if (ArrayBuffer.isView(value)) view = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
-  else throw new PresentationSessionError(`${label} must be bytes`);
-  return new Uint8Array(view);
+  return new Uint8Array(byteView(value, label));
+}
+
+function byteView(value, label) {
+  if (value instanceof Uint8Array) return value;
+  if (value instanceof ArrayBuffer) return new Uint8Array(value);
+  if (ArrayBuffer.isView(value)) {
+    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  }
+  throw new PresentationSessionError(`${label} must be bytes`);
 }
 
 function bytesEqual(left, right) {

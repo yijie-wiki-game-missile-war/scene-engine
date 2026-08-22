@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import inspect
 from typing import Any, List, Tuple
 
 import pytest
@@ -25,19 +25,14 @@ class RecordingSimulation:
     def step(self, context: TickContext, commands: Tuple[Any, ...]) -> None:
         self.steps.append((context, commands))
 
-    def write_display_frame(self, writer: Any) -> None:
-        writer.writes.append(writer.source_tick)
-
-
 def config(**changes: Any) -> RuntimeConfig:
     values = dict(
         ticks_per_second=60,
         display_frames_per_second=30,
         maximum_ticks_per_pump=120,
-        maximum_frame_entities=100,
+        maximum_frame_nodes=100,
         maximum_frame_bytes=64_000,
         maximum_pending_commands=128,
-        maximum_outstanding_leases=3,
         strict_authority_presentation=False,
     )
     values.update(changes)
@@ -66,10 +61,9 @@ def test_manual_and_system_clocks_expose_monotonic_seconds() -> None:
         {"display_frames_per_second": 0},
         {"display_frames_per_second": 61},
         {"maximum_ticks_per_pump": -1},
-        {"maximum_frame_entities": 0},
+        {"maximum_frame_nodes": 0},
         {"maximum_frame_bytes": 0},
         {"maximum_pending_commands": 0},
-        {"maximum_outstanding_leases": 0},
         {"ticks_per_second": True},
         {"ticks_per_second": 60.0},
     ],
@@ -77,6 +71,14 @@ def test_manual_and_system_clocks_expose_monotonic_seconds() -> None:
 def test_runtime_config_rejects_invalid_or_non_integral_limits(changes: Any) -> None:
     with pytest.raises(ConfigurationError):
         config(**changes)
+
+
+def test_removed_v1_writer_ports_are_not_runtime_fallbacks() -> None:
+    parameters = inspect.signature(SceneEngineRuntime.__init__).parameters
+    assert "writer_factory" not in parameters
+    assert "frame_sink" not in parameters
+    assert "maximum_frame_entities" not in RuntimeConfig.__dataclass_fields__
+    assert "maximum_outstanding_leases" not in RuntimeConfig.__dataclass_fields__
 
 
 def test_strict_authority_presentation_requires_exact_ports_and_rates() -> None:
@@ -312,71 +314,6 @@ def test_display_export_failure_skips_one_sample_then_recovers_without_stopping_
     assert runtime.health.display_samples_failed == 1
     assert runtime.health.consecutive_display_export_failures == 0
     assert runtime.health.last_successful_frame_seq == 1
-
-
-@dataclass
-class StubWriter:
-    source_tick: int
-    frame_seq: int
-    writes: List[int]
-
-    def seal(self) -> Tuple[int, int, Tuple[int, ...]]:
-        return (self.frame_seq, self.source_tick, tuple(self.writes))
-
-
-def test_writer_factory_and_sink_are_binary_implementation_injections() -> None:
-    clock = ManualClock()
-    simulation = RecordingSimulation()
-    published: List[Any] = []
-
-    def writer_factory(
-        *, source_tick: int, frame_seq: int, **unused: Any
-    ) -> StubWriter:
-        return StubWriter(source_tick, frame_seq, [])
-
-    runtime = SceneEngineRuntime(
-        simulation,
-        config=config(display_frames_per_second=60),
-        clock=clock,
-        writer_factory=writer_factory,
-        frame_sink=published.append,
-    )
-    clock.advance(1.0 / 60.0)
-    runtime.pump()
-
-    assert published == [(1, 1, (1,))]
-    assert runtime.last_exported_frame == published[0]
-
-
-def test_writer_seal_none_is_a_failed_sample_not_a_phantom_success() -> None:
-    clock = ManualClock()
-    simulation = RecordingSimulation()
-    published: List[Any] = []
-
-    class BrokenWriter(StubWriter):
-        def seal(self) -> None:
-            return None
-
-    def writer_factory(
-        *, source_tick: int, frame_seq: int, **unused: Any
-    ) -> BrokenWriter:
-        return BrokenWriter(source_tick, frame_seq, [])
-
-    runtime = SceneEngineRuntime(
-        simulation,
-        config=config(display_frames_per_second=60),
-        clock=clock,
-        writer_factory=writer_factory,
-        frame_sink=published.append,
-    )
-    clock.advance(1.0 / 60.0)
-
-    result = runtime.pump()
-
-    assert result.display_samples_failed == 1
-    assert result.display_samples_succeeded == 0
-    assert runtime.health.last_successful_frame_seq == 0
-    assert published == []
 
 
 def test_display_or_renderer_activity_never_advances_gameplay_time() -> None:

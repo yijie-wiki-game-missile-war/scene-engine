@@ -5,27 +5,34 @@ import struct
 
 import pytest
 
-from scene_engine.binary_schema import PACKET_HEADER_V1
-from scene_engine.errors import ConfigurationError, DisplayFrameError, PacketError
+import scene_engine
+import scene_engine.packet_codec as packet_codec
+from scene_engine.binary_schema import (
+    PACKET_HEADER_V1,
+    PACKET_MESSAGE_TYPE_PRESENTATION_FRAME_V3,
+    PACKET_MESSAGE_TYPE_SCENE_BOOTSTRAP_V3,
+)
+from scene_engine.errors import ConfigurationError, PacketError, PresentationFrameError
 from scene_engine.packet_codec import (
-    decode_presentation_frame_packet,
-    decode_scene_bootstrap_packet,
-    decode_display_frame_packet,
+    decode_presentation_frame_v3_packet,
+    decode_scene_bootstrap_v3_packet,
     encode_packet,
+    encode_presentation_frame_v3_packet,
+    encode_scene_bootstrap_v3_packet,
     parse_packet,
 )
 
 
-FIXTURE = Path(__file__).parent / "fixtures" / "display_frame_v1.hex"
-BOOTSTRAP_FIXTURE = Path(__file__).parent / "fixtures" / "scene_bootstrap_v1.hex"
-PRESENTATION_FIXTURE = Path(__file__).parent / "fixtures" / "presentation_frame_v2.hex"
+FIXTURES = Path(__file__).parent / "fixtures"
+BOOTSTRAP_FIXTURE = FIXTURES / "scene_bootstrap_v3.hex"
+FRAME_FIXTURE = FIXTURES / "presentation_frame_v3.hex"
 
 
-def _frame_bytes() -> bytes:
-    return bytes.fromhex(FIXTURE.read_text(encoding="ascii"))
+def _fixture(path: Path) -> bytes:
+    return bytes.fromhex(path.read_text(encoding="ascii"))
 
 
-def _parse(data, *, stored=1000, uncompressed=1000):
+def _parse(data: object, *, stored: int = 4096, uncompressed: int = 4096):
     return parse_packet(
         data,
         maximum_stored_bytes=stored,
@@ -37,45 +44,53 @@ def test_packet_header_has_frozen_24_byte_layout() -> None:
     assert PACKET_HEADER_V1.size == 24
 
 
-def test_codec_none_envelope_is_byte_exact() -> None:
-    payload = _frame_bytes()
-    packet = encode_packet(payload)
+def test_v3_frame_codec_none_envelope_is_byte_exact() -> None:
+    payload = _fixture(FRAME_FIXTURE)
+    packet = encode_presentation_frame_v3_packet(payload)
     expected_header = bytes.fromhex(
         "53454446"  # SEDF
         "0100"      # packet_version 1
-        "02"        # display.frame
+        "02"        # PresentationFrameV3
         "00"        # codec none
         "0000"      # flags
         "1800"      # header_bytes 24
-        "9c000000"  # uncompressed_bytes 156
-        "9c000000"  # stored_bytes 156
+        "38020000"  # uncompressed_bytes 568
+        "38020000"  # stored_bytes 568
         "00000000"  # reserved0
     )
 
     assert packet == expected_header + payload
     parsed = _parse(packet)
-    assert parsed.data == packet
+    assert parsed.data is packet
     assert parsed.payload == payload
+    assert parsed.header.message_type == PACKET_MESSAGE_TYPE_PRESENTATION_FRAME_V3
     assert parsed.header.stored_bytes == len(payload)
-    assert parsed.header.uncompressed_bytes == len(payload)
-    assert parsed.header.compression_codec == 0
 
 
-def test_codec_none_accepts_registered_bootstrap_and_rejects_unknown_type_or_codec() -> None:
-    assert _parse(encode_packet(b"bootstrap", message_type=1)).header.message_type == 1
+def test_explicit_v3_packet_encoders_freeze_message_type() -> None:
+    bootstrap = encode_scene_bootstrap_v3_packet(_fixture(BOOTSTRAP_FIXTURE))
+    frame = encode_presentation_frame_v3_packet(_fixture(FRAME_FIXTURE))
+
+    assert _parse(bootstrap).header.message_type == PACKET_MESSAGE_TYPE_SCENE_BOOTSTRAP_V3
+    assert _parse(frame).header.message_type == PACKET_MESSAGE_TYPE_PRESENTATION_FRAME_V3
     with pytest.raises(PacketError):
-        encode_packet(b"frame", message_type=3)
+        encode_packet(b"payload", message_type=3)
     with pytest.raises(PacketError):
-        encode_packet(b"frame", compression_codec=1)
+        encode_packet(
+            b"payload",
+            message_type=PACKET_MESSAGE_TYPE_PRESENTATION_FRAME_V3,
+            compression_codec=1,
+        )
 
 
 def test_packet_parser_applies_budgets_before_copying_payload() -> None:
-    packet = encode_packet(_frame_bytes())
+    payload = _fixture(FRAME_FIXTURE)
+    packet = encode_presentation_frame_v3_packet(payload)
 
     with pytest.raises(PacketError, match="maximum_stored_bytes"):
-        _parse(packet, stored=155)
+        _parse(packet, stored=len(payload) - 1)
     with pytest.raises(PacketError, match="maximum_uncompressed_bytes"):
-        _parse(packet, uncompressed=155)
+        _parse(packet, uncompressed=len(payload) - 1)
     with pytest.raises(ConfigurationError):
         _parse(packet, stored=-1)
 
@@ -89,12 +104,14 @@ def test_packet_parser_applies_budgets_before_copying_payload() -> None:
         (7, struct.pack("<B", 1)),
         (8, struct.pack("<H", 1)),
         (10, struct.pack("<H", 20)),
-        (16, struct.pack("<I", 155)),
+        (16, struct.pack("<I", 567)),
         (20, struct.pack("<I", 1)),
     ],
 )
-def test_packet_parser_rejects_malformed_header(offset, packed) -> None:
-    packet = bytearray(encode_packet(_frame_bytes()))
+def test_packet_parser_rejects_malformed_header(offset: int, packed: bytes) -> None:
+    packet = bytearray(
+        encode_presentation_frame_v3_packet(_fixture(FRAME_FIXTURE))
+    )
     packet[offset : offset + len(packed)] = packed
 
     with pytest.raises(PacketError):
@@ -102,71 +119,73 @@ def test_packet_parser_rejects_malformed_header(offset, packed) -> None:
 
 
 def test_packet_parser_rejects_truncation_and_trailing_bytes() -> None:
-    packet = encode_packet(_frame_bytes())
+    packet = encode_presentation_frame_v3_packet(_fixture(FRAME_FIXTURE))
     with pytest.raises(PacketError):
         _parse(packet[:-1])
     with pytest.raises(PacketError):
         _parse(packet + b"\x00")
 
 
-def test_combined_decoder_validates_inner_frame_before_returning() -> None:
-    decoded = decode_display_frame_packet(
-        encode_packet(_frame_bytes()),
-        maximum_stored_bytes=1000,
-        maximum_uncompressed_bytes=1000,
-        maximum_frame_entities=10,
-        maximum_frame_bytes=1000,
-    )
-    assert decoded.frame_seq == 0x2122232425262728
-    assert decoded.records[0].world_position == (1.0, -2.0, 3.5)
-
-    malformed_frame = bytearray(_frame_bytes())
-    struct.pack_into("<H", malformed_frame, 42, 1)
-    with pytest.raises(DisplayFrameError):
-        decode_display_frame_packet(
-            encode_packet(malformed_frame),
-            maximum_stored_bytes=1000,
-            maximum_uncompressed_bytes=1000,
-            maximum_frame_entities=10,
-            maximum_frame_bytes=1000,
-        )
-
-
-def test_packet_dispatches_bootstrap_and_schema_v2_presentation_frame() -> None:
-    bootstrap = bytes.fromhex(BOOTSTRAP_FIXTURE.read_text(encoding="ascii"))
-    decoded_bootstrap = decode_scene_bootstrap_packet(
-        encode_packet(bootstrap, message_type=1),
+def test_v3_decoders_validate_message_type_and_inner_schema() -> None:
+    bootstrap = decode_scene_bootstrap_v3_packet(
+        encode_scene_bootstrap_v3_packet(_fixture(BOOTSTRAP_FIXTURE)),
         maximum_stored_bytes=4096,
         maximum_uncompressed_bytes=4096,
         maximum_bootstrap_bytes=4096,
         maximum_static_nodes=10,
-        maximum_topology_nodes=10,
-        maximum_adjacencies=10,
+        maximum_scene_metadata=10,
         maximum_visual_types=10,
         maximum_animation_states=10,
     )
-    assert decoded_bootstrap.identity.viewer_scope == "viewer:blue"
+    assert bootstrap.identity.viewer_scope == "viewer:test"
 
-    frame = bytes.fromhex(PRESENTATION_FIXTURE.read_text(encoding="ascii"))
-    decoded_frame = decode_presentation_frame_packet(
-        encode_packet(frame, message_type=2),
+    frame_bytes = _fixture(FRAME_FIXTURE)
+    frame = decode_presentation_frame_v3_packet(
+        encode_presentation_frame_v3_packet(frame_bytes),
         maximum_stored_bytes=4096,
         maximum_uncompressed_bytes=4096,
-        maximum_frame_entities=10,
+        maximum_frame_nodes=10,
         maximum_frame_events=10,
         maximum_frame_bytes=4096,
     )
-    assert decoded_frame.frame_seq == 60
+    assert frame.frame_seq == 60
 
-    with pytest.raises(PacketError, match="not scene.bootstrap"):
-        decode_scene_bootstrap_packet(
-            encode_packet(frame, message_type=2),
+    with pytest.raises(PacketError, match="not SceneBootstrapV3"):
+        decode_scene_bootstrap_v3_packet(
+            encode_presentation_frame_v3_packet(frame_bytes),
             maximum_stored_bytes=4096,
             maximum_uncompressed_bytes=4096,
             maximum_bootstrap_bytes=4096,
             maximum_static_nodes=10,
-            maximum_topology_nodes=10,
-            maximum_adjacencies=10,
+            maximum_scene_metadata=10,
             maximum_visual_types=10,
             maximum_animation_states=10,
         )
+
+    malformed = bytearray(frame_bytes)
+    struct.pack_into("<H", malformed, 0, 2)
+    with pytest.raises(PresentationFrameError):
+        decode_presentation_frame_v3_packet(
+            encode_presentation_frame_v3_packet(malformed),
+            maximum_stored_bytes=4096,
+            maximum_uncompressed_bytes=4096,
+            maximum_frame_nodes=10,
+            maximum_frame_events=10,
+            maximum_frame_bytes=4096,
+        )
+
+
+def test_v1_and_unversioned_packet_aliases_are_not_exported() -> None:
+    for name in (
+        "decode_display_frame_packet",
+        "encode_display_frame_packet",
+        "decode_presentation_frame_packet",
+        "encode_presentation_frame_packet",
+        "decode_scene_bootstrap_packet",
+        "encode_scene_bootstrap_packet",
+        "pack_packet",
+        "decode_packet",
+        "PacketHeader",
+    ):
+        assert not hasattr(packet_codec, name)
+        assert not hasattr(scene_engine, name)

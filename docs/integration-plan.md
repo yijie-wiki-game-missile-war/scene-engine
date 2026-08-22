@@ -1,4 +1,4 @@
-# Scene Engine V2 跨项目 composition
+# Scene Engine V3 跨项目 composition
 
 状态：implemented release candidate，2026-08-22。
 
@@ -19,7 +19,7 @@ seal manifest；每次 new epoch 使用新 checkpoint/segment，不能跨 presen
 ## Browser display
 
 ```text
-V2 Bootstrap + MW visual profile
+V3 Bootstrap + MW visual profile
   -> static scene install
   -> correlation joins ordered complete frames
   -> SceneDisplayEngineCore prepare
@@ -34,13 +34,14 @@ prepare 期间不得修改 live tree；业务与 renderer commit 同属原子 ba
 
 ```text
 raw v5 tape -> MwV5AuthorityLane ----\
-                                      > CompositeReplaySession -> bounded WebSocket
-Archive V2 -> PresentationArchiveInput/
+                                      > CompositeReplaySession -> Replay-owned bounded socket transport
+Archive V3 -> PresentationArchiveInput/
 ```
 
 Engine Replay Core 拥有 tick timeline、pause/resume/speed/seek、双 lane checkpoint gate、presentation session
 和 outbound plan。Replay 只拥有产品存储/API、MW-specific tape validator/binding 和 socket composition。
-Archive reader 使用 byte-range/random access，不把完整 frame 文件常驻内存。
+Node-only Archive reader 使用 checkpoint directory + byte-range 顺序读取，不把完整 frame 文件常驻内存，
+也不提供会扫描全局 index 的 frame/correlation sequence API。
 
 ## Release gates
 

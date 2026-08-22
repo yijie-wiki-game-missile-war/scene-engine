@@ -1,8 +1,8 @@
-"""Engine-owned fixed-tick runtime with renderer-neutral display sampling.
+"""Engine-owned fixed-tick runtime with renderer-neutral presentation sampling.
 
 This module deliberately has no dependency on a gameplay implementation, the
-display binary codec, a mailbox, or a renderer.  Those concerns enter through
-the small ports defined here and in :mod:`scene_engine.types`.
+presentation binary codec, a transport, or a renderer. Those concerns enter
+through the small ports defined here and in :mod:`scene_engine.types`.
 """
 
 from __future__ import annotations
@@ -11,14 +11,14 @@ import math
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Protocol, Tuple
+from typing import Any, Dict, List, Optional, Protocol, Tuple
 
 from .clock import MonotonicClock, SystemMonotonicClock
 from .errors import (
     AuthorityCommitFatalError,
     CommandQueueFullError,
     ConfigurationError,
-    DisplayExportError,
+    PresentationExportError,
     RuntimeBusyError,
     RuntimeStoppedError,
     SimulationFatalError,
@@ -35,19 +35,16 @@ _FATAL = "fatal"
 class RuntimeConfig:
     """Validated runtime rates and bounded resource limits.
 
-    Rates are integer because both gameplay ticks and the experimental display
-    frame header use integer rates.  The accumulator in ``SceneEngineRuntime``
-    still provides an exact rational schedule when the two rates do not divide
-    evenly.
+    The accumulator in ``SceneEngineRuntime`` provides an exact rational
+    schedule when the two integer rates do not divide evenly.
     """
 
     ticks_per_second: int = 60
     display_frames_per_second: int = 30
     maximum_ticks_per_pump: int = 120
-    maximum_frame_entities: int = 10_000
+    maximum_frame_nodes: int = 10_000
     maximum_frame_bytes: int = 8 * 1024 * 1024
     maximum_pending_commands: int = 1_024
-    maximum_outstanding_leases: int = 3
     strict_authority_presentation: bool = False
 
     def __post_init__(self) -> None:
@@ -55,10 +52,9 @@ class RuntimeConfig:
             "ticks_per_second",
             "display_frames_per_second",
             "maximum_ticks_per_pump",
-            "maximum_frame_entities",
+            "maximum_frame_nodes",
             "maximum_frame_bytes",
             "maximum_pending_commands",
-            "maximum_outstanding_leases",
         ):
             _require_positive_int(name, getattr(self, name))
         if self.display_frames_per_second > self.ticks_per_second:
@@ -94,8 +90,8 @@ class AuthorityCommitCallback(Protocol):
 
 
 @dataclass(frozen=True)
-class DisplayExportRequest:
-    """Metadata supplied to one binary-neutral display export attempt."""
+class PresentationExportRequest:
+    """Metadata supplied to one binary-neutral presentation export attempt."""
 
     simulation: GameSimulation
     scene_epoch: int
@@ -103,32 +99,15 @@ class DisplayExportRequest:
     source_tick: Tick
     frame_seq: int
     ticks_per_second: int
-    maximum_frame_entities: int
+    maximum_frame_nodes: int
     maximum_frame_bytes: int
     authority_commit: Any = None
 
 
 class FrameExportCallback(Protocol):
-    """End-to-end display exporter invoked on a scheduled sample."""
+    """End-to-end presentation exporter invoked on a scheduled sample."""
 
-    def __call__(self, request: DisplayExportRequest) -> Any:
-        ...
-
-
-class DisplayFrameWriterFactory(Protocol):
-    """Create a private writer for one display sample."""
-
-    def __call__(
-        self,
-        *,
-        scene_epoch: int,
-        bootstrap_id: int,
-        frame_seq: int,
-        source_tick: Tick,
-        ticks_per_second: int,
-        maximum_frame_entities: int,
-        maximum_frame_bytes: int,
-    ) -> Any:
+    def __call__(self, request: PresentationExportRequest) -> Any:
         ...
 
 
@@ -195,13 +174,9 @@ class RuntimeHealth:
 class SceneEngineRuntime:
     """Drive exactly one gameplay ``step`` for each committed integer tick.
 
-    ``frame_export`` and ``writer_factory`` are alternative injection styles:
-
-    * an end-to-end ``frame_export(request)`` may encode/publish by itself;
-    * a keyword-only ``writer_factory(...)`` is followed by
-      ``simulation.write_display_frame(writer)``, ``writer.seal()``, and an
-      optional ``frame_sink(sealed_frame)``.  The canonical
-      ``DisplayFrameWriter`` class can therefore be injected directly.
+    ``frame_export(request)`` is the sole presentation projection port. The
+    adapter owns V3 encoding and publication; the runtime owns only scheduling
+    and the commit/failure boundary.
 
     Display failures are isolated from gameplay.  A gameplay exception is not:
     it permanently marks the runtime fatal and the failed tick is never
@@ -215,8 +190,6 @@ class SceneEngineRuntime:
         config: Optional[RuntimeConfig] = None,
         clock: Optional[MonotonicClock] = None,
         frame_export: Optional[FrameExportCallback] = None,
-        writer_factory: Optional[DisplayFrameWriterFactory] = None,
-        frame_sink: Optional[Callable[[Any], None]] = None,
         authority_commit: Optional[AuthorityCommitCallback] = None,
         scene_epoch: int = 1,
         bootstrap_id: int = 1,
@@ -224,12 +197,6 @@ class SceneEngineRuntime:
     ) -> None:
         if simulation is None:
             raise ConfigurationError("simulation is required")
-        if frame_export is not None and writer_factory is not None:
-            raise ConfigurationError(
-                "frame_export and writer_factory are alternative export strategies"
-            )
-        if frame_sink is not None and writer_factory is None and frame_export is None:
-            raise ConfigurationError("frame_sink requires an export strategy")
         _require_positive_int("scene_epoch", scene_epoch)
         _require_positive_int("bootstrap_id", bootstrap_id)
         _require_non_negative_int("initial_tick", initial_tick)
@@ -252,8 +219,6 @@ class SceneEngineRuntime:
             raise ConfigurationError("clock must provide now()")
 
         self._frame_export = frame_export
-        self._writer_factory = writer_factory
-        self._frame_sink = frame_sink
         self._authority_commit = authority_commit
         self._scene_epoch = scene_epoch
         self._bootstrap_id = bootstrap_id
@@ -575,17 +540,17 @@ class SceneEngineRuntime:
                         "export_committed_state requires a display export strategy"
                     )
                 if not self._presentation_epoch_valid:
-                    raise DisplayExportError("presentation epoch is invalid")
+                    raise PresentationExportError("presentation epoch is invalid")
                 source_tick = self._current_tick
             if not self._attempt_display_export(source_tick, authority_commit):
-                raise DisplayExportError(
+                raise PresentationExportError(
                     "same-tick committed state export invalidated presentation epoch"
                 )
             return self.last_exported_frame
 
     @property
     def _has_export_strategy(self) -> bool:
-        return self._frame_export is not None or self._writer_factory is not None
+        return self._frame_export is not None
 
     def _attempt_authority_commit(self, request: AuthorityCommitRequest) -> Any:
         with self._state_lock:
@@ -627,50 +592,24 @@ class SceneEngineRuntime:
             frame_seq = self._last_successful_frame_seq + 1
             self._display_samples_attempted += 1
 
-        request = DisplayExportRequest(
+        request = PresentationExportRequest(
             simulation=self._simulation,
             scene_epoch=self._scene_epoch,
             bootstrap_id=self._bootstrap_id,
             source_tick=source_tick,
             frame_seq=frame_seq,
             ticks_per_second=self._config.ticks_per_second,
-            maximum_frame_entities=self._config.maximum_frame_entities,
+            maximum_frame_nodes=self._config.maximum_frame_nodes,
             maximum_frame_bytes=self._config.maximum_frame_bytes,
             authority_commit=authority_commit,
         )
         try:
-            if self._frame_export is not None:
-                exported = self._frame_export(request)
-                if self._config.strict_authority_presentation and exported is None:
-                    raise DisplayExportError(
-                        "strict_authority_presentation frame_export returned None"
-                    )
-            else:
-                assert self._writer_factory is not None
-                writer = self._writer_factory(
-                    scene_epoch=request.scene_epoch,
-                    bootstrap_id=request.bootstrap_id,
-                    frame_seq=request.frame_seq,
-                    source_tick=request.source_tick,
-                    ticks_per_second=request.ticks_per_second,
-                    maximum_frame_entities=request.maximum_frame_entities,
-                    maximum_frame_bytes=request.maximum_frame_bytes,
+            assert self._frame_export is not None
+            exported = self._frame_export(request)
+            if self._config.strict_authority_presentation and exported is None:
+                raise PresentationExportError(
+                    "strict_authority_presentation frame_export returned None"
                 )
-                if writer is None:
-                    raise DisplayExportError("writer_factory returned None")
-                self._simulation.write_display_frame(writer)
-                seal = getattr(writer, "seal", None)
-                if not callable(seal):
-                    raise DisplayExportError("display writer must provide seal()")
-                exported = seal()
-                if exported is None:
-                    raise DisplayExportError("display writer seal() returned None")
-            if self._frame_sink is not None:
-                if exported is None:
-                    raise DisplayExportError(
-                        "frame_sink requires the exporter to return a sealed frame"
-                    )
-                self._frame_sink(exported)
         except Exception as exc:
             with self._state_lock:
                 self._display_samples_failed += 1

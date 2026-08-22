@@ -1,6 +1,6 @@
-# Missile War v5 与 Scene Engine V2 边界
+# Missile War v5 与 Scene Engine V3 边界
 
-状态：V2 production composition boundary。
+状态：V3 production composition boundary。
 
 Scene Engine 只拥有通用 mechanics：fixed-step runtime、opaque cursor envelope、Bootstrap/Frame/control、
 ordered session、Archive、display transaction 与 Replay composite session。
@@ -20,13 +20,13 @@ production route 固定为：
 
 ```text
 python-game MW adapter
-  -> SceneEngineRuntime + V2 session/archive
+  -> SceneEngineRuntime + V3 presentation/session/archive
   -> Arts Engine display core + MW visual profile
 
-raw v5 tape + V2 presentation archive
+raw v5 tape + V3 presentation archive
   -> Replay MW authority lane + Engine CompositeReplaySession
 ```
 
-experimental latest-only mailbox、gap-tolerant consumer 和旧 host 只允许从 `scene_engine.experimental`
-导入，不能作为 MW StateSource、录像或验收依据。发布必须锁定四个仓库 commit、Engine 包哈希、共享
-generated profile 哈希和 Arts artifact identity；回滚使用完整上一 tuple，不保留运行时双读或 fallback。
+DisplayFrame V1、latest-only mailbox、gap-tolerant consumer、旧 host 与 experimental import 已删除，
+不能作为 MW StateSource、录像或验收依据。发布必须锁定四个仓库 commit、Engine 包哈希、共享 generated
+profile 哈希和 Arts artifact identity；回滚使用完整上一 tuple，不保留运行时双读或 fallback。

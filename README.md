@@ -1,21 +1,24 @@
 # Scene Engine
 
 `scene-engine` 是 renderer-neutral 的 fixed-step runtime 与 presentation platform。Python 和
-JavaScript 包统一发布为 `0.2.0`，业务项目只能通过明确 adapter/profile 接入，不得把玩法、产品 API
+JavaScript 包统一发布为 `0.3.0`，业务项目只能通过明确 adapter/profile 接入，不得把玩法、产品 API
 或资源目录反向写入 Engine。
 
-正式 V2 能力包括：
+正式 V3 能力包括：
 
 - `SceneEngineRuntime`：整数 tick、逐 tick catch-up、fatal boundary，以及严格 authority + presentation 提交；
-- `SceneBootstrapV2`、完整 `PresentationFrame V2`、packet codec 和 opaque authority cursor；
+- `SceneBootstrapV3`、完整 parent/local `PresentationFrameV3`、packet codec 和 opaque authority cursor；
+- `PresentationIdAllocator` 与 Python parent closure/cycle/depth/world-pose validator；
 - `scene-presentation-control-v2@1` 与有界 `OrderedPresentationSession`；
-- `scene-presentation-archive-v2@1` 的流式 Python writer、Node/browser byte-range reader；
-- renderer-neutral display transaction core、Three lifecycle backend；
+- `scene-presentation-archive-v3@1` 的流式 Python writer、checkpoint directory 与 Node-only byte-range reader；
+- 唯一 `PresentationSceneTree`：dense SoA static/dynamic tree、world pose、metadata/profile/interaction 查询、
+  linear merge change plan 与 correlation batch 原子 prepare/commit；
 - transport-neutral Replay timeline、authority/presentation composite session；
-- Node WebSocket 有界写队列和独立 write deadline。
+- transport-neutral session admission、credit、ACK、reset 与 deadline mechanics。
 
-旧 latest-only mailbox、consumer 与 `SceneEngine` host 仅从 `scene_engine.experimental` 暴露，不能进入
-Missile War production import graph。旧 presentation-control/session 实现已删除；V2 不提供双实现 fallback。
+production Python/JavaScript presentation surface 只导出 V3 codec，不提供 V1/V2 alias 或 decoder fallback。
+旧 DisplayFrame V1、latest-only mailbox、consumer、legacy host 与 experimental import 已从 production、包和
+测试中删除。
 
 ## 快速验证
 
@@ -33,14 +36,14 @@ gameplay adapter
   -> SceneEngineRuntime
        -> authority commit
        -> complete presentation export
-       -> OrderedPresentationSession / Archive V2
+       -> OrderedPresentationSession / Archive V3
 
-Archive V2 + authority lane
+Archive V3 + authority lane
   -> CompositeReplaySession
 
 Bootstrap + ordered frames
   -> @scene-engine/display-core
-       -> @scene-engine/renderer-three
+       -> product-composed Three backend
        -> product-owned visual factories/resources
 ```
 
@@ -48,14 +51,16 @@ JavaScript workspace 包：
 
 - `@scene-engine/presentation-codec`
 - `@scene-engine/presentation-session`
-- `@scene-engine/presentation-archive`
+- `@scene-engine/presentation-archive-node`
 - `@scene-engine/replay-core`
 - `@scene-engine/display-core`
 - `@scene-engine/renderer-three`
-- `@scene-engine/transport-node-websocket`
 
 Engine 不包含 WorldState、MW v5 字段、规则坐标、FeatureOwner 内容、录像元数据、HTTP/API 或资源选择。
 authority cursor 在通用层始终是 `{ codecIdentity, canonicalBytes }`；字段解释属于产品 adapter。
+authority lane 可通过 `transmissionsOf(record)` 提供以该 authority wire 开头、随后为原始 outbound control
+的有界数组；Replay Core 不解释 control 内容。Composite 每次先整体预检并释放 authority 主帧与对应
+presentation correlation，尾随 control 可以跨 transport batch，但不会被下一条 authority 越过。
 
 ## Python 最小入口
 
@@ -65,7 +70,7 @@ from scene_engine import ManualClock, RuntimeConfig, SceneEngineRuntime
 clock = ManualClock()
 runtime = SceneEngineRuntime(
     simulation,
-    config=RuntimeConfig(ticks_per_second=60, display_frames_per_second=30),
+    config=RuntimeConfig(ticks_per_second=60, display_frames_per_second=60),
     clock=clock,
     frame_export=export_complete_frame,
 )
@@ -85,10 +90,12 @@ RuntimeConfig(
 ## 合同
 
 - [`docs/contracts/runtime.md`](docs/contracts/runtime.md)：runtime 提交、失败与严格 profile；
-- [`docs/contracts/presentation-profile.md`](docs/contracts/presentation-profile.md)：V2 Bootstrap、Frame、cursor 与 control；
-- [`docs/contracts/display-frame.md`](docs/contracts/display-frame.md)：隔离保留的 experimental V1 slice；
+- [`docs/contracts/presentation-profile.md`](docs/contracts/presentation-profile.md)：V3 Bootstrap/Frame packed layout、
+  parent/local tree、borrowed codec 与 dense display core；
+- [`docs/contracts/presentation-session.md`](docs/contracts/presentation-session.md)：有界 retry、credit/deadline 与 product-owned reset identity；
+- [`docs/contracts/presentation-archive.md`](docs/contracts/presentation-archive.md)：Node-only Archive V3 精确物理格式与 checkpoint directory；
 - [`docs/contracts/current-v5-boundary.md`](docs/contracts/current-v5-boundary.md)：MW adapter 与 Engine 边界；
-- [`docs/integration-plan.md`](docs/integration-plan.md)：当前跨项目 V2 composition 和发布门禁。
+- [`docs/integration-plan.md`](docs/integration-plan.md)：当前跨项目 V3 composition 和发布门禁。
 
 schema/profile 变更必须同步升级跨语言 golden、malformed corpus、Archive reader、共享 generated profile
 与 release manifest。任何不兼容物理布局必须增加 schema version。

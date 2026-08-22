@@ -29,20 +29,20 @@ class AuthorityCommitFatalError(SimulationFatalError):
     """Mandatory authority publication failed after gameplay committed a tick."""
 
 
-class DisplayFrameError(SceneEngineError, ValueError):
-    """A display frame violates the local binary/profile contract."""
-
-
-class DisplayExportError(DisplayFrameError):
-    """Gameplay could not export a complete display sample."""
+class PresentationExportError(SceneEngineError, RuntimeError):
+    """An adapter could not export a complete presentation sample."""
 
 
 class SceneBootstrapError(SceneEngineError, ValueError):
     """A SceneBootstrap violates the ordered presentation profile."""
 
 
-class PresentationFrameError(DisplayFrameError):
-    """A schema-V2 presentation frame is malformed or non-canonical."""
+class PresentationTreeError(SceneEngineError, ValueError):
+    """A V3 parent/local presentation tree is invalid."""
+
+
+class PresentationFrameError(SceneEngineError, ValueError):
+    """A schema-V3 presentation frame is malformed or non-canonical."""
 
 
 class PresentationControlError(SceneEngineError, ValueError):
@@ -61,13 +61,5 @@ class PresentationArchiveError(SceneEngineError, RuntimeError):
     """A presentation archive stream or identity is invalid."""
 
 
-class MailboxError(SceneEngineError, RuntimeError):
-    """A latest-frame mailbox ownership rule was violated."""
-
-
 class PacketError(SceneEngineError, ValueError):
     """A transport packet is malformed or unsupported."""
-
-
-class ConsumerError(SceneEngineError, ValueError):
-    """A complete-frame consumer rejected an otherwise decoded frame."""
