@@ -14,6 +14,10 @@ export const DEFAULT_SCENE_TREE_LIMITS = Object.freeze({
   maximumFramesPerBatch: 8,
 });
 
+const MAXIMUM_AGGREGATE_DEPTH = 256;
+const MAXIMUM_AGGREGATE_VALUES = 1_000_000;
+const AGGREGATE_CODEC_IDENTITY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:@/-]*$/;
+
 /**
  * The sole installed presentation tree.
  *
@@ -174,8 +178,10 @@ class PresentationSceneTree {
 }
 
 export class SceneDisplayEngine {
+  #aggregate;
   #captureHook;
   #captureScheduled;
+  #commit;
   #disposed;
   #metrics;
   #tree;
@@ -185,8 +191,15 @@ export class SceneDisplayEngine {
     this.#tree = new PresentationSceneTree({ limits });
     this.#captureHook = captureHook;
     this.#captureScheduled = false;
+    this.#aggregate = null;
+    this.#commit = null;
     this.#disposed = false;
-    this.#metrics = { committedFrames: 0, committedFrameBatches: 0, prepareFailures: 0 };
+    this.#metrics = {
+      committedAggregates: 0,
+      committedFrames: 0,
+      committedFrameBatches: 0,
+      prepareFailures: 0,
+    };
   }
 
   installBootstrap(bootstrap) {
@@ -195,6 +208,43 @@ export class SceneDisplayEngine {
     return plan;
   }
 
+  /**
+   * Prepare one complete Engine commit. An opaque, product-validated aggregate
+   * and the presentation-tree candidate share one synchronous pointer barrier.
+   * The Engine owns ordering and immutable retention but never interprets the
+   * aggregate codec or product fields.
+   * An empty frame batch is legal for additional authority publications that
+   * refer to an already-installed Engine commit.
+   */
+  prepareCommit({ aggregateCandidate, engineCommit, frames = [] } = {}) {
+    if (!Array.isArray(frames)) {
+      throw new SceneDisplayEngineError('engine-commit-frames-invalid');
+    }
+    let treePrepared = null;
+    try {
+      this.#tree.requireReady();
+      const normalized = validateAggregateCommitCandidate(
+        aggregateCandidate,
+        engineCommit,
+        this.#aggregate,
+        this.#commit,
+      );
+      validateFrameCommitTicks(frames, normalized.engineCommit);
+      validateFrameCommitPolicy(frames, normalized, this.#commit);
+      if (frames.length > 0) treePrepared = this.#tree.prepareFrames(frames);
+      return this.#wrapCommitPrepared({
+        treePrepared,
+        frameCount: frames.length,
+        normalized,
+      });
+    } catch (error) {
+      try { treePrepared?.abort?.(); } catch { /* preserve the primary failure */ }
+      this.#metrics.prepareFailures += 1;
+      throw error;
+    }
+  }
+
+  /** Presentation-only compatibility path for isolated package fixtures. */
   prepareFrames(frames) {
     let prepared;
     try {
@@ -203,10 +253,58 @@ export class SceneDisplayEngine {
       this.#metrics.prepareFailures += 1;
       throw error;
     }
-    return this.#wrapPrepared(prepared, frames.length);
+    return this.#wrapPreparedFrames(prepared, frames.length);
   }
 
-  #wrapPrepared(prepared, frameCount) {
+  #wrapCommitPrepared({ treePrepared, frameCount, normalized }) {
+    const expectedAggregate = this.#aggregate;
+    const expectedCommit = this.#commit;
+    let status = 'prepared';
+    const result = {
+      aggregate: normalized.aggregate,
+      engineCommit: normalized.engineCommit,
+      steps: treePrepared?.steps ?? Object.freeze([]),
+      assertCommittable: () => {
+        if (status !== 'prepared') {
+          throw new SceneDisplayEngineError('engine-commit-token-not-prepared');
+        }
+        if (this.#disposed) throw new SceneDisplayEngineError('scene-display-engine-disposed');
+        if (
+          this.#aggregate !== expectedAggregate
+          || this.#commit !== expectedCommit
+        ) {
+          throw new SceneDisplayEngineError('engine-commit-token-stale');
+        }
+        treePrepared?.assertCommittable();
+        status = 'validated';
+      },
+      abort: () => {
+        if (status === 'aborted') return;
+        if (status === 'committed') {
+          throw new SceneDisplayEngineError('engine-commit-token-settled');
+        }
+        status = 'aborted';
+        treePrepared?.abort();
+      },
+      commitValidated: () => {
+        if (status !== 'validated') {
+          throw new SceneDisplayEngineError('engine-commit-token-not-validated');
+        }
+        // No callback or await is permitted inside this barrier. The data
+        // pointer and the sole presentation tree move together.
+        treePrepared?.commitValidated();
+        this.#aggregate = normalized.aggregate;
+        this.#commit = normalized.engineCommit;
+        status = 'committed';
+        this.#metrics.committedFrames += frameCount;
+        if (frameCount > 0) this.#metrics.committedFrameBatches += 1;
+        if (normalized.advancesCommit) this.#metrics.committedAggregates += 1;
+      },
+    };
+    return Object.freeze(result);
+  }
+
+  #wrapPreparedFrames(prepared, frameCount) {
     let status = 'prepared';
     const result = {
       steps: prepared.steps,
@@ -238,6 +336,16 @@ export class SceneDisplayEngine {
     return Object.freeze(result);
   }
 
+  currentAggregate() {
+    if (this.#disposed) throw new SceneDisplayEngineError('scene-display-engine-disposed');
+    return this.#aggregate;
+  }
+
+  currentCommit() {
+    if (this.#disposed) throw new SceneDisplayEngineError('scene-display-engine-disposed');
+    return this.#commit;
+  }
+
   currentView() { return this.#tree.currentView(); }
   getNode(displayId) { return this.#tree.getNode(displayId); }
   getWorldPose(displayId, out) { return this.#tree.getWorldPose(displayId, out); }
@@ -255,6 +363,11 @@ export class SceneDisplayEngine {
       maxSeenDisplayId: state?.maxSeenDisplayId ?? 0n,
       lastFrameSeq: state?.lastFrameSeq ?? null,
       lastSourceTick: state?.lastSourceTick ?? null,
+      aggregateCodecIdentity: this.#aggregate?.codecIdentity ?? null,
+      aggregateRevision: this.#aggregate?.revision ?? null,
+      aggregateSourceTick: this.#aggregate?.sourceTick ?? null,
+      engineGenerationId: this.#commit?.generation_id ?? null,
+      engineCommitSeq: this.#commit?.commit_seq ?? null,
       denseDynamicStoreCount: this.#tree.dynamicPool?.length ?? 0,
       dynamicStoreCapacity: state?.dynamicStore.capacity ?? 0,
       residentNodeObjectCount: 0,
@@ -291,6 +404,8 @@ export class SceneDisplayEngine {
     if (this.#disposed) return;
     this.#disposed = true;
     this.#captureScheduled = false;
+    this.#aggregate = null;
+    this.#commit = null;
     this.#tree.dispose();
   }
 }
@@ -1200,6 +1315,299 @@ function normalizeFrameHeader(header) {
     sceneEpoch: positiveBigInt(header.sceneEpoch, 'sceneEpoch'),
     sourceTick: nonnegativeBigInt(header.sourceTick, 'sourceTick'),
   });
+}
+
+function validateAggregateCommitCandidate(
+  aggregateCandidate,
+  engineCommit,
+  currentAggregate,
+  currentCommit,
+) {
+  requireOptionsRecord(aggregateCandidate, 'aggregate-candidate-invalid');
+  assertExactKeys(
+    aggregateCandidate,
+    new Set(['codecIdentity', 'revision', 'sourceTick', 'value']),
+    'aggregate-candidate-field-unknown',
+  );
+  const codecIdentity = aggregateCodecIdentity(aggregateCandidate.codecIdentity);
+  const sourceTick = nonnegativeSafeInteger(
+    aggregateCandidate.sourceTick,
+    'aggregate-source-tick-invalid',
+  );
+  const revision = nonnegativeSafeInteger(
+    aggregateCandidate.revision,
+    'aggregate-revision-invalid',
+  );
+  if (aggregateCandidate.value === null || typeof aggregateCandidate.value !== 'object') {
+    throw new SceneDisplayEngineError('aggregate-value-invalid');
+  }
+
+  requireOptionsRecord(engineCommit, 'engine-commit-identity-invalid');
+  assertExactKeys(
+    engineCommit,
+    new Set([
+      'generation_id',
+      'commit_seq',
+      'source_tick',
+      'world_revision',
+      'cause',
+      'causation_id',
+    ]),
+    'engine-commit-field-unknown',
+  );
+  const normalizedCommit = Object.freeze({
+    generation_id: positiveSafeInteger(
+      engineCommit.generation_id,
+      'engine-generation-id-invalid',
+    ),
+    commit_seq: nonnegativeSafeInteger(
+      engineCommit.commit_seq,
+      'engine-commit-seq-invalid',
+    ),
+    source_tick: nonnegativeSafeInteger(
+      engineCommit.source_tick,
+      'engine-source-tick-invalid',
+    ),
+    world_revision: nonnegativeSafeInteger(
+      engineCommit.world_revision,
+      'engine-world-revision-invalid',
+    ),
+    cause: typeof engineCommit.cause === 'string' && engineCommit.cause.length > 0
+      ? engineCommit.cause
+      : invalidEngineCommitCause(),
+    causation_id: engineCommit.causation_id === null
+      ? null
+      : nonemptyText(engineCommit.causation_id, 'engine-causation-id-invalid'),
+  });
+  if (
+    normalizedCommit.source_tick !== sourceTick
+    || normalizedCommit.world_revision !== revision
+  ) {
+    throw new SceneDisplayEngineError('engine-aggregate-identity-mismatch');
+  }
+
+  if (currentCommit === null) {
+    if (
+      normalizedCommit.commit_seq !== 0
+      || normalizedCommit.cause !== 'checkpoint'
+      || normalizedCommit.causation_id !== null
+    ) {
+      throw new SceneDisplayEngineError('engine-initial-commit-not-checkpoint');
+    }
+    return Object.freeze({
+      aggregate: ownAggregateCandidate(
+        codecIdentity,
+        sourceTick,
+        revision,
+        aggregateCandidate.value,
+      ),
+      advancesCommit: true,
+      engineCommit: normalizedCommit,
+    });
+  }
+  if (currentAggregate === null) {
+    throw new SceneDisplayEngineError('engine-aggregate-owner-inconsistent');
+  }
+
+  const sameIdentity = (
+    normalizedCommit.generation_id === currentCommit.generation_id
+    && normalizedCommit.commit_seq === currentCommit.commit_seq
+  );
+  if (sameIdentity) {
+    if (
+      normalizedCommit.source_tick !== currentCommit.source_tick
+      || normalizedCommit.world_revision !== currentCommit.world_revision
+      || normalizedCommit.cause !== currentCommit.cause
+      || normalizedCommit.causation_id !== currentCommit.causation_id
+      || codecIdentity !== currentAggregate.codecIdentity
+      || sourceTick !== currentAggregate.sourceTick
+      || revision !== currentAggregate.revision
+      || aggregateCandidate.value !== currentAggregate.value
+    ) {
+      throw new SceneDisplayEngineError('engine-commit-identity-reused');
+    }
+    // One Engine commit can have several compatibility authority publications.
+    // They all resolve to the already-installed canonical data pointer.
+    return Object.freeze({
+      aggregate: currentAggregate,
+      advancesCommit: false,
+      engineCommit: currentCommit,
+    });
+  }
+
+  const sequentialInGeneration = (
+    normalizedCommit.generation_id === currentCommit.generation_id
+    && normalizedCommit.commit_seq === currentCommit.commit_seq + 1
+  );
+  const nextCheckpointGeneration = (
+    normalizedCommit.generation_id === currentCommit.generation_id + 1
+    && normalizedCommit.commit_seq === 0
+  );
+  if (!sequentialInGeneration && !nextCheckpointGeneration) {
+    throw new SceneDisplayEngineError('engine-commit-sequence-gap');
+  }
+  if (sequentialInGeneration && (
+    normalizedCommit.source_tick < currentCommit.source_tick
+    || normalizedCommit.source_tick > currentCommit.source_tick + 1
+    || normalizedCommit.world_revision !== currentCommit.world_revision + 1
+  )) {
+    throw new SceneDisplayEngineError('engine-commit-state-sequence-invalid');
+  }
+  if (nextCheckpointGeneration && (
+    normalizedCommit.cause !== 'checkpoint'
+    || normalizedCommit.causation_id !== null
+    || normalizedCommit.source_tick !== currentCommit.source_tick
+    || normalizedCommit.world_revision !== currentCommit.world_revision
+  )) {
+    throw new SceneDisplayEngineError('engine-checkpoint-identity-invalid');
+  }
+  return Object.freeze({
+    aggregate: ownAggregateCandidate(
+      codecIdentity,
+      sourceTick,
+      revision,
+      aggregateCandidate.value,
+    ),
+    advancesCommit: true,
+    engineCommit: normalizedCommit,
+  });
+}
+
+function validateFrameCommitTicks(frames, engineCommit) {
+  const expected = BigInt(engineCommit.source_tick);
+  for (const frame of frames) {
+    if (frame?.header?.sourceTick !== expected) {
+      throw new SceneDisplayEngineError('engine-frame-source-tick-mismatch');
+    }
+  }
+}
+
+function validateFrameCommitPolicy(frames, normalized, currentCommit) {
+  if (!normalized.advancesCommit) return;
+  if (currentCommit === null && frames.length === 0) {
+    throw new SceneDisplayEngineError('engine-initial-commit-frame-missing');
+  }
+  if (
+    currentCommit !== null
+    && normalized.engineCommit.source_tick > currentCommit.source_tick
+    && frames.length === 0
+  ) {
+    throw new SceneDisplayEngineError('engine-advanced-tick-frame-missing');
+  }
+  if (
+    currentCommit !== null
+    && normalized.engineCommit.generation_id !== currentCommit.generation_id
+    && frames.length === 0
+  ) {
+    throw new SceneDisplayEngineError('engine-checkpoint-frame-missing');
+  }
+}
+
+function aggregateCodecIdentity(value) {
+  if (
+    typeof value !== 'string'
+    || value.length === 0
+    || value.length > 160
+    || !AGGREGATE_CODEC_IDENTITY_PATTERN.test(value)
+  ) {
+    throw new SceneDisplayEngineError('aggregate-codec-identity-invalid');
+  }
+  return value;
+}
+
+function ownAggregateCandidate(codecIdentity, sourceTick, revision, value) {
+  const budget = { values: 0 };
+  freezeJsonTree(value, new WeakSet(), budget, 0);
+  return Object.freeze({ codecIdentity, revision, sourceTick, value });
+}
+
+function invalidEngineCommitCause() {
+  throw new SceneDisplayEngineError('engine-commit-cause-invalid');
+}
+
+function nonemptyText(value, code) {
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new SceneDisplayEngineError(code);
+  }
+  return value;
+}
+
+function nonnegativeSafeInteger(value, code) {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new SceneDisplayEngineError(code);
+  }
+  return value;
+}
+
+function positiveSafeInteger(value, code) {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new SceneDisplayEngineError(code);
+  }
+  return value;
+}
+
+function freezeJsonTree(value, active, budget, depth) {
+  budget.values += 1;
+  if (budget.values > MAXIMUM_AGGREGATE_VALUES) {
+    throw new SceneDisplayEngineError('aggregate-value-limit-exceeded');
+  }
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) throw new SceneDisplayEngineError('aggregate-json-invalid');
+    return value;
+  }
+  if (typeof value !== 'object') {
+    throw new SceneDisplayEngineError('aggregate-json-invalid');
+  }
+  if (depth >= MAXIMUM_AGGREGATE_DEPTH) {
+    throw new SceneDisplayEngineError('aggregate-depth-limit-exceeded');
+  }
+  if (active.has(value)) throw new SceneDisplayEngineError('aggregate-cycle');
+  active.add(value);
+  try {
+    if (Array.isArray(value)) {
+      if (Object.getPrototypeOf(value) !== Array.prototype) {
+        throw new SceneDisplayEngineError('aggregate-json-invalid');
+      }
+      const keys = Reflect.ownKeys(value);
+      if (keys.some((key) => (
+        key !== 'length'
+        && (typeof key !== 'string' || !/^(0|[1-9][0-9]*)$/.test(key))
+      ))) {
+        throw new SceneDisplayEngineError('aggregate-json-invalid');
+      }
+      for (let index = 0; index < value.length; index += 1) {
+        if (!Object.hasOwn(value, index)) {
+          throw new SceneDisplayEngineError('aggregate-json-invalid');
+        }
+        assertJsonDataProperty(value, String(index));
+        freezeJsonTree(value[index], active, budget, depth + 1);
+      }
+    } else {
+      requireOptionsRecord(value, 'aggregate-json-invalid');
+      for (const key of Reflect.ownKeys(value)) {
+        if (typeof key !== 'string') {
+          throw new SceneDisplayEngineError('aggregate-json-invalid');
+        }
+        assertJsonDataProperty(value, key);
+        freezeJsonTree(value[key], active, budget, depth + 1);
+      }
+    }
+  } catch (error) {
+    if (error instanceof SceneDisplayEngineError) throw error;
+    throw new SceneDisplayEngineError('aggregate-json-invalid');
+  } finally {
+    active.delete(value);
+  }
+  if (!Object.isFrozen(value)) Object.freeze(value);
+  return value;
+}
+
+function assertJsonDataProperty(value, key) {
+  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  if (!descriptor || !descriptor.enumerable || !Object.hasOwn(descriptor, 'value')) {
+    throw new SceneDisplayEngineError('aggregate-json-invalid');
+  }
 }
 
 function normalizeEngineOptions(value) {

@@ -1,8 +1,9 @@
 # Scene Engine
 
-`scene-engine` 是 renderer-neutral 的 fixed-step runtime 与 presentation platform。Python 和
-JavaScript 包统一发布为 `0.4.0`，业务项目只能通过明确 adapter/profile 接入，不得把玩法、产品 API
-或资源目录反向写入 Engine。
+`scene-engine` 是 renderer-neutral 的 fixed-step runtime 与 presentation platform。冻结的 production
+Python/JavaScript 包统一为 `0.4.0`；当前源码另带非发布联调候选
+`0.4.0+worldstate.test.1` / `@scene-engine/display-core@0.4.0-worldstate-test.1`。业务项目只能通过明确
+adapter/profile 接入，不得把玩法、产品 API 或资源目录反向写入 Engine。
 
 正式 V3 能力包括：
 
@@ -12,7 +13,9 @@ JavaScript 包统一发布为 `0.4.0`，业务项目只能通过明确 adapter/p
 - `scene-presentation-control-v2@1` 与有界 `OrderedPresentationSession`；
 - `scene-presentation-archive-v3@1` 的流式 Python writer、checkpoint directory 与 Node-only byte-range reader；
 - 唯一公共 `SceneDisplayEngine`（内部一个 `PresentationSceneTree`）：dense SoA static/dynamic tree、world
-  pose、metadata/profile/interaction 查询、linear merge change plan 与非空 frame batch 原子 prepare/commit；
+  pose、metadata/profile/interaction 查询、linear merge change plan；联调候选的 `prepareCommit()` 在同一
+  barrier 安装 product-validated opaque aggregate、Engine commit identity 与可选 frame batch，Engine
+  不解释 aggregate codec 或产品字段；
   correlation 顺序只由 session/coordinator 持有；`commitValidated()` 不运行 observer，产品 coordinator
   完成 business/tree/cursor 联合 pointer swap 后才调用 `schedulePostCommitCapture()` 排入受保护 microtask；
 - transport-neutral Replay timeline、authority/presentation composite session；
@@ -58,7 +61,9 @@ JavaScript workspace 包：
 - `@scene-engine/display-core`
 - `@scene-engine/renderer-three`
 
-Engine 不包含 WorldState、MW v5 字段、规则坐标、FeatureOwner 内容、录像元数据、HTTP/API 或资源选择。
+Engine 不定义或解释 WorldState、MW v5 字段、规则坐标、FeatureOwner 内容、录像元数据、HTTP/API 或资源选择。
+联调候选允许 Python runtime 独占产品注入的可变 aggregate 实例，也允许显示核心保存产品已校验的不透明
+immutable aggregate 指针；类型、字段和 mutation 语义仍全部属于产品 adapter。
 authority cursor 在通用层始终是 `{ codecIdentity, canonicalBytes }`；字段解释属于产品 adapter。
 authority lane 可通过 `transmissionsOf(record)` 提供以该 authority wire 开头、随后为原始 outbound control
 的有界数组；Replay Core 不解释 control 内容。Composite 每次先整体预检并释放 authority 主帧与对应

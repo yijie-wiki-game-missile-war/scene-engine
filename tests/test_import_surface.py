@@ -34,12 +34,17 @@ def test_semantic_codec_modules_have_explicit_stable_exports() -> None:
     assert runtime.__all__ == [
         "AuthorityCommitCallback",
         "AuthorityCommitRequest",
+        "EngineCommit",
         "FrameExportCallback",
+        "GenerationCheckpointResult",
         "PresentationExportRequest",
         "PumpResult",
         "RuntimeConfig",
         "RuntimeHealth",
         "SceneEngineRuntime",
+        "WorldOperationCommitResult",
+        "WorldOperationContext",
+        "WorldOperationResult",
     ]
     assert presentation_frame.__all__ == [
         "OpaquePayloadV3",

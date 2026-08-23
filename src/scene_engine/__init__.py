@@ -1,8 +1,4 @@
-"""Minimal convenience surface for the Scene Engine fixed-step runtime.
-
-Protocol records and codecs live in their explicit semantic modules.  The
-package root intentionally exposes only the common runtime and its errors.
-"""
+"""Minimal convenience surface for the Scene Engine runtime."""
 
 from .clock import ManualClock
 from .errors import (
@@ -14,10 +10,7 @@ from .errors import (
     SceneEngineError,
     SimulationFatalError,
 )
-from .runtime import (
-    RuntimeConfig,
-    SceneEngineRuntime,
-)
+from .runtime import RuntimeConfig, SceneEngineRuntime
 
 __all__ = [
     "AuthorityCommitFatalError",

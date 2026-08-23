@@ -126,6 +126,31 @@ function validateAndCommit(prepared) {
   prepared.commitValidated();
 }
 
+function aggregateCandidate(sourceTick, revision, changes = {}) {
+  return {
+    codecIdentity: changes.codecIdentity ?? 'neutral-test-state-json@1',
+    revision,
+    sourceTick,
+    value: changes.value ?? {
+      kind: 'neutral-test-state',
+      revision,
+      sourceTick,
+      values: changes.values ?? [],
+    },
+  };
+}
+
+function engineCommit(commitSeq, sourceTick, worldRevision, changes = {}) {
+  return {
+    generation_id: changes.generationId ?? 1,
+    commit_seq: commitSeq,
+    source_tick: sourceTick,
+    world_revision: worldRevision,
+    cause: changes.cause ?? (commitSeq === 0 ? 'checkpoint' : 'tick'),
+    causation_id: changes.causationId ?? null,
+  };
+}
+
 test('display-core exposes one public Engine facade and no reset or single-frame API', () => {
   assert.deepEqual(Object.keys(displayCore).sort(), [
     'DEFAULT_SCENE_TREE_LIMITS',
@@ -186,6 +211,222 @@ test('Engine options and tree limit names fail closed', () => {
     () => engine.prepareFrames([frame(1, []), frame(2, [])]),
     (error) => error.code === 'frame-batch-limit-exceeded',
   );
+});
+
+test('Engine owns and atomically advances an opaque aggregate with the sole presentation tree', () => {
+  const engine = new SceneDisplayEngine();
+  engine.installBootstrap(bootstrap());
+
+  const initialAggregate = aggregateCandidate(0, 0);
+  const initialCommit = engineCommit(0, 0, 0);
+  const initial = engine.prepareCommit({
+    aggregateCandidate: initialAggregate,
+    frames: [frame(1, [node(1)], { sourceTick: 0 })],
+    engineCommit: initialCommit,
+  });
+  assert.equal(engine.currentAggregate(), null);
+  assert.equal(engine.currentCommit(), null);
+  assert.equal(engine.currentView().dynamicNodeCount, 0);
+  initial.assertCommittable();
+  initial.commitValidated();
+
+  assert.strictEqual(engine.currentAggregate(), initial.aggregate);
+  assert.strictEqual(engine.currentCommit(), initial.engineCommit);
+  assert.equal(engine.currentAggregate().value.kind, 'neutral-test-state');
+  assert.equal(engine.currentView().dynamicNodeCount, 1);
+  assert.equal(Object.isFrozen(engine.currentAggregate()), true);
+  assert.equal(Object.isFrozen(engine.currentAggregate().value), true);
+
+  const dataOnlyAggregate = aggregateCandidate(0, 1, {
+    values: [{ credits: 10 }],
+  });
+  const dataOnly = engine.prepareCommit({
+    aggregateCandidate: dataOnlyAggregate,
+    engineCommit: engineCommit(1, 0, 1, {
+      cause: 'command',
+      causationId: 'intent:test',
+    }),
+    frames: [],
+  });
+  assert.deepEqual(dataOnly.steps, []);
+  assert.equal(engine.currentAggregate().revision, 0);
+  dataOnly.assertCommittable();
+  dataOnly.commitValidated();
+
+  assert.equal(engine.currentAggregate().revision, 1);
+  assert.equal(engine.currentAggregate().value.values[0].credits, 10);
+  assert.equal(engine.currentCommit().commit_seq, 1);
+  assert.equal(engine.currentView().sourceTick, 0n);
+
+  validateAndCommit(engine.prepareCommit({
+    aggregateCandidate: aggregateCandidate(1, 2),
+    engineCommit: engineCommit(2, 1, 2),
+    frames: [frame(2, [node(2)], { sourceTick: 1 })],
+  }));
+  assert.equal(engine.currentView().sourceTick, 1n);
+  assert.deepEqual(engine.capture().metrics, {
+    committedAggregates: 3,
+    committedFrames: 2,
+    committedFrameBatches: 2,
+    prepareFailures: 0,
+  });
+});
+
+test('aggregate commit sequence and prepared tokens fail closed without partial mutation', () => {
+  const engine = new SceneDisplayEngine();
+  engine.installBootstrap(bootstrap());
+  validateAndCommit(engine.prepareCommit({
+    aggregateCandidate: aggregateCandidate(0, 0),
+    frames: [frame(1, [], { sourceTick: 0 })],
+    engineCommit: engineCommit(0, 0, 0),
+  }));
+
+  assert.throws(
+    () => engine.prepareCommit({
+      aggregateCandidate: aggregateCandidate(2, 2),
+      engineCommit: engineCommit(2, 2, 2),
+      frames: [frame(2, [], { sourceTick: 2 })],
+    }),
+    (error) => error.code === 'engine-commit-sequence-gap',
+  );
+  assert.equal(engine.currentAggregate().sourceTick, 0);
+  assert.equal(engine.currentCommit().commit_seq, 0);
+
+  const stale = engine.prepareCommit({
+    aggregateCandidate: aggregateCandidate(0, 1, { values: ['winner'] }),
+    engineCommit: engineCommit(1, 0, 1),
+    frames: [],
+  });
+  const winner = engine.prepareCommit({
+    aggregateCandidate: aggregateCandidate(0, 1, { values: ['winner'] }),
+    engineCommit: engineCommit(1, 0, 1),
+    frames: [],
+  });
+  validateAndCommit(winner);
+  assert.throws(
+    () => stale.assertCommittable(),
+    (error) => error.code === 'engine-commit-token-stale',
+  );
+  stale.abort();
+  assert.equal(engine.currentAggregate().revision, 1);
+
+  assert.throws(
+    () => engine.prepareCommit({
+      aggregateCandidate: engine.currentAggregate(),
+      engineCommit: engineCommit(1, 0, 1, { cause: 'reused-differently' }),
+      frames: [],
+    }),
+    (error) => error.code === 'engine-commit-identity-reused',
+  );
+  assert.throws(
+    () => engine.prepareCommit({
+      aggregateCandidate: aggregateCandidate(0, 1, { values: ['divergent'] }),
+      engineCommit: engine.currentCommit(),
+      frames: [],
+    }),
+    (error) => error.code === 'engine-commit-identity-reused',
+  );
+  assert.equal(engine.currentCommit().cause, 'tick');
+});
+
+test('aggregate ownership freezes nested data even below a frozen shell', () => {
+  const nested = { credits: 1 };
+  const value = Object.freeze({ nested });
+  const engine = new SceneDisplayEngine();
+  engine.installBootstrap(bootstrap());
+  validateAndCommit(engine.prepareCommit({
+    aggregateCandidate: aggregateCandidate(0, 0, { value }),
+    engineCommit: engineCommit(0, 0, 0),
+    frames: [frame(1, [], { sourceTick: 0 })],
+  }));
+
+  assert.equal(Object.isFrozen(nested), true);
+  assert.throws(() => { nested.credits = 999; }, TypeError);
+  assert.equal(engine.currentAggregate().value.nested.credits, 1);
+});
+
+test('aggregate commits enforce complete-frame time and checkpoint boundaries', () => {
+  const engine = new SceneDisplayEngine();
+  engine.installBootstrap(bootstrap());
+  assert.throws(
+    () => engine.prepareCommit({
+      aggregateCandidate: aggregateCandidate(0, 0),
+      engineCommit: engineCommit(0, 0, 0),
+      frames: [],
+    }),
+    (error) => error.code === 'engine-initial-commit-frame-missing',
+  );
+  assert.throws(
+    () => engine.prepareCommit({
+      aggregateCandidate: aggregateCandidate(0, 0),
+      engineCommit: engineCommit(0, 0, 0),
+      frames: [frame(1, [], { sourceTick: 1 })],
+    }),
+    (error) => error.code === 'engine-frame-source-tick-mismatch',
+  );
+  validateAndCommit(engine.prepareCommit({
+    aggregateCandidate: aggregateCandidate(0, 0),
+    engineCommit: engineCommit(0, 0, 0),
+    frames: [frame(1, [], { sourceTick: 0 })],
+  }));
+
+  assert.throws(
+    () => engine.prepareCommit({
+      aggregateCandidate: aggregateCandidate(1, 1),
+      engineCommit: engineCommit(1, 1, 1),
+      frames: [],
+    }),
+    (error) => error.code === 'engine-advanced-tick-frame-missing',
+  );
+  assert.throws(
+    () => engine.prepareCommit({
+      aggregateCandidate: aggregateCandidate(0, 0),
+      engineCommit: engineCommit(0, 0, 0, { generationId: 2 }),
+      frames: [],
+    }),
+    (error) => error.code === 'engine-checkpoint-frame-missing',
+  );
+
+  validateAndCommit(engine.prepareCommit({
+    aggregateCandidate: aggregateCandidate(0, 0, { values: ['checkpoint'] }),
+    engineCommit: engineCommit(0, 0, 0, { generationId: 2 }),
+    frames: [frame(2, [], { sourceTick: 0 })],
+  }));
+  assert.equal(engine.currentCommit().generation_id, 2);
+  assert.equal(engine.currentCommit().commit_seq, 0);
+});
+
+test('aggregate commit sequence rejects time or revision regression', () => {
+  const engine = new SceneDisplayEngine();
+  engine.installBootstrap(bootstrap());
+  validateAndCommit(engine.prepareCommit({
+    aggregateCandidate: aggregateCandidate(0, 5),
+    engineCommit: engineCommit(0, 0, 5, { generationId: 7 }),
+    frames: [frame(1, [], { sourceTick: 0 })],
+  }));
+  validateAndCommit(engine.prepareCommit({
+    aggregateCandidate: aggregateCandidate(1, 6),
+    engineCommit: engineCommit(1, 1, 6, { generationId: 7 }),
+    frames: [frame(2, [], { sourceTick: 1 })],
+  }));
+
+  assert.throws(
+    () => engine.prepareCommit({
+      aggregateCandidate: aggregateCandidate(0, 7),
+      engineCommit: engineCommit(2, 0, 7, { generationId: 7 }),
+      frames: [frame(3, [], { sourceTick: 0 })],
+    }),
+    (error) => error.code === 'engine-commit-state-sequence-invalid',
+  );
+  assert.throws(
+    () => engine.prepareCommit({
+      aggregateCandidate: aggregateCandidate(1, 5),
+      engineCommit: engineCommit(2, 1, 5, { generationId: 7 }),
+      frames: [],
+    }),
+    (error) => error.code === 'engine-commit-state-sequence-invalid',
+  );
+  assert.equal(engine.currentCommit().commit_seq, 1);
 });
 
 test('capture observers run only in protected post-barrier microtasks', async () => {

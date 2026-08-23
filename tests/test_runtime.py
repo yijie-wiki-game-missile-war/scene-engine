@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+from types import SimpleNamespace
 from typing import Any, List
 
 import pytest
@@ -13,7 +14,12 @@ from scene_engine.errors import (
     RuntimeStoppedError,
     SimulationFatalError,
 )
-from scene_engine.runtime import AuthorityCommitRequest, RuntimeConfig, SceneEngineRuntime
+from scene_engine.runtime import (
+    AuthorityCommitRequest,
+    RuntimeConfig,
+    SceneEngineRuntime,
+    WorldOperationResult,
+)
 from scene_engine.types import GameSimulation, TickContext
 
 
@@ -500,3 +506,183 @@ def test_stop_is_idempotent_and_rejects_future_work() -> None:
     with pytest.raises(RuntimeStoppedError):
         runtime.pump()
     assert simulation.steps == []
+
+
+class RecordingWorldProgram:
+    def step(self, world: Any, context: TickContext) -> dict[str, int]:
+        world.value += 1
+        return {"tick": context.tick, "value": world.value}
+
+
+def test_world_mode_orders_tick_and_same_tick_operation_commits() -> None:
+    clock = ManualClock()
+    world = SimpleNamespace(tick=0, world_revision=0, value=0)
+    authority = []
+    runtime = SceneEngineRuntime(
+        world=world,
+        world_program=RecordingWorldProgram(),
+        config=config(),
+        clock=clock,
+        authority_commit=authority.append,
+    )
+
+    clock.advance(1.0 / 60.0)
+    runtime.pump()
+
+    def change(current: Any, context: Any) -> WorldOperationResult:
+        current.value += 10
+        current.world_revision = context.proposed_commit.world_revision
+        return WorldOperationResult(True, "changed")
+
+    changed = runtime.execute_world_operation(
+        change,
+        cause="command",
+        causation_id="intent:one",
+        export_presentation=False,
+    )
+    unchanged = runtime.execute_world_operation(
+        lambda _world, _context: WorldOperationResult(False, "noop"),
+        cause="query",
+        export_presentation=False,
+    )
+
+    assert world.tick == runtime.current_tick == 1
+    assert world.world_revision == 2
+    assert world.value == 11
+    assert changed.engine_commit is not None
+    assert changed.engine_commit.commit_seq == 2
+    assert changed.engine_commit.source_tick == 1
+    assert changed.engine_commit.causation_id == "intent:one"
+    assert unchanged.engine_commit is None
+    assert runtime.commit_seq == 2
+    assert [request.engine_commit.commit_seq for request in authority] == [1, 2]
+
+
+def test_world_operation_exception_quarantines_partially_mutated_world() -> None:
+    world = SimpleNamespace(tick=0, world_revision=0, value=0)
+    runtime = SceneEngineRuntime(
+        world=world,
+        world_program=RecordingWorldProgram(),
+        config=config(),
+        clock=ManualClock(),
+    )
+
+    def fail_after_mutation(current: Any, _context: Any) -> WorldOperationResult:
+        current.value = 99
+        raise LookupError("operation failed")
+
+    with pytest.raises(SimulationFatalError) as raised:
+        runtime.execute_world_operation(
+            fail_after_mutation,
+            cause="command",
+            export_presentation=False,
+        )
+
+    assert isinstance(raised.value.__cause__, LookupError)
+    assert world.value == 99
+    assert runtime.commit_seq == 0
+    assert runtime.health.fatal
+    with pytest.raises(SimulationFatalError):
+        runtime.execute_world_operation(
+            lambda _world, _context: WorldOperationResult(False),
+            cause="query",
+            export_presentation=False,
+        )
+
+
+def test_world_operation_invalid_result_or_counter_write_is_fatal() -> None:
+    invalid_world = SimpleNamespace(tick=0, world_revision=0, value=0)
+    invalid_runtime = SceneEngineRuntime(
+        world=invalid_world,
+        world_program=RecordingWorldProgram(),
+        config=config(),
+        clock=ManualClock(),
+    )
+    with pytest.raises(SimulationFatalError, match="invalid result"):
+        invalid_runtime.execute_world_operation(
+            lambda _world, _context: object(),
+            cause="command",
+            export_presentation=False,
+        )
+    assert invalid_runtime.health.fatal
+
+    counter_world = SimpleNamespace(tick=0, world_revision=0, value=0)
+    counter_runtime = SceneEngineRuntime(
+        world=counter_world,
+        world_program=RecordingWorldProgram(),
+        config=config(),
+        clock=ManualClock(),
+    )
+
+    def write_tick(current: Any, context: Any) -> WorldOperationResult:
+        current.tick += 1
+        current.world_revision = context.proposed_commit.world_revision
+        return WorldOperationResult(True)
+
+    with pytest.raises(SimulationFatalError, match="reserved Engine counters"):
+        counter_runtime.execute_world_operation(
+            write_tick,
+            cause="command",
+            export_presentation=False,
+        )
+    assert counter_runtime.commit_seq == 0
+    assert counter_runtime.health.fatal
+
+
+def test_same_tick_export_configuration_is_rejected_before_world_callback() -> None:
+    world = SimpleNamespace(tick=0, world_revision=0, value=0)
+    called = False
+    runtime = SceneEngineRuntime(
+        world=world,
+        world_program=RecordingWorldProgram(),
+        config=config(),
+        clock=ManualClock(),
+        frame_export=lambda _request: None,
+    )
+
+    def operation(_world: Any, _context: Any) -> WorldOperationResult:
+        nonlocal called
+        called = True
+        return WorldOperationResult(False)
+
+    with pytest.raises(ConfigurationError, match="strict_authority_presentation"):
+        runtime.execute_world_operation(operation, cause="command")
+
+    assert not called
+    assert runtime.health.running
+    assert runtime.commit_seq == 0
+
+
+def test_generation_checkpoint_is_installed_only_after_materialization() -> None:
+    world = SimpleNamespace(tick=0, world_revision=0, value=0)
+    runtime = SceneEngineRuntime(
+        world=world,
+        world_program=RecordingWorldProgram(),
+        config=config(),
+        clock=ManualClock(),
+    )
+
+    def materialize(current: Any, checkpoint: Any) -> tuple[int, int]:
+        assert current is world
+        assert runtime.generation_id == 1
+        assert runtime.last_engine_commit is None
+        return checkpoint.generation_id, checkpoint.commit_seq
+
+    result = runtime.rotate_generation(materialize)
+
+    assert result.value == (2, 0)
+    assert result.engine_commit is runtime.last_engine_commit
+    assert runtime.generation_id == 2
+    assert runtime.commit_seq == 0
+
+    def fail(_current: Any, checkpoint: Any) -> None:
+        assert checkpoint.generation_id == 3
+        raise LookupError("checkpoint failed")
+
+    with pytest.raises(SimulationFatalError) as raised:
+        runtime.rotate_generation(fail)
+
+    assert isinstance(raised.value.__cause__, LookupError)
+    assert runtime.generation_id == 2
+    assert runtime.commit_seq == 0
+    assert runtime.health.fatal
