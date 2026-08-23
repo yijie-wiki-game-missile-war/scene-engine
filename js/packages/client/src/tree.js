@@ -24,17 +24,38 @@ export class SceneTree {
         || frame.nodes.length > bootstrap.header.maximumDynamicNodes) {
       fail('scene-checkpoint-frame-limit');
     }
-    validateFrameRegistry(frame.nodes, bootstrap.visualTypes, bootstrap.animationStates);
-    validateTree(frame.nodes, bootstrap.staticNodes, this.maximumTreeDepth);
+    const registries = registryCache(bootstrap);
+    validateFrameRegistry(frame.nodes, registries);
     const staticNodes = Object.freeze(bootstrap.staticNodes.map((node) => publicNode(node, true)));
     const dynamicNodes = Object.freeze(frame.nodes.map((node) => publicNode(node, false)));
-    const state = buildState({
+    const staticTree = validateTree([], staticNodes, this.maximumTreeDepth);
+    const dynamicTree = validateDynamicTree(
+      dynamicNodes,
+      staticTree.byId,
+      staticTree.depth,
+      this.maximumTreeDepth,
+    );
+    const staticWorldPoses = deriveWorldPoses(staticNodes, staticTree.byId);
+    const state = finishState({
       generation: (this.state?.generation ?? 0) + 1,
       commit,
-      bootstrap,
+      frameLimits: Object.freeze({
+        maximumDynamicNodes: bootstrap.header.maximumDynamicNodes,
+        maximumFrameBytes: bootstrap.header.maximumFrameBytes,
+      }),
+      registries,
       staticNodes,
+      staticById: staticTree.byId,
+      staticDepths: staticTree.depth,
+      staticWorldPoses,
       dynamicNodes,
-      maxSeenDisplayId: maximumId([...staticNodes, ...dynamicNodes]),
+      dynamicById: dynamicTree.byId,
+      dynamicWorldPoses: deriveWorldPoses(
+        dynamicNodes,
+        dynamicTree.byId,
+        staticWorldPoses,
+      ),
+      maxSeenDisplayId: maximumId(dynamicNodes, maximumId(staticNodes)),
     });
     return Object.freeze({
       expectedState: this.state,
@@ -48,27 +69,36 @@ export class SceneTree {
   prepareFrame(frame, commit) {
     this.requireReady();
     const previous = this.state;
-    if (frame.bytes.byteLength > previous.bootstrap.header.maximumFrameBytes
-        || frame.nodes.length > previous.bootstrap.header.maximumDynamicNodes) {
+    if (frame.bytes.byteLength > previous.frameLimits.maximumFrameBytes
+        || frame.nodes.length > previous.frameLimits.maximumDynamicNodes) {
       fail('scene-frame-limit');
     }
-    validateFrameRegistry(
-      frame.nodes,
-      previous.bootstrap.visualTypes,
-      previous.bootstrap.animationStates,
-    );
-    validateTree(frame.nodes, previous.bootstrap.staticNodes, this.maximumTreeDepth);
+    validateFrameRegistry(frame.nodes, previous.registries);
     const dynamicNodes = Object.freeze(frame.nodes.map((node) => publicNode(node, false)));
+    const dynamicTree = validateDynamicTree(
+      dynamicNodes,
+      previous.staticById,
+      previous.staticDepths,
+      this.maximumTreeDepth,
+    );
     validateIdLifetime(previous, dynamicNodes);
-    const state = buildState({
+    const state = finishState({
       generation: previous.generation,
       commit,
-      bootstrap: previous.bootstrap,
+      frameLimits: previous.frameLimits,
+      registries: previous.registries,
       staticNodes: previous.staticNodes,
+      staticById: previous.staticById,
+      staticDepths: previous.staticDepths,
+      staticWorldPoses: previous.staticWorldPoses,
       dynamicNodes,
-      maxSeenDisplayId: maximumId([{
-        displayId: previous.maxSeenDisplayId,
-      }, ...dynamicNodes]),
+      dynamicById: dynamicTree.byId,
+      dynamicWorldPoses: deriveWorldPoses(
+        dynamicNodes,
+        dynamicTree.byId,
+        previous.staticWorldPoses,
+      ),
+      maxSeenDisplayId: maximumId(dynamicNodes, previous.maxSeenDisplayId),
     });
     return Object.freeze({
       expectedState: previous,
@@ -129,52 +159,71 @@ export class SceneTree {
   requireReady() { this.requireOpen(); if (!this.state) fail('scene-checkpoint-missing'); }
 }
 
-function buildState({
-  generation, commit, bootstrap, staticNodes, dynamicNodes, maxSeenDisplayId,
-}) {
-  const nodes = Object.freeze([...staticNodes, ...dynamicNodes]);
-  const nodeById = new Map(nodes.map((node) => [node.displayId, node]));
-  const poses = deriveWorldPoses(nodes, nodeById);
-  const state = {
-    generation,
-    commit,
-    bootstrap,
-    staticNodes,
-    dynamicNodes,
-    nodes,
-    nodeById,
-    poses,
-    maxSeenDisplayId,
-    view: null,
-  };
+function finishState(parts) {
+  const state = { ...parts, view: null };
   state.view = createView(state);
   return Object.freeze(state);
 }
 
 function createView(state) {
-  const bootstrap = state.bootstrap;
+  const registries = state.registries;
   return Object.freeze({
     generation: state.generation,
     commitSeq: state.commit.commitSeq,
     sourceTick: state.commit.sourceTick,
-    nodeCount: state.nodes.length,
+    nodeCount: state.staticNodes.length + state.dynamicNodes.length,
     staticNodeCount: state.staticNodes.length,
     dynamicNodeCount: state.dynamicNodes.length,
-    sceneMetadataCount: bootstrap.sceneMetadataCount,
-    visualTypeCount: bootstrap.visualTypeCount,
-    animationStateCount: bootstrap.animationStateCount,
-    nodeAt: (index) => at(state.nodes, index, 'scene-node-index-invalid'),
-    getNode: (displayId) => state.nodeById.get(displayIdValue(displayId)) ?? null,
-    getProfile: (displayId) => state.nodeById.get(displayIdValue(displayId))?.profile ?? null,
+    sceneMetadataCount: registries.sceneMetadata.length,
+    visualTypeCount: registries.visualTypes.length,
+    animationStateCount: registries.animationStates.length,
+    nodeAt: (index) => nodeAt(state, index),
+    getNode: (displayId) => nodeById(state, displayIdValue(displayId)),
+    getProfile: (displayId) => nodeById(state, displayIdValue(displayId))?.profile ?? null,
     getInteraction: (displayId) => (
-      state.nodeById.get(displayIdValue(displayId))?.interaction ?? null
+      nodeById(state, displayIdValue(displayId))?.interaction ?? null
     ),
-    getWorldPose: (displayId, out) => writePose(state.poses.get(displayIdValue(displayId)), out),
-    sceneMetadataAt: (index) => bootstrap.sceneMetadataAt(index),
-    getSceneMetadata: (typeId) => bootstrap.getSceneMetadata(typeId),
-    visualTypeAt: (index) => bootstrap.visualTypeAt(index),
-    animationStateAt: (index) => bootstrap.animationStateAt(index),
+    getWorldPose: (displayId, out) => writePose(
+      worldPoseById(state, displayIdValue(displayId)),
+      out,
+    ),
+    sceneMetadataAt: (index) => at(
+      registries.sceneMetadata,
+      index,
+      'scene-metadata-index-invalid',
+    ),
+    getSceneMetadata: (typeId) => (
+      registries.sceneMetadataById.get(uint32Value(typeId, 'metadata-type-invalid')) ?? null
+    ),
+    visualTypeAt: (index) => at(
+      registries.visualTypes,
+      index,
+      'visual-type-index-invalid',
+    ),
+    animationStateAt: (index) => at(
+      registries.animationStates,
+      index,
+      'animation-state-index-invalid',
+    ),
   });
+}
+
+function nodeAt(state, index) {
+  if (!Number.isInteger(index) || index < 0
+      || index >= state.staticNodes.length + state.dynamicNodes.length) {
+    fail('scene-node-index-invalid');
+  }
+  return index < state.staticNodes.length
+    ? state.staticNodes[index]
+    : state.dynamicNodes[index - state.staticNodes.length];
+}
+
+function nodeById(state, displayId) {
+  return state.dynamicById.get(displayId) ?? state.staticById.get(displayId) ?? null;
+}
+
+function worldPoseById(state, displayId) {
+  return state.dynamicWorldPoses.get(displayId) ?? state.staticWorldPoses.get(displayId);
 }
 
 function publicNode(node, isStatic) {
@@ -204,44 +253,60 @@ function publicPayload(value) {
   });
 }
 
-function validateFrameRegistry(nodes, visualTypes, animationStates) {
-  const visuals = new Map(visualTypes.map((item) => [item.visualTypeId, item]));
-  const animations = new Set(animationStates.map((item) => item.animationStateId));
+function registryCache(bootstrap) {
+  const sceneMetadata = Object.freeze([...bootstrap.sceneMetadata]);
+  const visualTypes = Object.freeze([...bootstrap.visualTypes]);
+  const animationStates = Object.freeze([...bootstrap.animationStates]);
+  return Object.freeze({
+    sceneMetadata,
+    sceneMetadataById: new Map(
+      sceneMetadata.map((item) => [item.metadataTypeId, item]),
+    ),
+    visualTypes,
+    visualById: new Map(visualTypes.map((item) => [item.visualTypeId, item])),
+    animationStates,
+    animationIds: new Set(animationStates.map((item) => item.animationStateId)),
+  });
+}
+
+function validateFrameRegistry(nodes, registries) {
   for (const node of nodes) {
-    const visual = visuals.get(node.visualTypeId);
+    const visual = registries.visualById.get(node.visualTypeId);
     if (!visual || (node.profile?.payloadTypeId ?? 0) !== visual.profileTypeId
         || (node.interaction?.payloadTypeId ?? 0) !== visual.interactionTypeId) {
       fail('scene-node-registry-mismatch');
     }
-    if (node.animationStateId && !animations.has(node.animationStateId)) {
+    if (node.animationStateId && !registries.animationIds.has(node.animationStateId)) {
       fail('scene-node-animation-unknown');
     }
   }
 }
 
 function validateIdLifetime(previous, nodes) {
-  const current = new Set(previous.dynamicNodes.map((node) => node.displayId));
   for (const node of nodes) {
-    if (!current.has(node.displayId) && node.displayId <= previous.maxSeenDisplayId) {
+    if (!previous.dynamicById.has(node.displayId)
+        && node.displayId <= previous.maxSeenDisplayId) {
       fail('scene-display-id-reused');
     }
   }
 }
 
 function bootstrapPlan(state) {
-  const ids = Object.freeze(state.nodes.map((node) => node.displayId));
+  const ids = [];
+  for (const node of state.staticNodes) ids.push(node.displayId);
+  for (const node of state.dynamicNodes) ids.push(node.displayId);
   return freezePlan({
     kind: 'bootstrap',
     generation: state.generation,
     commitSeq: state.commit.commitSeq,
     sourceTick: state.commit.sourceTick,
-    createIds: ids,
+    createIds: Object.freeze(ids),
   });
 }
 
 function framePlan(previous, candidate) {
-  const oldNodes = new Map(previous.dynamicNodes.map((node) => [node.displayId, node]));
-  const nextNodes = new Map(candidate.dynamicNodes.map((node) => [node.displayId, node]));
+  const oldNodes = previous.dynamicById;
+  const nextNodes = candidate.dynamicById;
   const plan = {
     kind: 'frame',
     generation: candidate.generation,
@@ -286,7 +351,42 @@ function freezePlan(changes) {
   return Object.freeze(result);
 }
 
-function deriveWorldPoses(nodes, byId) {
+function validateDynamicTree(nodes, staticById, staticDepths, maximumDepth) {
+  const byId = new Map();
+  for (const node of nodes) {
+    if (staticById.has(node.displayId) || byId.has(node.displayId)) {
+      fail('scene-tree-id-duplicate');
+    }
+    byId.set(node.displayId, node);
+  }
+  for (const node of nodes) {
+    if (node.parentDisplayId !== 0n
+        && !staticById.has(node.parentDisplayId)
+        && !byId.has(node.parentDisplayId)) {
+      fail('scene-tree-parent-missing');
+    }
+  }
+  const depths = new Map();
+  const visiting = new Set();
+  const deriveDepth = (identity) => {
+    if (depths.has(identity)) return depths.get(identity);
+    if (staticDepths.has(identity)) return staticDepths.get(identity);
+    if (visiting.has(identity)) fail('scene-tree-cycle');
+    visiting.add(identity);
+    const node = byId.get(identity);
+    const depth = node.parentDisplayId === 0n
+      ? 1
+      : deriveDepth(node.parentDisplayId) + 1;
+    visiting.delete(identity);
+    if (depth > maximumDepth) fail('scene-tree-depth-limit');
+    depths.set(identity, depth);
+    return depth;
+  };
+  for (const identity of byId.keys()) deriveDepth(identity);
+  return Object.freeze({ byId, depth: depths });
+}
+
+function deriveWorldPoses(nodes, byId, parentWorldPoses = null) {
   const result = new Map();
   const visiting = new Set();
   const derive = (identity) => {
@@ -302,7 +402,11 @@ function deriveWorldPoses(nodes, byId) {
         scale: Object.freeze([...node.localScale]),
       });
     } else {
-      pose = composePose(derive(node.parentDisplayId), node);
+      const parentPose = byId.has(node.parentDisplayId)
+        ? derive(node.parentDisplayId)
+        : parentWorldPoses?.get(node.parentDisplayId);
+      if (!parentPose) fail('scene-tree-parent-missing');
+      pose = composePose(parentPose, node);
     }
     visiting.delete(identity);
     result.set(identity, pose);
@@ -368,13 +472,17 @@ function arraysEqual(left, right) {
   for (let index = 0; index < left.length; index += 1) if (left[index] !== right[index]) return false;
   return true;
 }
-function maximumId(nodes) {
-  let result = 0n;
+function maximumId(nodes, floor = 0n) {
+  let result = floor;
   for (const node of nodes) if (node.displayId > result) result = node.displayId;
   return result;
 }
 function displayIdValue(value) {
   try { const result = BigInt(value); if (result < 0n) throw new Error(); return result; } catch { fail('scene-display-id-invalid'); }
+}
+function uint32Value(value, code) {
+  if (!Number.isInteger(value) || value < 0 || value > 0xffffffff) fail(code);
+  return value;
 }
 function at(values, index, code) {
   if (!Number.isInteger(index) || index < 0 || index >= values.length) fail(code);

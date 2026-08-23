@@ -11,6 +11,7 @@ from scene_engine.scene import (
     VisualType,
     encode_scene_bootstrap,
     encode_scene_frame,
+    encode_scene_frame_against_bootstrap,
     parse_scene_bootstrap,
     parse_scene_frame,
     validate_scene_tree,
@@ -51,6 +52,63 @@ def test_bootstrap_and_complete_frame_are_deterministic() -> None:
     parsed = parse_scene_frame(frame, source_tick=4)
     poses = validate_scene_tree(parsed.nodes)
     assert poses[2][0] == 2.0
+
+
+def test_structured_publication_validates_against_cached_bootstrap_and_encodes_once() -> None:
+    bootstrap = parse_scene_bootstrap(
+        encode_scene_bootstrap(
+            maximum_dynamic_nodes=2,
+            maximum_frame_bytes=4096,
+            visual_types=(VisualType(1),),
+        )
+    )
+    records = (node(1), node(2, 1, x=2.0))
+    assert encode_scene_frame_against_bootstrap(
+        source_tick=4,
+        nodes=records,
+        bootstrap=bootstrap,
+    ) == encode_scene_frame(source_tick=4, nodes=records)
+
+    with pytest.raises(SceneCodecError, match="visual type"):
+        encode_scene_frame_against_bootstrap(
+            source_tick=4,
+            nodes=(
+                SceneNode(
+                    1,
+                    0,
+                    2,
+                    1,
+                    (0.0, 0.0, 0.0),
+                    (0.0, 0.0, 0.0, 1.0),
+                    (1.0, 1.0, 1.0),
+                ),
+            ),
+            bootstrap=bootstrap,
+        )
+
+
+def test_structured_publication_enforces_bootstrap_node_and_byte_limits() -> None:
+    node_limited = parse_scene_bootstrap(
+        encode_scene_bootstrap(
+            maximum_dynamic_nodes=1,
+            maximum_frame_bytes=4096,
+            visual_types=(VisualType(1),),
+        )
+    )
+    with pytest.raises(SceneCodecError, match="node limit"):
+        encode_scene_frame_against_bootstrap(
+            source_tick=0,
+            nodes=(node(1), node(2)),
+            bootstrap=node_limited,
+        )
+
+    with pytest.raises(SceneCodecError, match="byte limit"):
+        encode_scene_frame_against_bootstrap(
+            source_tick=0,
+            nodes=(node(1),),
+            bootstrap=node_limited,
+            maximum_frame_bytes=1,
+        )
 
 
 @pytest.mark.parametrize(

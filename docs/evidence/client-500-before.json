@@ -1,0 +1,202 @@
+{
+  "schema": "scene-engine-client-tree-benchmark@1",
+  "implementation": "baseline",
+  "node": "v24.14.0",
+  "static_nodes": 632,
+  "dynamic_nodes": 500,
+  "churn_nodes_per_frame": 25,
+  "warmup_frames_per_round": 60,
+  "sampled_frames_per_round": 600,
+  "rounds": 5,
+  "scenarios": {
+    "steady": {
+      "p50_ms": 1.3590829999998277,
+      "p95_ms": 1.6325829999999542,
+      "p99_ms": 2.2753750000001673,
+      "max_ms": 4.4777500000000146,
+      "sample_count": 3000,
+      "input_scene_bytes_estimate": 40180,
+      "sampled_input_scene_bytes_estimate": 120540000,
+      "heap_delta_bytes_p50": 1058216,
+      "heap_delta_bytes_max": 1079400,
+      "rounds": [
+        {
+          "round": 1,
+          "p50_ms": 1.3617910000000393,
+          "p95_ms": 1.7892919999999322,
+          "p99_ms": 2.1793329999999855,
+          "max_ms": 4.464958000000024,
+          "heap_before_bytes": 5829304,
+          "heap_after_bytes": 6908704,
+          "heap_delta_bytes": 1079400
+        },
+        {
+          "round": 2,
+          "p50_ms": 1.3592909999999847,
+          "p95_ms": 1.4628750000001673,
+          "p99_ms": 1.6892499999999018,
+          "max_ms": 4.4777500000000146,
+          "heap_before_bytes": 5869152,
+          "heap_after_bytes": 6927368,
+          "heap_delta_bytes": 1058216
+        },
+        {
+          "round": 3,
+          "p50_ms": 1.3576250000000982,
+          "p95_ms": 1.5448750000000473,
+          "p99_ms": 1.559957999999824,
+          "max_ms": 2.173000000000229,
+          "heap_before_bytes": 5877400,
+          "heap_after_bytes": 6938096,
+          "heap_delta_bytes": 1060696
+        },
+        {
+          "round": 4,
+          "p50_ms": 1.3598750000001019,
+          "p95_ms": 2.266125000000102,
+          "p99_ms": 2.3046250000002146,
+          "max_ms": 2.417124999999942,
+          "heap_before_bytes": 5881272,
+          "heap_after_bytes": 6939136,
+          "heap_delta_bytes": 1057864
+        },
+        {
+          "round": 5,
+          "p50_ms": 1.3576249999996435,
+          "p95_ms": 1.4164160000000265,
+          "p99_ms": 1.5785000000005311,
+          "max_ms": 2.5693750000000364,
+          "heap_before_bytes": 5896080,
+          "heap_after_bytes": 6954104,
+          "heap_delta_bytes": 1058024
+        }
+      ]
+    },
+    "motion": {
+      "p50_ms": 1.3073330000006536,
+      "p95_ms": 1.9828330000000278,
+      "p99_ms": 2.338540999999168,
+      "max_ms": 6.025625000000218,
+      "sample_count": 3000,
+      "input_scene_bytes_estimate": 40180,
+      "sampled_input_scene_bytes_estimate": 120540000,
+      "heap_delta_bytes_p50": 1065208,
+      "heap_delta_bytes_max": 1068288,
+      "rounds": [
+        {
+          "round": 1,
+          "p50_ms": 1.3014169999996739,
+          "p95_ms": 1.3744999999998981,
+          "p99_ms": 2.0087079999993875,
+          "max_ms": 2.234457999999904,
+          "heap_before_bytes": 5877328,
+          "heap_after_bytes": 6945616,
+          "heap_delta_bytes": 1068288
+        },
+        {
+          "round": 2,
+          "p50_ms": 1.3060000000004948,
+          "p95_ms": 1.9477080000006026,
+          "p99_ms": 2.2141670000000886,
+          "max_ms": 2.631708000000799,
+          "heap_before_bytes": 5889040,
+          "heap_after_bytes": 6954248,
+          "heap_delta_bytes": 1065208
+        },
+        {
+          "round": 3,
+          "p50_ms": 1.3039159999998446,
+          "p95_ms": 1.4375,
+          "p99_ms": 2.114792000000307,
+          "max_ms": 2.623000000000502,
+          "heap_before_bytes": 5896528,
+          "heap_after_bytes": 6961736,
+          "heap_delta_bytes": 1065208
+        },
+        {
+          "round": 4,
+          "p50_ms": 1.3078749999995125,
+          "p95_ms": 1.5142500000001746,
+          "p99_ms": 2.135667000000467,
+          "max_ms": 2.5213330000005953,
+          "heap_before_bytes": 5897808,
+          "heap_after_bytes": 6962880,
+          "heap_delta_bytes": 1065072
+        },
+        {
+          "round": 5,
+          "p50_ms": 1.35045799999898,
+          "p95_ms": 2.291457999999693,
+          "p99_ms": 3.1899169999996957,
+          "max_ms": 6.025625000000218,
+          "heap_before_bytes": 5912632,
+          "heap_after_bytes": 6977768,
+          "heap_delta_bytes": 1065136
+        }
+      ]
+    },
+    "churn-25": {
+      "p50_ms": 1.3418750000000728,
+      "p95_ms": 2.068083000000115,
+      "p99_ms": 2.8679580000007263,
+      "max_ms": 8.700875000000451,
+      "sample_count": 3000,
+      "input_scene_bytes_estimate": 40180,
+      "sampled_input_scene_bytes_estimate": 120540000,
+      "heap_delta_bytes_p50": 1070616,
+      "heap_delta_bytes_max": 1088744,
+      "rounds": [
+        {
+          "round": 1,
+          "p50_ms": 1.3439170000001468,
+          "p95_ms": 2.2591249999986758,
+          "p99_ms": 2.5490829999998823,
+          "max_ms": 3.282874999998967,
+          "heap_before_bytes": 5898688,
+          "heap_after_bytes": 6983760,
+          "heap_delta_bytes": 1085072
+        },
+        {
+          "round": 2,
+          "p50_ms": 1.3380420000012236,
+          "p95_ms": 2.5449590000007447,
+          "p99_ms": 5.603249999998297,
+          "max_ms": 8.700875000000451,
+          "heap_before_bytes": 5920856,
+          "heap_after_bytes": 6991472,
+          "heap_delta_bytes": 1070616
+        },
+        {
+          "round": 3,
+          "p50_ms": 1.3475409999991825,
+          "p95_ms": 2.0124589999995806,
+          "p99_ms": 2.290291999999681,
+          "max_ms": 3.1994999999988067,
+          "heap_before_bytes": 5937488,
+          "heap_after_bytes": 7026232,
+          "heap_delta_bytes": 1088744
+        },
+        {
+          "round": 4,
+          "p50_ms": 1.3435829999998532,
+          "p95_ms": 1.9533749999991414,
+          "p99_ms": 2.333666999998968,
+          "max_ms": 3.274874999999156,
+          "heap_before_bytes": 5955832,
+          "heap_after_bytes": 7026448,
+          "heap_delta_bytes": 1070616
+        },
+        {
+          "round": 5,
+          "p50_ms": 1.3383750000011787,
+          "p95_ms": 1.3834999999999127,
+          "p99_ms": 2.068083000000115,
+          "max_ms": 2.524874999999156,
+          "heap_before_bytes": 5970448,
+          "heap_after_bytes": 7041064,
+          "heap_delta_bytes": 1070616
+        }
+      ]
+    }
+  }
+}

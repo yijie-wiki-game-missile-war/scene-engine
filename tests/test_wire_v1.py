@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import inspect
 import math
+import struct
 from pathlib import Path
 
 import pytest
 
 from scene_engine.wire import (
+    AttachmentKind,
+    DEFAULT_ENGINE_LIMITS,
     EngineLimits,
     MAXIMUM_SAFE_INTEGER,
     PacketKind,
@@ -13,12 +17,19 @@ from scene_engine.wire import (
     canonical_json_bytes,
     decode_json_bytes,
     encode_ack,
+    encode_commit,
     encode_input,
     read_engine_packet,
 )
 
 
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "wire-v1"
+
+
+def test_default_wire_budget_covers_one_500_node_checkpoint_attachment() -> None:
+    assert DEFAULT_ENGINE_LIMITS.maximum_packet_bytes == 64 * 1024 * 1024
+    assert DEFAULT_ENGINE_LIMITS.maximum_attachment_bytes == 48 * 1024 * 1024
+    assert DEFAULT_ENGINE_LIMITS.maximum_session_pending_bytes == 64 * 1024 * 1024
 
 
 def test_decodes_frozen_python_to_js_golden_packets() -> None:
@@ -122,3 +133,13 @@ def test_custom_json_depth_limit_applies_to_packet_encode_and_decode() -> None:
     )
     with pytest.raises(WireError):
         read_engine_packet(raw, limits=limits)
+
+
+def test_removed_product_event_attachment_kind_fails_closed() -> None:
+    assert {int(kind) for kind in AttachmentKind} == {1, 2, 3, 4, 6, 7}
+    assert "events" not in inspect.signature(encode_commit).parameters
+    raw = bytearray((FIXTURES / "commit-input.bin").read_bytes())
+    header_length = struct.unpack_from("<I", raw, 8)[0]
+    raw[16 + header_length] = 5
+    with pytest.raises(WireError, match="unknown"):
+        read_engine_packet(raw)

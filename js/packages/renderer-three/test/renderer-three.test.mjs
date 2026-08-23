@@ -8,7 +8,7 @@ const {
   ThreeSceneBackend,
 } = publicApi;
 
-test('root export surface is the frozen 0.5 allowlist', () => {
+test('root export surface is the frozen 0.6 allowlist', () => {
   assert.deepEqual(Object.keys(publicApi).sort(), [
     'THREE_SCENE_BACKEND_SCHEMA',
     'ThreeSceneBackend',

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Regenerate the frozen cross-language Scene Engine 0.5 fixtures."""
+"""Regenerate the frozen cross-language Scene Engine 0.6 fixtures."""
 
 from __future__ import annotations
 
+import argparse
 import json
 import shutil
 import struct
@@ -60,11 +61,21 @@ def reset(path: Path) -> None:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--python-only",
+        action="store_true",
+        help="leave the packaged JavaScript packet-log fixture untouched",
+    )
+    args = parser.parse_args()
     wire_root = ROOT / "fixtures" / "wire-v1"
     scene_root = ROOT / "fixtures" / "scene-v1"
     tree_root = ROOT / "fixtures" / "json-tree-v1"
     package_log = ROOT / "js" / "packages" / "client" / "fixtures" / "packet-log"
-    for target in (wire_root, scene_root, tree_root, package_log):
+    targets = [wire_root, scene_root, tree_root]
+    if not args.python_only:
+        targets.append(package_log)
+    for target in targets:
         reset(target)
 
     bootstrap = encode_scene_bootstrap(
@@ -126,7 +137,6 @@ def main() -> None:
         world_codec=WORLD_CODEC,
         world_patch=tick_patch,
         scene_frame=frame1,
-        events={"events": [{"kind": "tick", "magnitude": 1.5}]},
     )
     commit_input = encode_commit(
         stream_id=STREAM,
@@ -205,19 +215,20 @@ def main() -> None:
         canonical({"schema": "scene-engine-malformed-corpus@1", "files": sorted(malformed)})
     )
 
-    writer = PacketLogWriter(package_log, fsync=False)
-    writer.append(checkpoint, checkpoint=True)
-    writer.append(commit_tick, checkpoint=False)
-    writer.append(commit_input, checkpoint=False)
-    writer.append(periodic_checkpoint, checkpoint=True)
-    writer.seal()
-    malformed_log = package_log / "malformed"
-    malformed_log.mkdir()
-    for name in ("manifest.json", "index.json"):
-        shutil.copyfile(package_log / name, malformed_log / name)
-    (malformed_log / "packets.bin").write_bytes(
-        (package_log / "packets.bin").read_bytes()[:-1]
-    )
+    if not args.python_only:
+        writer = PacketLogWriter(package_log, fsync=False)
+        writer.append(checkpoint, checkpoint=True)
+        writer.append(commit_tick, checkpoint=False)
+        writer.append(commit_input, checkpoint=False)
+        writer.append(periodic_checkpoint, checkpoint=True)
+        writer.seal()
+        malformed_log = package_log / "malformed"
+        malformed_log.mkdir()
+        for name in ("manifest.json", "index.json"):
+            shutil.copyfile(package_log / name, malformed_log / name)
+        (malformed_log / "packets.bin").write_bytes(
+            (package_log / "packets.bin").read_bytes()[:-1]
+        )
 
 
 def node(x: float) -> SceneNode:

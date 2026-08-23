@@ -1,16 +1,17 @@
-# Scene Engine 0.5
+# Scene Engine 0.6
 
-Scene Engine 是 renderer-neutral 的 60 Hz fixed-step runtime。`0.5.0` 只有一条状态链：一次已改变的
+Scene Engine 是 renderer-neutral 的 60 Hz fixed-step runtime。`0.6.0` 只有一条状态链：一次已改变的
 world transaction 产生一个 `scene-engine-wire@1` commit；checkpoint、WorldState、complete scene tree、
 events、ACK 与 packet log 共用同一 stream/commit cursor。
 
 当前发布物只有：
 
-- Python `scene-engine==0.5.0`：runtime、wire、JSON tree、scene body、session、recording；
-- JavaScript `@scene-engine/client@0.5.0`：统一 decoder、atomic WorldState/tree client、packet-log reader；
-- JavaScript `@scene-engine/renderer-three@0.5.0`：只消费 client 的 `{plan, view}`。
+- Python `scene-engine==0.6.0`：runtime、wire、JSON tree、scene body、session、recording；
+- JavaScript `@scene-engine/client@0.6.0`：统一 decoder、atomic WorldState/tree client、packet-log reader；
+- JavaScript `@scene-engine/renderer-three@0.6.0`：只消费 client 的 `{plan, view}`。
 
-产品通过 `EngineProgram` 端口提供计数器读写、tick/input mutation、checkpoint 与 commit body。Engine 不解释
+产品通过 `EngineProgram` 端口提供计数器读写、tick/input mutation、checkpoint 与 commit body。产品提交
+`SceneNode`/`SceneEvent` records；Engine 用缓存的 bootstrap view 验证并只编码一次 complete frame。Engine 不解释
 玩法字段、HTTP、WebSocket 框架、资产或产品 visual catalog。构造后 mutable world 只能在 EngineProgram callback
 期间借用；没有公共 world getter。
 
@@ -30,6 +31,8 @@ python3 -m compileall -q src tests
 npm install --ignore-scripts
 npm test
 python3 scripts/verify_cutover.py
+python3 scripts/benchmark_scene_500.py --quick
+node --expose-gc js/packages/client/scripts/benchmark-500.mjs --quick
 npm pack --workspace @scene-engine/client --pack-destination dist
 npm pack --workspace @scene-engine/renderer-three --pack-destination dist
 ```

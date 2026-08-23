@@ -7,13 +7,20 @@ import * as publicApi from '../src/index.js';
 import { applyJsonPatch } from '../src/json-tree.js';
 
 const {
+  DEFAULT_ENGINE_LIMITS,
   SceneEngineClient,
   encodeEngineInput,
   readEnginePacket,
 } = publicApi;
 const ROOT = fileURLToPath(new URL('../../../../', import.meta.url));
 
-test('root export surface is the frozen 0.5 allowlist', () => {
+test('default wire budget covers one 500-node checkpoint attachment', () => {
+  assert.equal(DEFAULT_ENGINE_LIMITS.maximumPacketBytes, 64 * 1024 * 1024);
+  assert.equal(DEFAULT_ENGINE_LIMITS.maximumAttachmentBytes, 48 * 1024 * 1024);
+  assert.equal(DEFAULT_ENGINE_LIMITS.maximumSessionPendingBytes, 64 * 1024 * 1024);
+});
+
+test('root export surface is the frozen 0.6 allowlist', () => {
   assert.deepEqual(Object.keys(publicApi).sort(), [
     'DEFAULT_ENGINE_LIMITS',
     'SceneEngineClient',
@@ -83,8 +90,25 @@ test('checkpoint and commits install world, sole tree, and cursor atomically', a
     ['commit', 'commit', 'frame'],
     ['commit', 'commit', null],
   ]);
-  assert.equal(observations[1].events.product.events[0].magnitude, 1.5);
-  assert.equal(observations[1].events.scene[0].eventId, 1n);
+  assert.deepEqual(observations[0].events, []);
+  assert.equal(observations[1].events[0].eventId, 1n);
+  assert.deepEqual(observations[2].events, []);
+  for (const observation of observations) {
+    assert.equal(Object.isFrozen(observation.events), true);
+    assert.equal('product' in observation.events, false);
+    assert.equal('scene' in observation.events, false);
+  }
+});
+
+test('removed attachment kind 5 fails closed without a compatibility decoder', async () => {
+  const raw = (await fixture('commit-input.bin')).slice();
+  const view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
+  const headerLength = view.getUint32(8, true);
+  raw[16 + headerLength] = 5;
+  assert.throws(
+    () => readEnginePacket(raw),
+    (error) => error.code === 'attachment-kind-or-encoding-unknown',
+  );
 });
 
 test('a gap fails closed without changing any installed pointer', async () => {

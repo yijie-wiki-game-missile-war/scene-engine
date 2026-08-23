@@ -11,11 +11,11 @@ and payload length. Unknown kinds/fields, duplicate JSON keys, invalid UTF-8, BO
 values, and hard-limit violations fail closed.
 
 Packet kinds are checkpoint `1`, commit `2`, input `3`, ACK `4`, input result `5`, and fatal diagnostic `6`. Attachment kinds
-are world snapshot `1`, world patch `2`, scene bootstrap `3`, scene frame `4`, events `5`, input payload `6`, and result payload
-`7`. The exact ordered layouts are:
+are world snapshot `1`, world patch `2`, scene bootstrap `3`, scene frame `4`, input payload `6`, and result payload `7`.
+Numeric attachment kind `5` is unassigned and rejected. The exact ordered layouts are:
 
 - checkpoint: JSON snapshot, raw bootstrap, raw complete frame;
-- commit: JSON patch, optional raw complete frame, optional JSON events;
+- commit: JSON patch, optional raw complete frame;
 - input: one JSON payload;
 - input result: zero or one JSON result;
 - ACK and fatal diagnostic: none.
@@ -26,7 +26,7 @@ command, and args. Header fields are exact and discrete counters are non-negativ
 
 ## JSON numbers and canonical bytes
 
-Product snapshot, patch values, events, input args, and result values allow safe Python integers plus any finite IEEE-754
+Product snapshot, patch values, input args, and result values allow safe Python integers plus any finite IEEE-754
 float, including `1.0`, `-0.0`, `1e-7`, and `1e20`. `NaN`, both infinities, and lexical integers outside the JavaScript-safe
 range are rejected. Boolean is not treated as a number. A larger product integer must use a product-defined tagged string.
 
@@ -46,5 +46,10 @@ The JS client clones only changed ancestors, freezes new values/ancestors, and r
 Sibling array changes address the original array: implementations apply numeric siblings high-to-low, so multiple unsets and
 mixed set/unset operations have identical Python/JavaScript results. Dangerous keys are rejected in snapshots and patch values
 as well as paths. A custom packet `maximum_json_depth` applies to header and attachment encode/decode on both languages.
+The product snapshot validator permits up to 4,000,000 JSON values. The shared wire defaults use a 64 MiB packet/session
+ceiling and permit one attachment up to 48 MiB. This covers both the initial and 600-tick reconnect/recording checkpoints for
+the frozen 500-node Missile War world while retaining explicit finite bounds.
 
-The hard-limit defaults live in both codecs and the cross-language fixture corpus under `fixtures/wire-v1`.
+Scene events exist only as binary `SceneEvent` records inside the raw scene-frame attachment; there is no independent product
+JSON event attachment. The hard-limit defaults live in both codecs and the cross-language fixture corpus under
+`fixtures/wire-v1`.

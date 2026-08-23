@@ -42,7 +42,6 @@ class AttachmentKind(IntEnum):
     WORLD_PATCH = 2
     SCENE_BOOTSTRAP = 3
     SCENE_FRAME = 4
-    EVENTS = 5
     INPUT_PAYLOAD = 6
     RESULT_PAYLOAD = 7
 
@@ -107,16 +106,16 @@ _HEADER_FIELDS = {
 
 @dataclass(frozen=True, slots=True)
 class EngineLimits:
-    maximum_packet_bytes: int = 32 * 1024 * 1024
+    maximum_packet_bytes: int = 64 * 1024 * 1024
     maximum_header_bytes: int = 64 * 1024
     maximum_attachment_count: int = 8
-    maximum_attachment_bytes: int = 24 * 1024 * 1024
+    maximum_attachment_bytes: int = 48 * 1024 * 1024
     maximum_world_patch_changes: int = 4096
     maximum_json_path_segments: int = 32
     maximum_json_depth: int = 256
     maximum_pending_inputs_per_client: int = 256
     maximum_in_flight_commits: int = 8
-    maximum_session_pending_bytes: int = 32 * 1024 * 1024
+    maximum_session_pending_bytes: int = 64 * 1024 * 1024
     maximum_global_retained_packets: int = 4096
     maximum_global_retained_bytes: int = 256 * 1024 * 1024
     ack_timeout_ticks: int = 600
@@ -331,7 +330,6 @@ def encode_commit(
     world_codec: str,
     world_patch: Any,
     scene_frame: Any | None,
-    events: Any | None = None,
     scene_codec: str = SCENE_SCHEMA,
     limits: EngineLimits = DEFAULT_ENGINE_LIMITS,
 ) -> bytes:
@@ -342,8 +340,6 @@ def encode_commit(
         attachments.append(
             (AttachmentKind.SCENE_FRAME, AttachmentEncoding.RAW, scene_frame)
         )
-    if events is not None:
-        attachments.append((AttachmentKind.EVENTS, AttachmentEncoding.JSON, events))
     return encode_engine_packet(
         PacketKind.COMMIT,
         {
@@ -584,11 +580,6 @@ def _validate_attachment_layout(
         if valid and cursor < len(actual) and actual[cursor] == (
             AttachmentKind.SCENE_FRAME,
             raw_encoding,
-        ):
-            cursor += 1
-        if valid and cursor < len(actual) and actual[cursor] == (
-            AttachmentKind.EVENTS,
-            json_encoding,
         ):
             cursor += 1
         valid = valid and cursor == len(actual)

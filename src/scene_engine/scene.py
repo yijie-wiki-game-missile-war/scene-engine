@@ -351,6 +351,57 @@ def encode_scene_frame(
     events = tuple(events)
     _validate_nodes(nodes, None, None, source_tick=tick)
     _validate_events(events, tick)
+    return _encode_scene_frame(tick, nodes, events)
+
+
+def encode_scene_frame_against_bootstrap(
+    *,
+    source_tick: int,
+    nodes: Iterable[SceneNode],
+    bootstrap: SceneBootstrapView,
+    events: Iterable[SceneEvent] = (),
+    maximum_frame_bytes: int | None = None,
+    maximum_depth: int = 64,
+) -> bytes:
+    """Validate structured records against one catalog and encode exactly once."""
+
+    if not isinstance(bootstrap, SceneBootstrapView):
+        raise SceneCodecError("bootstrap view is required")
+    tick = _uint(source_tick, "source_tick", _UINT64_MAX)
+    nodes = tuple(nodes)
+    events = tuple(events)
+    if len(nodes) > bootstrap.header.maximum_dynamic_nodes:
+        raise SceneCodecError("frame exceeds bootstrap node limit")
+    _validate_nodes(
+        nodes,
+        bootstrap.visual_types,
+        bootstrap.animation_states,
+        source_tick=tick,
+    )
+    _validate_events(events, tick)
+    _validate_tree(nodes, bootstrap.static_nodes, maximum_depth=maximum_depth)
+    raw = _encode_scene_frame(tick, nodes, events)
+    byte_limit = bootstrap.header.maximum_frame_bytes
+    if maximum_frame_bytes is not None:
+        byte_limit = min(
+            byte_limit,
+            _uint(
+                maximum_frame_bytes,
+                "maximum_frame_bytes",
+                _UINT32_MAX,
+                minimum=1,
+            ),
+        )
+    if len(raw) > byte_limit:
+        raise SceneCodecError("frame exceeds bootstrap byte limit")
+    return raw
+
+
+def _encode_scene_frame(
+    tick: int,
+    nodes: Sequence[SceneNode],
+    events: Sequence[SceneEvent],
+) -> bytes:
     if len(nodes) > _UINT32_MAX or len(events) > _UINT32_MAX:
         raise SceneCodecError("frame record count exceeds uint32")
     node_bytes = _encode_nodes(nodes)
@@ -1042,6 +1093,7 @@ __all__ = [
     "VisualType",
     "encode_scene_bootstrap",
     "encode_scene_frame",
+    "encode_scene_frame_against_bootstrap",
     "parse_scene_bootstrap",
     "parse_scene_frame",
     "validate_scene_tree",

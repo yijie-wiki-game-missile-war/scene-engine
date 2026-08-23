@@ -9,6 +9,8 @@ import {
   readEnginePacket,
 } from './wire.js';
 
+const EMPTY_SCENE_EVENTS = Object.freeze([]);
+
 export class SceneEngineClientError extends Error {
   constructor(code, message = code, options = undefined) {
     super(message, options);
@@ -105,7 +107,7 @@ export class SceneEngineClient {
     this.#worldState = world;
     this.#worldCodec = header.world_codec;
     this.#commit = commit;
-    const events = eventView(null, candidate.sceneEvents);
+    const events = sceneEventView(candidate.sceneEvents);
     this.#schedule('checkpoint', commit, candidate.plan, events);
     return outcome('checkpoint', commit, ackPacket, null);
   }
@@ -136,9 +138,9 @@ export class SceneEngineClient {
     } else {
       candidate = this.#tree.prepareNoFrame(commit);
     }
-    const productEvents = optionalAttachment(packet, 'events')?.value ?? null;
-    if (productEvents && typeof productEvents === 'object') deepFreezeOwned(productEvents);
-    const events = eventView(productEvents, candidate.sceneEvents);
+    const events = frameAttachment
+      ? sceneEventView(candidate.sceneEvents)
+      : EMPTY_SCENE_EVENTS;
     const ackPacket = encodeEngineAck({
       streamId: commit.streamId,
       commitSeq: commit.commitSeq,
@@ -251,8 +253,8 @@ function commitView(kind, header) {
     causationId: kind === 'checkpoint' ? null : header.causation_id,
   });
 }
-function eventView(product, scene) {
-  return Object.freeze({ product, scene: Object.freeze([...scene]) });
+function sceneEventView(events) {
+  return events.length === 0 ? EMPTY_SCENE_EVENTS : Object.freeze([...events]);
 }
 function outcome(kind, commit, ackPacket, inputResult) {
   return Object.freeze({ kind, commit, ackPacket, inputResult });

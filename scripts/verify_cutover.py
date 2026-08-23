@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
-"""Fail closed when the Scene Engine 0.5 repository shape regresses."""
+"""Fail closed when the Scene Engine 0.6 repository shape regresses."""
 
 from __future__ import annotations
 
+import inspect
 import json
 import sys
+from dataclasses import fields
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 
 PYTHON_MODULES = {
     "__init__.py",
@@ -132,6 +134,14 @@ def verify_tree() -> None:
     require(current_files(ROOT / "docs") == CURRENT_DOCS, "current docs allowlist mismatch")
     missing = sorted(path for path in REQUIRED_FIXTURES if not (ROOT / path).is_file())
     require(not missing, f"required fixtures missing: {missing}")
+    require(
+        (ROOT / "scripts" / "benchmark_scene_500.py").is_file(),
+        "strict 500-node benchmark entry is missing",
+    )
+    require(
+        not (ROOT / "scripts" / "benchmark_scene_publication.py").exists(),
+        "superseded benchmark entry remains",
+    )
 
 
 def verify_versions_and_graph() -> None:
@@ -178,6 +188,44 @@ def verify_fixtures() -> None:
             "packet-log fixture must include a periodic checkpoint")
 
 
+def verify_python_contract() -> None:
+    sys.path.insert(0, str(ROOT / "src"))
+    import scene_engine
+    from scene_engine.runtime import ProductCheckpoint, ProductCommit
+    from scene_engine.wire import AttachmentKind, encode_commit, read_engine_packet
+
+    require(scene_engine.__version__ == VERSION, "Python import version mismatch")
+    require(
+        [field.name for field in fields(ProductCheckpoint)]
+        == [
+            "world_codec",
+            "world_snapshot",
+            "scene_bootstrap",
+            "scene_nodes",
+            "scene_events",
+        ],
+        "ProductCheckpoint product port mismatch",
+    )
+    require(
+        [field.name for field in fields(ProductCommit)]
+        == ["world_codec", "world_patch", "scene_nodes", "scene_events"],
+        "ProductCommit product port mismatch",
+    )
+    require(
+        "events" not in inspect.signature(encode_commit).parameters,
+        "independent product events encoder remains",
+    )
+    require(5 not in {int(kind) for kind in AttachmentKind},
+            "removed attachment kind 5 remains")
+    packet = read_engine_packet(ROOT.joinpath(
+        "fixtures", "wire-v1", "commit-tick.bin"
+    ).read_bytes())
+    require(
+        [int(item.kind) for item in packet.attachments] == [2, 4],
+        "tick fixture does not use the 0.6 commit layout",
+    )
+
+
 def verify_removed_content() -> None:
     findings: list[str] = []
     for path in iter_current_text_files():
@@ -193,11 +241,12 @@ def main() -> int:
         verify_tree()
         verify_versions_and_graph()
         verify_fixtures()
+        verify_python_contract()
         verify_removed_content()
     except (AssertionError, OSError, ValueError) as exc:
         print(f"cutover verification failed: {exc}", file=sys.stderr)
         return 1
-    print("scene-engine 0.5 cutover verification passed")
+    print("scene-engine 0.6 cutover verification passed")
     return 0
 
 

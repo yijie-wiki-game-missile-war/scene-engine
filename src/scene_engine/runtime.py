@@ -22,9 +22,10 @@ from .errors import (
 from .json_tree import validate_json_patch, validate_json_value
 from .scene import (
     SceneBootstrapView,
+    SceneEvent,
+    SceneNode,
+    encode_scene_frame_against_bootstrap,
     parse_scene_bootstrap,
-    parse_scene_frame,
-    validate_scene_frame_against_bootstrap,
 )
 from .session import ClientSession, InputOutcome, PacketRef, SessionHealth
 from .wire import (
@@ -148,33 +149,56 @@ class ProductCheckpoint:
     world_codec: str
     world_snapshot: Mapping[str, Any]
     scene_bootstrap: bytes
-    scene_frame: bytes
+    scene_nodes: tuple[SceneNode, ...]
+    scene_events: tuple[SceneEvent, ...] = ()
 
     def __post_init__(self) -> None:
         _text(self.world_codec, "world_codec")
         if not isinstance(self.world_snapshot, dict):
             raise ConfigurationError("world_snapshot must be a JSON object")
         validate_json_value(self.world_snapshot)
-        _nonempty_bytes(self.scene_bootstrap, "scene_bootstrap")
-        _nonempty_bytes(self.scene_frame, "scene_frame")
+        object.__setattr__(
+            self,
+            "scene_bootstrap",
+            _nonempty_bytes(self.scene_bootstrap, "scene_bootstrap"),
+        )
+        object.__setattr__(
+            self,
+            "scene_nodes",
+            _scene_records(self.scene_nodes, SceneNode, "scene_nodes"),
+        )
+        object.__setattr__(
+            self,
+            "scene_events",
+            _scene_records(self.scene_events, SceneEvent, "scene_events"),
+        )
 
 
 @dataclass(frozen=True, slots=True)
 class ProductCommit:
     world_codec: str
     world_patch: Mapping[str, Any]
-    scene_frame: bytes | None
-    events: Any = None
+    scene_nodes: tuple[SceneNode, ...] | None
+    scene_events: tuple[SceneEvent, ...] = ()
 
     def __post_init__(self) -> None:
         _text(self.world_codec, "world_codec")
         if not isinstance(self.world_patch, dict):
             raise ConfigurationError("world_patch must be a JSON object")
         validate_json_patch(self.world_patch)
-        if self.scene_frame is not None:
-            _nonempty_bytes(self.scene_frame, "scene_frame")
-        if self.events is not None:
-            validate_json_value(self.events)
+        if self.scene_nodes is not None:
+            object.__setattr__(
+                self,
+                "scene_nodes",
+                _scene_records(self.scene_nodes, SceneNode, "scene_nodes"),
+            )
+        object.__setattr__(
+            self,
+            "scene_events",
+            _scene_records(self.scene_events, SceneEvent, "scene_events"),
+        )
+        if self.scene_nodes is None and self.scene_events:
+            raise ConfigurationError("scene_events require a complete scene_nodes frame")
 
 
 @dataclass(frozen=True, slots=True)
@@ -249,11 +273,11 @@ class RuntimeConfig:
     maximum_inputs_per_pump: int = 256
     maximum_clients: int = 1024
     maximum_in_flight_commits: int = 8
-    maximum_session_pending_bytes: int = 32 * 1024 * 1024
+    maximum_session_pending_bytes: int = 64 * 1024 * 1024
     maximum_global_retained_packets: int = 4096
     maximum_global_retained_bytes: int = 256 * 1024 * 1024
     ack_timeout_ticks: int = 600
-    maximum_packet_bytes: int = 32 * 1024 * 1024
+    maximum_packet_bytes: int = 64 * 1024 * 1024
     recording_checkpoint_interval_commits: int = 0
 
     def __post_init__(self) -> None:
@@ -724,7 +748,7 @@ class SceneEngineRuntime:
             raise RuntimeError("stream publication contract is not initialized")
         if product.world_codec != self._world_codec:
             raise RuntimeError("world_codec changed within one stream")
-        if require_frame and product.scene_frame is None:
+        if require_frame and product.scene_nodes is None:
             raise RuntimeError("tick commit must include a complete scene frame")
         validate_json_patch(
             product.world_patch,
@@ -732,17 +756,18 @@ class SceneEngineRuntime:
             maximum_path_segments=self._limits.maximum_json_path_segments,
             maximum_json_depth=self._limits.maximum_json_depth,
         )
-        if product.scene_frame is not None:
-            frame = parse_scene_frame(
-                product.scene_frame,
+        scene_frame = None
+        if product.scene_nodes is not None:
+            scene_frame = encode_scene_frame_against_bootstrap(
                 source_tick=proposed.source_tick,
+                nodes=product.scene_nodes,
+                events=product.scene_events,
+                bootstrap=self._scene_bootstrap,
                 maximum_frame_bytes=min(
                     self._scene_bootstrap.header.maximum_frame_bytes,
                     self._limits.maximum_attachment_bytes,
                 ),
-                maximum_frame_nodes=self._scene_bootstrap.header.maximum_dynamic_nodes,
             )
-            validate_scene_frame_against_bootstrap(frame, self._scene_bootstrap)
         raw = encode_commit(
             stream_id=proposed.stream_id,
             commit_seq=proposed.commit_seq,
@@ -752,8 +777,7 @@ class SceneEngineRuntime:
             causation_id=proposed.causation_id,
             world_codec=product.world_codec,
             world_patch=product.world_patch,
-            scene_frame=product.scene_frame,
-            events=product.events,
+            scene_frame=scene_frame,
             limits=self._limits,
         )
         return PacketRef(
@@ -779,28 +803,28 @@ class SceneEngineRuntime:
             raise RuntimeError("build_checkpoint must return ProductCheckpoint")
         if self._read_world_counters() != before:
             raise RuntimeError("build_checkpoint modified Engine counters")
-        bootstrap = parse_scene_bootstrap(
-            product.scene_bootstrap,
-            maximum_bootstrap_bytes=self._limits.maximum_attachment_bytes,
-        )
-        frame = parse_scene_frame(
-            product.scene_frame,
+        bootstrap_bytes = bytes(product.scene_bootstrap)
+        if self._world_codec is not None and product.world_codec != self._world_codec:
+            raise RuntimeError("world_codec changed within one stream")
+        if self._scene_bootstrap is None:
+            bootstrap = parse_scene_bootstrap(
+                bootstrap_bytes,
+                maximum_bootstrap_bytes=self._limits.maximum_attachment_bytes,
+            )
+        else:
+            if bootstrap_bytes != self._scene_bootstrap_bytes:
+                raise RuntimeError("scene bootstrap changed within one stream")
+            bootstrap = self._scene_bootstrap
+        scene_frame = encode_scene_frame_against_bootstrap(
             source_tick=self._source_tick,
+            nodes=product.scene_nodes,
+            events=product.scene_events,
+            bootstrap=bootstrap,
             maximum_frame_bytes=min(
                 bootstrap.header.maximum_frame_bytes,
                 self._limits.maximum_attachment_bytes,
             ),
-            maximum_frame_nodes=bootstrap.header.maximum_dynamic_nodes,
         )
-        validate_scene_frame_against_bootstrap(frame, bootstrap)
-        bootstrap_bytes = bytes(product.scene_bootstrap)
-        if self._world_codec is not None and product.world_codec != self._world_codec:
-            raise RuntimeError("world_codec changed within one stream")
-        if (
-            self._scene_bootstrap_bytes is not None
-            and bootstrap_bytes != self._scene_bootstrap_bytes
-        ):
-            raise RuntimeError("scene bootstrap changed within one stream")
         raw = encode_checkpoint(
             stream_id=self._stream_id,
             commit_seq=self._commit_seq,
@@ -808,8 +832,8 @@ class SceneEngineRuntime:
             world_revision=self._world_revision,
             world_codec=product.world_codec,
             world_snapshot=product.world_snapshot,
-            scene_bootstrap=product.scene_bootstrap,
-            scene_frame=product.scene_frame,
+            scene_bootstrap=bootstrap_bytes,
+            scene_frame=scene_frame,
             limits=self._limits,
         )
         if self._world_codec is None:
@@ -990,6 +1014,18 @@ def _nonempty_bytes(value: Any, field: str) -> bytes:
     if not result:
         raise ConfigurationError(f"{field} must not be empty")
     return result
+
+
+def _scene_records(value: Any, record_type: type, field: str) -> tuple[Any, ...]:
+    try:
+        records = tuple(value)
+    except TypeError as exc:
+        raise ConfigurationError(f"{field} must be an iterable of records") from exc
+    if any(not isinstance(record, record_type) for record in records):
+        raise ConfigurationError(
+            f"{field} must contain only {record_type.__name__} records"
+        )
+    return records
 
 
 def _finite_time(value: Any) -> float:

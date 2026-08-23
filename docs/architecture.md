@@ -1,6 +1,6 @@
 # Architecture
 
-Scene Engine 0.5 owns one transaction and synchronization boundary:
+Scene Engine 0.6 owns one transaction and synchronization boundary:
 
 ```text
 product WorldState + EngineProgram
@@ -30,9 +30,13 @@ packet bytes
 | Three objects/resources | `ThreeSceneBackend` | product factory handles |
 | recorded state stream | `packets.bin` | rebuildable index records |
 
-Engine code is generic. A product owns its world codec, change journal, commands, scene projection, event schema, transport
+Engine code is generic. A product owns its world codec, change journal, commands, structured scene projection, binary
+`SceneEvent` schema, transport
 adapter, visual catalog, and resource factories. Replay validates a packet-log container and feeds its exact records to the
 same client; it does not implement another wire decoder or scene tree.
+
+The product port never supplies an encoded frame or a second JSON event channel. Runtime parses and freezes bootstrap bytes
+once, validates each `SceneNode`/`SceneEvent` publication against that cached view, and performs the sole frame encoding.
 
 ## Failure domains
 

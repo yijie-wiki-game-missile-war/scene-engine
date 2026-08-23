@@ -1,0 +1,294 @@
+{
+  "schema": "scene-engine-perf-500@1",
+  "hardware": {
+    "platform": "darwin",
+    "architecture": "arm64",
+    "release": "25.5.0",
+    "logical_cpu_count": 10,
+    "cpu_model": "Apple M5",
+    "total_memory_bytes": 17179869184
+  },
+  "runtime": {
+    "node": "v24.14.0",
+    "v8": "13.6.233.17-node.41",
+    "uv": "1.51.0",
+    "explicit_gc": true
+  },
+  "configuration": {
+    "static_nodes": 632,
+    "dynamic_nodes": 500,
+    "churn_nodes_per_frame": 25,
+    "warmup_frames_per_round": 60,
+    "sampled_frames_per_round": 600,
+    "rounds": 5
+  },
+  "scenarios": {
+    "steady": {
+      "sample_count": 3000,
+      "metrics_ns": {
+        "p50": 1390333,
+        "p95": 2239334,
+        "p99": 3690583,
+        "max": 15283542
+      },
+      "bytes": {
+        "input_scene_bytes_estimate_per_frame": 40180,
+        "sampled_input_scene_bytes_estimate": 120540000
+      },
+      "memory": {
+        "heap_delta_bytes_p50": 632408,
+        "heap_delta_bytes_max": 665080
+      },
+      "rounds": [
+        {
+          "round": 1,
+          "metrics_ns": {
+            "p50": 1358833,
+            "p95": 1914500,
+            "p99": 2180500,
+            "max": 4507792
+          },
+          "memory": {
+            "heap_before_bytes": 5507112,
+            "heap_after_bytes": 6172192,
+            "heap_delta_bytes": 665080
+          }
+        },
+        {
+          "round": 2,
+          "metrics_ns": {
+            "p50": 1395250,
+            "p95": 2375208,
+            "p99": 3520250,
+            "max": 15283542
+          },
+          "memory": {
+            "heap_before_bytes": 5553480,
+            "heap_after_bytes": 6192560,
+            "heap_delta_bytes": 639080
+          }
+        },
+        {
+          "round": 3,
+          "metrics_ns": {
+            "p50": 1414500,
+            "p95": 2260000,
+            "p99": 3876083,
+            "max": 9423709
+          },
+          "memory": {
+            "heap_before_bytes": 5562952,
+            "heap_after_bytes": 6195360,
+            "heap_delta_bytes": 632408
+          }
+        },
+        {
+          "round": 4,
+          "metrics_ns": {
+            "p50": 1438292,
+            "p95": 2533125,
+            "p99": 5450791,
+            "max": 7481708
+          },
+          "memory": {
+            "heap_before_bytes": 5586184,
+            "heap_after_bytes": 6216216,
+            "heap_delta_bytes": 630032
+          }
+        },
+        {
+          "round": 5,
+          "metrics_ns": {
+            "p50": 1381084,
+            "p95": 2236458,
+            "p99": 4186000,
+            "max": 6962833
+          },
+          "memory": {
+            "heap_before_bytes": 5601640,
+            "heap_after_bytes": 6231424,
+            "heap_delta_bytes": 629784
+          }
+        }
+      ]
+    },
+    "motion": {
+      "sample_count": 3000,
+      "metrics_ns": {
+        "p50": 1273625,
+        "p95": 1674500,
+        "p99": 2422958,
+        "max": 8277291
+      },
+      "bytes": {
+        "input_scene_bytes_estimate_per_frame": 40180,
+        "sampled_input_scene_bytes_estimate": 120540000
+      },
+      "memory": {
+        "heap_delta_bytes_p50": 637232,
+        "heap_delta_bytes_max": 640160
+      },
+      "rounds": [
+        {
+          "round": 1,
+          "metrics_ns": {
+            "p50": 1314875,
+            "p95": 1808500,
+            "p99": 3161791,
+            "max": 7299333
+          },
+          "memory": {
+            "heap_before_bytes": 5591376,
+            "heap_after_bytes": 6231536,
+            "heap_delta_bytes": 640160
+          }
+        },
+        {
+          "round": 2,
+          "metrics_ns": {
+            "p50": 1297542,
+            "p95": 1690625,
+            "p99": 2400208,
+            "max": 7299709
+          },
+          "memory": {
+            "heap_before_bytes": 5602032,
+            "heap_after_bytes": 6239264,
+            "heap_delta_bytes": 637232
+          }
+        },
+        {
+          "round": 3,
+          "metrics_ns": {
+            "p50": 1225584,
+            "p95": 1462000,
+            "p99": 1975500,
+            "max": 3012875
+          },
+          "memory": {
+            "heap_before_bytes": 5609464,
+            "heap_after_bytes": 6246664,
+            "heap_delta_bytes": 637200
+          }
+        },
+        {
+          "round": 4,
+          "metrics_ns": {
+            "p50": 1264708,
+            "p95": 1484042,
+            "p99": 1762750,
+            "max": 2654083
+          },
+          "memory": {
+            "heap_before_bytes": 5624984,
+            "heap_after_bytes": 6262216,
+            "heap_delta_bytes": 637232
+          }
+        },
+        {
+          "round": 5,
+          "metrics_ns": {
+            "p50": 1273834,
+            "p95": 1737667,
+            "p99": 2775500,
+            "max": 8277291
+          },
+          "memory": {
+            "heap_before_bytes": 5641528,
+            "heap_after_bytes": 6278792,
+            "heap_delta_bytes": 637264
+          }
+        }
+      ]
+    },
+    "churn-25": {
+      "sample_count": 3000,
+      "metrics_ns": {
+        "p50": 1386250,
+        "p95": 1957250,
+        "p99": 3904125,
+        "max": 37578459
+      },
+      "bytes": {
+        "input_scene_bytes_estimate_per_frame": 40180,
+        "sampled_input_scene_bytes_estimate": 120540000
+      },
+      "memory": {
+        "heap_delta_bytes_p50": 642952,
+        "heap_delta_bytes_max": 660968
+      },
+      "rounds": [
+        {
+          "round": 1,
+          "metrics_ns": {
+            "p50": 1374250,
+            "p95": 1896500,
+            "p99": 3027375,
+            "max": 6040792
+          },
+          "memory": {
+            "heap_before_bytes": 5627376,
+            "heap_after_bytes": 6275288,
+            "heap_delta_bytes": 647912
+          }
+        },
+        {
+          "round": 2,
+          "metrics_ns": {
+            "p50": 1389333,
+            "p95": 1792125,
+            "p99": 2512750,
+            "max": 5452666
+          },
+          "memory": {
+            "heap_before_bytes": 5640240,
+            "heap_after_bytes": 6283080,
+            "heap_delta_bytes": 642840
+          }
+        },
+        {
+          "round": 3,
+          "metrics_ns": {
+            "p50": 1388834,
+            "p95": 1941250,
+            "p99": 2502167,
+            "max": 3904125
+          },
+          "memory": {
+            "heap_before_bytes": 5647776,
+            "heap_after_bytes": 6308744,
+            "heap_delta_bytes": 660968
+          }
+        },
+        {
+          "round": 4,
+          "metrics_ns": {
+            "p50": 1383375,
+            "p95": 1772792,
+            "p99": 2908209,
+            "max": 8597584
+          },
+          "memory": {
+            "heap_before_bytes": 5665992,
+            "heap_after_bytes": 6308944,
+            "heap_delta_bytes": 642952
+          }
+        },
+        {
+          "round": 5,
+          "metrics_ns": {
+            "p50": 1406792,
+            "p95": 2706042,
+            "p99": 8452542,
+            "max": 37578459
+          },
+          "memory": {
+            "heap_before_bytes": 5680592,
+            "heap_after_bytes": 6323544,
+            "heap_delta_bytes": 642952
+          }
+        }
+      ]
+    }
+  }
+}

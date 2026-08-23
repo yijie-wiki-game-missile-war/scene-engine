@@ -18,10 +18,14 @@ from .wire import MAXIMUM_SAFE_INTEGER, WORLD_TREE_SCHEMA
 
 _FORBIDDEN_SEGMENTS = frozenset(("__proto__", "prototype", "constructor"))
 _OPERATIONS = frozenset(("set", "unset", "append"))
+DEFAULT_MAXIMUM_JSON_VALUES = 4_000_000
 
 
 def validate_json_value(
-    value: Any, *, maximum_depth: int = 256, maximum_values: int = 1_000_000
+    value: Any,
+    *,
+    maximum_depth: int = 256,
+    maximum_values: int = DEFAULT_MAXIMUM_JSON_VALUES,
 ) -> Any:
     """Validate finite JSON numbers and return ``value``."""
 

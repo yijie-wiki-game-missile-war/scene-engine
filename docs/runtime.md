@@ -31,12 +31,34 @@ build_commit(world, MutationResult, CommitContext) -> ProductCommit
 ```
 
 The read/write counter port makes Engine ownership explicit without knowing product fields. Product snapshot and patch values
-are plain mappings; they are not pre-encoded bytes. Scene bodies are bytes produced by `scene_engine.scene`.
+are plain mappings; they are not pre-encoded bytes. The breaking 0.6 product publication records are:
 
-`start()` always builds and validates one checkpoint, even without a recorder or connected client. That freezes the stream's
-world codec and immutable scene bootstrap bytes. Every later checkpoint must match both. A commit frame is validated against
-the frozen visual/animation registries, static nodes, bootstrap byte/node limits, and the complete parent/cycle/depth closure
-before it can be recorded or published. The retained bootstrap view is a catalog validator, not a second live scene tree.
+```python
+ProductCheckpoint(
+    world_codec: str,
+    world_snapshot: Mapping[str, Any],
+    scene_bootstrap: bytes,
+    scene_nodes: tuple[SceneNode, ...],
+    scene_events: tuple[SceneEvent, ...] = (),
+)
+ProductCommit(
+    world_codec: str,
+    world_patch: Mapping[str, Any],
+    scene_nodes: tuple[SceneNode, ...] | None,
+    scene_events: tuple[SceneEvent, ...] = (),
+)
+```
+
+`scene_nodes` is a complete dynamic tree whenever present. A tick commit must provide it; a same-tick changed input may use
+`None` only when its visual state is unchanged. `scene_events` are binary records inside that frame and therefore require
+non-null `scene_nodes`. There is no encoded-frame product field, compatibility alias, or independent JSON product-events
+attachment.
+
+`start()` always builds and validates one checkpoint, even without a recorder or connected client. It parses bootstrap bytes
+once and freezes the stream's world codec, immutable bytes, and validation view. Every later checkpoint must match both
+identities and reuses the view. Each structured frame is validated directly against the frozen visual/animation registries,
+static nodes, bootstrap byte/node limits, and complete parent/cycle/depth closure, then encoded exactly once before it can be
+recorded or published. The retained bootstrap view is a catalog validator, not a second live scene tree.
 
 ## Transactions
 

@@ -1,4 +1,4 @@
-"""Scene Engine 0.5: one runtime, packet stream, client state, and scene tree."""
+"""Scene Engine 0.6: structured product scene publication on one packet stream."""
 
 from .clock import ManualClock, SystemMonotonicClock
 from .errors import (
@@ -35,7 +35,7 @@ from .runtime import (
 )
 
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 __all__ = [
     "CheckpointContext",

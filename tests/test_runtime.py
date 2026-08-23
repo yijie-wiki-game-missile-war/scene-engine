@@ -6,7 +6,9 @@ from pathlib import Path
 
 import pytest
 
+import scene_engine.runtime as runtime_module
 from scene_engine import (
+    ConfigurationError,
     ManualClock,
     MutationResult,
     ProductCheckpoint,
@@ -18,8 +20,20 @@ from scene_engine import (
     WorldCounters,
 )
 from scene_engine.recording import PacketLogWriter, read_packet_log
-from scene_engine.scene import SceneNode, VisualType, encode_scene_bootstrap, encode_scene_frame
-from scene_engine.wire import PacketKind, encode_ack, encode_input, read_engine_packet
+from scene_engine.scene import (
+    SceneEvent,
+    SceneNode,
+    VisualType,
+    encode_scene_bootstrap,
+    parse_scene_frame,
+)
+from scene_engine.wire import (
+    AttachmentKind,
+    PacketKind,
+    encode_ack,
+    encode_input,
+    read_engine_packet,
+)
 
 
 @dataclass
@@ -72,7 +86,8 @@ class Program:
             self.world_codec,
             {"tick": world.tick, "value": world.value, "world_revision": world.world_revision},
             bootstrap(),
-            frame(world),
+            nodes(world),
+            events(world),
         )
 
     def build_commit(self, world: World, mutation, context) -> ProductCommit:
@@ -91,27 +106,25 @@ class Program:
                 },
             ]
         )
-        product_frame = frame(world) if context.commit.cause == "tick" else None
+        product_nodes = nodes(world) if context.commit.cause == "tick" else None
+        scene_events = events(world) if context.commit.cause == "tick" else ()
         if self.invalid_commit_scene:
-            product_frame = encode_scene_frame(
-                source_tick=world.tick,
-                nodes=(
-                    SceneNode(
-                        1,
-                        0,
-                        2,
-                        1,
-                        (world.value, 0.0, 0.0),
-                        (0.0, 0.0, 0.0, 1.0),
-                        (1.0, 1.0, 1.0),
-                    ),
+            product_nodes = (
+                SceneNode(
+                    1,
+                    0,
+                    2,
+                    1,
+                    (world.value, 0.0, 0.0),
+                    (0.0, 0.0, 0.0, 1.0),
+                    (1.0, 1.0, 1.0),
                 ),
             )
         return ProductCommit(
             self.world_codec,
             {"schema": "scene-engine-json-tree@1", "changes": changes},
-            product_frame,
-            {"value": world.value},
+            product_nodes,
+            scene_events,
         )
 
 
@@ -136,21 +149,22 @@ def bootstrap() -> bytes:
     )
 
 
-def frame(world: World) -> bytes:
-    return encode_scene_frame(
-        source_tick=world.tick,
-        nodes=(
-            SceneNode(
-                1,
-                0,
-                1,
-                1,
-                (world.value, 0.0, 0.0),
-                (0.0, 0.0, 0.0, 1.0),
-                (1.0, 1.0, 1.0),
-            ),
+def nodes(world: World) -> tuple[SceneNode, ...]:
+    return (
+        SceneNode(
+            1,
+            0,
+            1,
+            1,
+            (world.value, 0.0, 0.0),
+            (0.0, 0.0, 0.0, 1.0),
+            (1.0, 1.0, 1.0),
         ),
     )
+
+
+def events(world: World) -> tuple[SceneEvent, ...]:
+    return (SceneEvent(1, 1, 0, 1, 0, world.tick, b"tick"),)
 
 
 def make_runtime(*, config=None, recorder=None):
@@ -204,7 +218,14 @@ def test_tick_and_changed_input_have_one_commit_cursor_and_tick_frame() -> None:
     assert tick.kind is PacketKind.COMMIT
     assert tick.header["cause"] == "tick"
     assert tick.header["commit_seq"] == tick.header["source_tick"] == 1
-    assert any(item.kind.name == "SCENE_FRAME" for item in tick.attachments)
+    assert [item.kind for item in tick.attachments] == [
+        AttachmentKind.WORLD_PATCH,
+        AttachmentKind.SCENE_FRAME,
+    ]
+    scene_frame = next(
+        item.bytes for item in tick.attachments if item.kind is AttachmentKind.SCENE_FRAME
+    )
+    assert parse_scene_frame(scene_frame, source_tick=1).events == events(world)
     acknowledge(runtime, transport, "a")
 
     send_input(runtime, "a", input_id="a:1", command="increment", args={"amount": 2.5})
@@ -451,3 +472,77 @@ def test_stream_codec_and_scene_catalog_are_frozen_before_first_commit(failure) 
     with pytest.raises(RuntimeFatalError):
         runtime.pump()
     assert runtime.health.state == "fatal"
+
+
+def test_product_scene_port_is_structured_and_has_no_encoded_alias() -> None:
+    product = ProductCheckpoint(
+        "example-world@1",
+        {"tick": 0},
+        bootstrap(),
+        list(nodes(World())),
+        list(events(World())),
+    )
+    assert isinstance(product.scene_nodes, tuple)
+    assert isinstance(product.scene_events, tuple)
+    assert not hasattr(product, "scene_frame")
+    commit = ProductCommit(
+        "example-world@1",
+        {"schema": "scene-engine-json-tree@1", "changes": []},
+        None,
+    )
+    assert not hasattr(commit, "events")
+    with pytest.raises(TypeError):
+        ProductCheckpoint(  # type: ignore[call-arg]
+            "example-world@1",
+            {"tick": 0},
+            bootstrap(),
+            scene_frame=b"legacy",
+        )
+    with pytest.raises(ConfigurationError):
+        ProductCommit(
+            "example-world@1",
+            {"schema": "scene-engine-json-tree@1", "changes": []},
+            None,
+            events(World()),
+        )
+    with pytest.raises(TypeError):
+        ProductCommit(  # type: ignore[call-arg]
+            "example-world@1",
+            {"schema": "scene-engine-json-tree@1", "changes": []},
+            None,
+            events={},
+        )
+
+
+def test_bootstrap_is_parsed_once_and_each_scene_publication_encodes_once(
+    monkeypatch,
+) -> None:
+    parse_calls = 0
+    encode_ticks = []
+    real_parse = runtime_module.parse_scene_bootstrap
+    real_encode = runtime_module.encode_scene_frame_against_bootstrap
+
+    def counted_parse(*args, **kwargs):
+        nonlocal parse_calls
+        parse_calls += 1
+        return real_parse(*args, **kwargs)
+
+    def counted_encode(*args, **kwargs):
+        encode_ticks.append(kwargs["source_tick"])
+        return real_encode(*args, **kwargs)
+
+    monkeypatch.setattr(runtime_module, "parse_scene_bootstrap", counted_parse)
+    monkeypatch.setattr(
+        runtime_module,
+        "encode_scene_frame_against_bootstrap",
+        counted_encode,
+    )
+    runtime, clock, _, _, transport = make_runtime()
+    runtime.client_connected("a")
+    acknowledge(runtime, transport, "a")
+    clock.advance(1 / 60)
+    runtime.pump()
+
+    assert parse_calls == 1
+    assert encode_ticks == [0, 0, 1]
+    assert not hasattr(runtime_module, "parse_scene_frame")

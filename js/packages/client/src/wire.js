@@ -22,7 +22,6 @@ const ATTACHMENT_KIND = Object.freeze({
   world_patch: 2,
   scene_bootstrap: 3,
   scene_frame: 4,
-  events: 5,
   input_payload: 6,
   result_payload: 7,
 });
@@ -49,16 +48,16 @@ const HEADER_FIELDS = Object.freeze({
 });
 
 export const DEFAULT_ENGINE_LIMITS = Object.freeze({
-  maximumPacketBytes: 32 * 1024 * 1024,
+  maximumPacketBytes: 64 * 1024 * 1024,
   maximumHeaderBytes: 64 * 1024,
   maximumAttachmentCount: 8,
-  maximumAttachmentBytes: 24 * 1024 * 1024,
+  maximumAttachmentBytes: 48 * 1024 * 1024,
   maximumWorldPatchChanges: 4096,
   maximumJsonPathSegments: 32,
   maximumJsonDepth: 256,
   maximumPendingInputsPerClient: 256,
   maximumInFlightCommits: 8,
-  maximumSessionPendingBytes: 32 * 1024 * 1024,
+  maximumSessionPendingBytes: 64 * 1024 * 1024,
   maximumGlobalRetainedPackets: 4096,
   maximumGlobalRetainedBytes: 256 * 1024 * 1024,
   ackTimeoutTicks: 600,
@@ -273,8 +272,6 @@ function validateAttachmentLayout(kind, attachments, limits) {
     valid = [
       'world_patch:json',
       'world_patch:json,scene_frame:raw',
-      'world_patch:json,events:json',
-      'world_patch:json,scene_frame:raw,events:json',
     ].includes(actual);
     if (valid) {
       const changes = attachments[0].value?.changes;

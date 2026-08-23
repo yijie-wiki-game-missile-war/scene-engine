@@ -5,7 +5,12 @@ import math
 import pytest
 
 from scene_engine.errors import JsonTreeError
-from scene_engine.json_tree import apply_json_patch, validate_json_patch, validate_json_value
+from scene_engine.json_tree import (
+    DEFAULT_MAXIMUM_JSON_VALUES,
+    apply_json_patch,
+    validate_json_patch,
+    validate_json_value,
+)
 from scene_engine.wire import MAXIMUM_SAFE_INTEGER
 
 
@@ -69,6 +74,13 @@ def test_json_tree_rejects_nonfinite_and_unsafe_integer_values() -> None:
     for value in (math.nan, math.inf, -math.inf, MAXIMUM_SAFE_INTEGER + 1):
         with pytest.raises(JsonTreeError):
             validate_json_value({"value": value})
+
+
+def test_default_snapshot_budget_covers_the_500_node_product_checkpoint() -> None:
+    assert DEFAULT_MAXIMUM_JSON_VALUES == 4_000_000
+    validate_json_value([None] * 1_000_001)
+    with pytest.raises(JsonTreeError, match="maximum_values"):
+        validate_json_value([None, None, None], maximum_values=3)
 
 
 @pytest.mark.parametrize("key", ["__proto__", "prototype", "constructor"])
