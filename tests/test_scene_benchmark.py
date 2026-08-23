@@ -5,8 +5,18 @@ import subprocess
 import sys
 from pathlib import Path
 
+import scripts.benchmark_scene_500 as benchmark_module
+
 
 ROOT = Path(__file__).parents[1]
+
+
+def test_git_metadata_is_optional_in_a_source_package(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(benchmark_module, "ROOT", tmp_path)
+    assert benchmark_module.git("rev-parse", "HEAD") is None
+    assert benchmark_module.git("status", "--porcelain") is None
 
 
 def test_quick_scene_publication_benchmark_is_strictly_500_nodes(tmp_path) -> None:

@@ -174,10 +174,17 @@ def memory_probe(
     }
 
 
-def git(*arguments: str) -> str:
-    return subprocess.check_output(
-        ["git", "-C", str(ROOT), *arguments], text=True
-    ).strip()
+def git(*arguments: str) -> str | None:
+    """Read optional worktree metadata without requiring Git in source packages."""
+
+    try:
+        return subprocess.check_output(
+            ["git", "-C", str(ROOT), *arguments],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except (OSError, subprocess.CalledProcessError):
+        return None
 
 
 def run_benchmark(
