@@ -1,128 +1,112 @@
-# Scene Engine 0.5 cutover report
+# Scene Engine 0.6 structured-scene and 500-node cutover report
 
-Scene Engine 0.5.0 cutover complete. The runtime, wire, recording, JavaScript client, scene tree, Arts display path, and Replay
-path now share one commit stream without a compatibility layer. Production Python/JavaScript source in Scene Engine changed
-from 25 files and 10,872 physical lines at the rollback point to 17 files and 7,070 lines in the cutover source.
+Scene Engine 0.6 is a one-step, breaking cutover. Product programs now submit structured complete `SceneNode` records and
+frame-scoped `SceneEvent` records. The Engine validates those records against its cached bootstrap and encodes the raw frame
+once. There is no encoded-frame product port, parse-after-encode path, independent product-events attachment, compatibility
+constructor, alias, or fallback decoder.
 
-## Commit and rollback tuple
+Missile War consumers move atomically with this release to `missile-war-world-state@2`. Recordings created by an older
+deployment are retained by that deployment and are not accepted by the current Replay service.
 
-The Scene Engine report commit contains evidence only; the source tuple below is the code and artifact tuple that was tested.
-No repository was pushed by the cutover task.
+## Frozen runtime contract
 
-| Repository | Cutover source | Rollback point |
-| --- | --- | --- |
-| workspace root | `62f7636` | `b065b2f` |
-| scene-engine | `4ba6cac` | `d648f2b` |
-| python-game | `93b03f8` | `cdbbf4b` |
-| Arts | `790f322` | `7e82ddc` |
-| Replay | `29e220c` | `0f35d34` |
+| Boundary | Current contract |
+| --- | --- |
+| checkpoint product port | `world_codec`, `world_snapshot`, `scene_bootstrap`, `scene_nodes`, `scene_events` |
+| commit product port | `world_codec`, `world_patch`, `scene_nodes`, `scene_events` |
+| product JSON numbers | finite native floating-point values and safe integers; non-finite values fail closed |
+| discrete protocol values | safe integers for kinds, lengths, ticks, revisions, commit counters, limits, and path indices |
+| checkpoint wire layout | world snapshot JSON, scene bootstrap bytes, scene frame bytes |
+| commit wire layout | world patch JSON and an optional same-tick scene frame |
+| scene events | binary records inside the scene frame only |
+| default limits | 64 MiB packet, 48 MiB attachment, 64 MiB session pending, 4,000,000 JSON values |
 
-Rollback is tuple-atomic: stop producers and consumers, deploy all four product rollback points together, and use recordings
-created by that deployment. Packet histories from the two tuples are intentionally not mixed.
+Attachment kind 5 is deliberately unassigned. Both Python and JavaScript reject it; numeric value 5 remains valid only as the
+unrelated `engine.input_result` packet kind.
 
-## Built artifacts
+## Deleted paths and hot-path work
+
+- The product `scene_frame: bytes` fields and independent product `events: bytes` route were physically removed.
+- `ProductCheckpoint` and `ProductCommit` reject legacy keyword arguments rather than adapting them.
+- The runtime caches one parsed bootstrap validation view per generation and never parses a frame it just encoded.
+- The sole JavaScript `SceneTree` caches static registry, topology, world poses, and visual/profile lookup data after checkpoint.
+  Ordinary frames process only the complete dynamic node set and reuse the static cache.
+- The Missile War producer removed its intermediate scene DTO graph, static-map rebuild, static fingerprint, guessed journal
+  scopes, partial input rollback, and per-tick idle-position writes.
+
+## Artifact tuple
 
 | Artifact | SHA-256 |
 | --- | --- |
-| `scene_engine-0.5.0-py3-none-any.whl` | `232c36381aac9149c20c91b1b92983b0be1590bb05b48e576ea57593e0efce31` |
-| `scene-engine-client-0.5.0.tgz` | `c9d9c3b1699ca5bc396cca50afdbb91b73d383c13fe615b6fc7a7975157518d0` |
-| `scene-engine-renderer-three-0.5.0.tgz` | `9e3ced083f0737343714946ee012e87647d090dc5649918b976e02e6e7c0802e` |
+| `scene_engine-0.6.0-py3-none-any.whl` | `6cf8eba39d097fc210f220c259f7d5781152c366f06c5ed4f4f6d4c8ae893491` |
+| `scene-engine-client-0.6.0.tgz` | `e7feeb9d197616f36379443e86e51157d0440cf022dbf4d4cb668df7a4936abb` |
+| `scene-engine-renderer-three-0.6.0.tgz` | `5763e54b4725108ec6e87e990af22181514974c388563f2ad1ee78b62871e0f0` |
 
-The client archives in Arts and Replay and the renderer archive in Arts are byte-identical to these artifacts. Isolated wheel
-and npm installs resolve only from the built artifacts and import from their isolated installation roots.
+The wheel and archives installed in the three consumers are byte-identical to this tuple. Lockfiles contain only version
+0.6.0. Ignored development output containing retired artifacts was removed; it is not a compatibility source.
 
-## Test and package gates
+## Correctness and integration gates
 
 | Gate | Result |
 | --- | --- |
-| Scene Engine Python | 49 passed; compileall and isolated wheel import passed |
-| Scene Engine JavaScript | client 10 passed; renderer 9 passed; isolated archive consumer passed |
-| python-game clean archive | 206 passed in 311.94 seconds; compileall passed |
-| Arts clean archive | install, build, check, client integration, and 5,000-controller soak passed |
-| Replay clean archive | 23 passed; fresh Arts artifact staging and playback passed |
-| final source, test, documentation, lock, vendor, and generated-output scans | zero deleted-path, retired-identity, or retired-dependency matches |
-| dependency graphs | one client and one renderer at 0.5.0 where applicable |
+| Scene Engine Python | 59 passed |
+| Scene Engine JavaScript | client 16 passed; renderer 9 passed |
+| Scene Engine cutover verifier | passed |
+| python-game | 219 passed in 480.03 seconds |
+| Arts | `npm run check` passed; `npm run build` passed |
+| Replay | 23 passed |
+| 500-node product packet log | 602 byte-exact records, 2 checkpoints, 600 commits, every selected frame has 500 dynamic nodes |
+| Replay product playback | full playback and seek from commit 300 to 600 passed through the shared client |
+| forbidden and retired-contract scan | zero production matches |
 
-Product JSON numbers accept native finite floating-point values in both languages, including signed zero and exponent forms.
-Non-finite values are rejected. Enumerations and discrete protocol metadata such as kinds, lengths, ticks, revisions, and
-commit counters remain safe integers; larger product integers use the product's lossless tagged form. Python and JavaScript
-encoders are directionally deterministic, while cross-language validation compares decoded semantics rather than requiring
-the two native JSON encoders to choose identical number spelling.
+Input fault tests cover complete rollback after no-op, rejection, expected exceptions, and unexpected exceptions before the
+runtime becomes fatal. Chained patch oracles reconstruct the complete product snapshot across 600 ticks and targeted
+investment, diplomacy, combat, occupation, and production mutations.
 
-## Integrated scenarios
+## 500-node evidence
 
-| Scenario | Evidence |
-| --- | --- |
-| fixed-seed product run | 600 ticks, one changed input commit, two duplicate no-op results, one rejection, and final cursor `601/600/602` |
-| multi-client session behavior | eight healthy clients, one slow timeout and reconnect, four malformed-client isolations, and zero shared-packet identity violations |
-| recording identity | 602 live state packets equal the recorded and Replay WebSocket payloads byte for byte |
-| Replay | start playback and seek from commit 300 through target 350 both reach the live final world, tree, and cursor |
-| Arts | 602 acknowledgements and state commits plus three input results; final UI and scene equal live output |
-| production WebSocket | two real clients receive and acknowledge the same seven state packets; a text client is isolated without affecting them |
-| domain equivalence | rollback core and current EngineProgram produce 7,961 events and the same revision-normalized full business-state hash after the same seed/tick/input script |
-| strict node-scale run | exactly 500 scene nodes, one checkpoint, 600 complete frames, 601 acknowledgements, and zero tree or renderer identity violations |
-| long stability run | 5,000 commits to eight clients, 40,000 sends, bounded 64-packet retention, and no latter-half linear memory growth |
-| failure boundaries | malformed packets, progression gaps, overlapping patches, scene cycles, invalid acknowledgements, oversize input, recorder failure, and observer failure all fail closed |
+Synthetic Scene Engine and JavaScript client reports cover steady, full-motion, and 5% churn workloads with five rounds of
+600 measured samples per scenario. The real Missile War report uses exactly 500 visible dynamic entities, complete frames,
+600 acknowledged commits, periodic checkpoints, and a 3,600-commit bounded-retention soak.
 
-Key semantic hashes from the fixed-seed product run:
-
-| Value | SHA-256 |
-| --- | --- |
-| revision-normalized pre/post domain state | `ee2de34b7b0427e9a4c543c1c713f15c95119dbf26f252db242d1ccee739c145` |
-| final cross-language world | `264a1b0420470f7b84450d26fd076da90e4ad3795a7b9e3193a3e14bc627d6a2` |
-| final scene tree | `fe6c59373db22b3c58974fcb88c7b9274d6f9d68fdb217e466c58b17bafba3cf` |
-| final selected UI | `5a33517315a659b70626894adb681b822dab06997ad9ce60ba5055c1ba953d38` |
-| live, recorded, and Replay payload sequence | `b5a9ced1ef587f7586534f50844d0d30820f73804d5eec0d4427505f9a519079` |
-| packet log body | `3a17dc6df739e0356326879c1543e1cc9b00c73cdb382f4ed79ffadd21e328d7` |
-| strict 500-node packet sequence | `cf9cc186bb01d5648ff0912794d593c6b4b62d18f0ba943a5c56bcb72568ccdf` |
-
-## Performance
-
-The 600-tick product run used seed 42 while a user-owned process continuously occupied one CPU core. Values are milliseconds;
-each row reports p50 / p95 / p99.
-
-| Producer phase | Samples | p50 / p95 / p99 |
+| Scenario | Python publication p95 | JavaScript apply p95 |
 | --- | ---: | ---: |
-| gameplay step | 600 | `4.576 / 5.009 / 9.544` |
-| journal finalization | 601 | `0.643 / 0.727 / 16.830` |
-| scene construction | 601 | `36.348 / 43.180 / 45.652` |
-| wire encoding | 601 | `1.027 / 1.175 / 22.160` |
-| session fan-out, excluding transport work | 601 | `0.022 / 0.027 / 0.031` |
-| Engine sync overhead | 601 | `1.691 / 1.848 / 39.677` |
+| steady | 10.493 ms | 2.239 ms |
+| motion | 7.715 ms | 1.675 ms |
+| churn-25 | 6.519 ms | 1.957 ms |
 
-Engine sync p95 passes the 4 ms gate. No gameplay sample exceeded 16.67 ms. The full-domain one-second commits account for the
-journal and wire p99 tail and remain intentionally complete.
+The real-product aggregate p95 values are 3.277 ms for gameplay step, 0.721 ms for journal finalization, 7.528 ms for direct
+projection, 8.169 ms for scene validation plus the single encode, 1.124 ms for wire encoding, 20.554 ms for publication after
+step, and 23.833 ms for step plus publication. A complete frame is 98,632 bytes. World patch p95 is 26,806 bytes and the
+one-second boundary maximum is 156,368 bytes; combined commit p95 is 125,737 bytes and the maximum is 255,304 bytes.
 
-| Consumer measurement | Samples | p50 / p95 / p99 | Gate |
-| --- | ---: | ---: | --- |
-| product ordinary client apply | 601 | `3.626 / 5.488 / 45.197` | p95 <= 8 ms, pass |
-| strict 500-node client apply | 600 | `0.676 / 1.323 / 1.750` | pass |
-| strict 500-node renderer apply | 600 | `0.062 / 0.139 / 0.254` | pass |
-| strict 500-node atomic client/renderer barrier | 600 | `0.742 / 1.419 / 1.958` | pass |
-| generic 5,000-commit client apply | 5,000 | `0.025 / 0.048 / 0.098` | stability evidence |
+The 3,600-commit soak finishes with zero session and transport backlog and configured global retention bounds intact. Latter
+half RSS is not monotonic and decreases by 74,530,816 bytes. Traced live allocations rise by 37,942,791 bytes while the raw
+packet retention window reaches its 256 MiB cap and product history continues to grow; that value is retained as a diagnostic
+rather than treated as a latency release gate.
 
-At 500 nodes, initial client plus renderer installation took 6.35 ms. The 600 ordinary frames performed 300,000 pose updates,
-created exactly 500 visuals once, and recreated none. From commit 300 through 600, heap grew by 96,008 bytes and resident memory
-by 950,272 bytes.
+Absolute latency is recorded for diagnosis but is not a release blocker for this delivery, per the final acceptance decision.
+Node count, complete-frame semantics, packet limits, exact ACK progression, no pending backlog, replayability, and bounded
+retention remain correctness gates.
 
-Network evidence for the product run:
+Evidence files:
 
-| Measurement | Result |
-| --- | ---: |
-| initial checkpoint | 4,552,641 bytes |
-| commit p50 / p95 / p99 | `85,848 / 85,864 / 1,818,812` bytes |
-| largest commit | 1,935,044 bytes |
-| largest state packet | 13,281,413 bytes of a 33,554,432-byte limit |
-| one-client 60 Hz state traffic | 7,385,139 bytes/second |
-| eight-client test fan-out | 5,212 sends and 599,717,070 bytes |
-| sealed log | 608 records and 131,359,594 bytes |
-| final runtime retention | 64 packets and 9,117,522 bytes |
+- `docs/evidence/scene-engine-500.json`
+  (`dfafb8899944e6f1c3cf5fd7a04a9a375808629e79667578c93c46258869fd5f`)
+- `docs/evidence/client-500.json`
+  (`cbc791a3576864defef3c88e2bce7aa02086c8b3d31865473cb3cb029b34ea13`)
+- `../python-game/docs/evidence/runtime-500.json`
+  (`ec8c179419490547dce7d0c8270ec3118a95d2eae7e755762940b320c32e91b3`)
 
-## Known non-blocking product limits
+## Commit and rollback tuple
 
-- Node-scale acceptance is temporarily capped at exactly 500 nodes. The fixed-seed Missile War run currently has 16 scene
-  nodes; the independent strict 500-node run proves the Engine/client/renderer path only. No claim is made above 500 nodes.
-- Missile War product-side scene construction remains the dominant server cost at 43.180 ms p95. It is outside a 16.67 ms
-  wall-clock frame budget even though gameplay, Engine sync, consumer, and the strict 500-node Engine path pass their gates.
-  Product scene-source optimization is a follow-up before claiming real-time headroom.
-- A clean Arts source archive must be built before its complete check because that check validates generated runtime output.
+| Repository | Tested source commit | Pre-cutover rollback commit |
+| --- | --- | --- |
+| scene-engine | `be1575d` | `60fc064` |
+| python-game | `aeb184f` | `93b03f8` |
+| Arts | `67b4ba6` | `790f322` |
+| Replay | `001f010` | `29e220c` |
+
+The tested source commits precede this evidence-only report commit where necessary. Rollback is tuple-atomic: stop producer
+and consumers, deploy all four pre-cutover commits together, and use packet logs produced by that tuple. Cross-version packet
+history mixing is intentionally unsupported.
