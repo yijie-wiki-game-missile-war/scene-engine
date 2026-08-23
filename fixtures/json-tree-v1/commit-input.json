@@ -1,0 +1,1 @@
+{"changes":[{"op":"set","path":["state","stable","value"],"value":8},{"op":"set","path":["world_revision"],"value":2}],"schema":"scene-engine-json-tree@1"}

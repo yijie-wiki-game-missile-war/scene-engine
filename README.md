@@ -1,111 +1,47 @@
-# Scene Engine
+# Scene Engine 0.5
 
-`scene-engine` 是 renderer-neutral 的 fixed-step runtime 与 presentation platform。冻结的 production
-Python/JavaScript 包统一为 `0.4.0`；当前源码另带非发布联调候选
-`0.4.0+worldstate.test.1` / `@scene-engine/display-core@0.4.0-worldstate-test.1`。业务项目只能通过明确
-adapter/profile 接入，不得把玩法、产品 API 或资源目录反向写入 Engine。
+Scene Engine 是 renderer-neutral 的 60 Hz fixed-step runtime。`0.5.0` 只有一条状态链：一次已改变的
+world transaction 产生一个 `scene-engine-wire@1` commit；checkpoint、WorldState、complete scene tree、
+events、ACK 与 packet log 共用同一 stream/commit cursor。
 
-正式 V3 能力包括：
+当前发布物只有：
 
-- `SceneEngineRuntime`：整数 tick、逐 tick catch-up、fatal boundary，以及严格 authority + presentation 提交；
-- `SceneBootstrapV3`、完整 parent/local `PresentationFrameV3`、packet codec 和 opaque authority cursor；
-- `PresentationIdAllocator` 与 Python parent closure/cycle/depth/world-pose validator；
-- `scene-presentation-control-v2@1` 与有界 `OrderedPresentationSession`；
-- `scene-presentation-archive-v3@1` 的流式 Python writer、checkpoint directory 与 Node-only byte-range reader；
-- 唯一公共 `SceneDisplayEngine`（内部一个 `PresentationSceneTree`）：dense SoA static/dynamic tree、world
-  pose、metadata/profile/interaction 查询、linear merge change plan；联调候选的 `prepareCommit()` 在同一
-  barrier 安装 product-validated opaque aggregate、Engine commit identity 与可选 frame batch，Engine
-  不解释 aggregate codec 或产品字段；
-  correlation 顺序只由 session/coordinator 持有；`commitValidated()` 不运行 observer，产品 coordinator
-  完成 business/tree/cursor 联合 pointer swap 后才调用 `schedulePostCommitCapture()` 排入受保护 microtask；
-- transport-neutral Replay timeline、authority/presentation composite session；
-- transport-neutral session admission、credit、ACK、reset 与 deadline mechanics。
+- Python `scene-engine==0.5.0`：runtime、wire、JSON tree、scene body、session、recording；
+- JavaScript `@scene-engine/client@0.5.0`：统一 decoder、atomic WorldState/tree client、packet-log reader；
+- JavaScript `@scene-engine/renderer-three@0.5.0`：只消费 client 的 `{plan, view}`。
 
-production Python/JavaScript presentation surface 只导出 V3 codec，不提供 V1/V2 alias 或 decoder fallback。
-旧 DisplayFrame V1、latest-only mailbox、consumer、legacy host 与 experimental import 已从 production、包和
-测试中删除。
+产品通过 `EngineProgram` 端口提供计数器读写、tick/input mutation、checkpoint 与 commit body。Engine 不解释
+玩法字段、HTTP、WebSocket 框架、资产或产品 visual catalog。构造后 mutable world 只能在 EngineProgram callback
+期间借用；没有公共 world getter。
 
-## 快速验证
+## 时间与提交
+
+- 唯一规则频率为 `60 tick/s`；wall clock 只决定应按顺序补多少整数 tick。
+- 每个 tick 必须逐个提交，不能跳过或合并；tick commit 必带 complete scene frame。
+- changed input 在同 tick 增加 world revision 与 commit sequence；视觉确无变化时可省略 frame。
+- rejected/no-op input 不改变 tick、revision 或 commit cursor。
+- renderer、observer 和 draw 不推进规则时间，也不参与同步 barrier。
+
+## 验证与打包
 
 ```bash
 python3 -m pytest -q
 python3 -m compileall -q src tests
 npm install --ignore-scripts
 npm test
+python3 scripts/verify_cutover.py
+npm pack --workspace @scene-engine/client --pack-destination dist
+npm pack --workspace @scene-engine/renderer-three --pack-destination dist
 ```
 
-## 包边界
+Python 需要 `>=3.10`；仓库当前验证使用 Python 3.12+ 与 Node 20.19+/22.12+。
 
-```text
-gameplay adapter
-  -> SceneEngineRuntime
-       -> authority commit
-       -> complete presentation export
-       -> OrderedPresentationSession / Archive V3
+## 当前合同
 
-Archive V3 + authority lane
-  -> CompositeReplaySession
-
-Bootstrap + ordered frames
-  -> @scene-engine/display-core
-       -> product-composed Three backend
-       -> product-owned visual factories/resources
-```
-
-JavaScript workspace 包：
-
-- `@scene-engine/presentation-codec`
-- `@scene-engine/presentation-session`
-- `@scene-engine/presentation-archive-node`
-- `@scene-engine/replay-core`
-- `@scene-engine/display-core`
-- `@scene-engine/renderer-three`
-
-Engine 不定义或解释 WorldState、MW v5 字段、规则坐标、FeatureOwner 内容、录像元数据、HTTP/API 或资源选择。
-联调候选允许 Python runtime 独占产品注入的可变 aggregate 实例，也允许显示核心保存产品已校验的不透明
-immutable aggregate 指针；类型、字段和 mutation 语义仍全部属于产品 adapter。
-authority cursor 在通用层始终是 `{ codecIdentity, canonicalBytes }`；字段解释属于产品 adapter。
-authority lane 可通过 `transmissionsOf(record)` 提供以该 authority wire 开头、随后为原始 outbound control
-的有界数组；Replay Core 不解释 control 内容。Composite 每次先整体预检并释放 authority 主帧与对应
-presentation correlation，尾随 control 可以跨 transport batch，但不会被下一条 authority 越过。
-Composite 的 `openCheckpoint()` authority port 同时给出当前 checkpoint 的
-`endRecordIndexExclusive`；一个 generation 只播放该 segment，绝不把下一 snapshot/new epoch 注入当前
-Engine 世代。
-
-## Python 最小入口
-
-```python
-from scene_engine import ManualClock, RuntimeConfig, SceneEngineRuntime
-
-clock = ManualClock()
-runtime = SceneEngineRuntime(
-    simulation,
-    config=RuntimeConfig(ticks_per_second=60, display_frames_per_second=60),
-    clock=clock,
-    frame_export=export_complete_frame,
-)
-```
-
-严格 authority/presentation profile 需要每 tick 一帧，并同时提供 `authority_commit` 与
-`frame_export`：
-
-```python
-RuntimeConfig(
-    ticks_per_second=60,
-    display_frames_per_second=60,
-    strict_authority_presentation=True,
-)
-```
-
-## 合同
-
-- [`docs/contracts/runtime.md`](docs/contracts/runtime.md)：runtime 提交、失败与严格 profile；
-- [`docs/contracts/presentation-profile.md`](docs/contracts/presentation-profile.md)：V3 Bootstrap/Frame packed layout、
-  parent/local tree、borrowed codec 与 dense display core；
-- [`docs/contracts/presentation-session.md`](docs/contracts/presentation-session.md)：有界 retry、credit/deadline 与 product-owned reset identity；
-- [`docs/contracts/presentation-archive.md`](docs/contracts/presentation-archive.md)：Node-only Archive V3 精确物理格式与 checkpoint directory；
-- [`docs/contracts/current-v5-boundary.md`](docs/contracts/current-v5-boundary.md)：MW adapter 与 Engine 边界；
-- [`docs/integration-plan.md`](docs/integration-plan.md)：当前跨项目 V3 composition 和发布门禁。
-
-schema/profile 变更必须同步升级跨语言 golden、malformed corpus、Archive reader、共享 generated profile
-与 release manifest。任何不兼容物理布局必须增加 schema version。
+- [架构](docs/architecture.md)
+- [Runtime 与 60 Hz](docs/runtime.md)
+- [Wire v1](docs/wire.md)
+- [JavaScript client](docs/client.md)
+- [Recording 与 Replay](docs/recording-replay.md)
+- [Transform](docs/transform.md)
+- [切换报告](docs/cutover-report.md)

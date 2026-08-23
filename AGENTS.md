@@ -1,14 +1,18 @@
 # Agent Instructions
 
-Read `../AGENTS.md` and `../README.md` before working in this project.
+Before changing this repository, read `README.md` and the relevant current document in `docs/`.
 
-This directory is an independent project repository. Run Git commands from
-this directory and keep Scene Engine-specific code, tests, and documentation here.
+`docs/runtime.md` is binding for simulation, scheduling, communication, recording, Replay, animation, and acceptance
+work. The sole logical clock is an ordered integer tick at exactly 60 Hz. A tick commit always contains a complete scene
+frame; a same-tick input commit may omit it only when the visual state did not change.
 
-The current Missile War v5 producer, transport, raw tape, Replay, and Arts
-consumer remain governed by `../.engineer/contracts/mw-global-time-rule.md`.
-Nothing in this project may silently replace or weaken that current 60 Hz
-chain.
+This directory is an independent repository. Keep product rules, product state schemas, network frameworks, HTTP, assets,
+and visual factories outside it. Integrate through `EngineProgram`, transport, recorder, client observer, and renderer
+factory ports.
 
-The Python package name is `scene_engine`. Keep gameplay rules and
-Missile-War-specific state outside the package; integrate them through ports.
+There is one mutable world owner, one Engine packet stream, one client WorldState pointer, one scene tree, one cumulative
+ACK cursor, and one packet-log format. Do not add aliases, decoder fallbacks, parallel cursors, secondary stores, or a
+second scheduling clock.
+
+Change protocol layouts and cross-language behavior together with Python tests, JavaScript tests, fixtures, package locks,
+and current docs. Run `python3 scripts/verify_cutover.py` before handoff.

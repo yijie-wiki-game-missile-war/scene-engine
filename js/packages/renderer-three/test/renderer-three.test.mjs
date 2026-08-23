@@ -1,10 +1,21 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import {
-  THREE_PRESENTATION_BACKEND_SCHEMA,
-  ThreePresentationBackend,
-} from '../src/index.js';
+import * as publicApi from '../src/index.js';
+
+const {
+  THREE_SCENE_BACKEND_SCHEMA,
+  ThreeSceneBackend,
+} = publicApi;
+
+test('root export surface is the frozen 0.5 allowlist', () => {
+  assert.deepEqual(Object.keys(publicApi).sort(), [
+    'THREE_SCENE_BACKEND_SCHEMA',
+    'ThreeSceneBackend',
+    'ThreeSceneBackendError',
+    'createThreeSceneBackend',
+  ]);
+});
 
 test('installs one parented anchor tree without retaining node records', () => {
   const root = new FakeGroup();
@@ -15,7 +26,7 @@ test('installs one parented anchor tree without retaining node records', () => {
 
   backend.installBootstrap(plan({ kind: 'bootstrap', createIds: [1n, 2n] }), view);
 
-  assert.equal(backend.schema, THREE_PRESENTATION_BACKEND_SCHEMA);
+  assert.equal(backend.schema, THREE_SCENE_BACKEND_SCHEMA);
   assert.equal(backend.capture().nodeCount, 2);
   assert.equal(backend.capture().handleCount, 2);
   assert.strictEqual(backend.getAnchor(2n).parent, backend.getAnchor(1n));
@@ -28,6 +39,31 @@ test('installs one parented anchor tree without retaining node records', () => {
     () => backend.installBootstrap(plan({ kind: 'reset' }), view),
     (error) => error.code === 'three-bootstrap-plan-invalid',
   );
+});
+
+test('creates valid child-before-parent bootstrap and frame anchors in two passes', () => {
+  const child = node(1, { parentDisplayId: 2n });
+  const parent = node(2);
+
+  const rootA = new FakeGroup();
+  const bootstrapBackend = createBackend(rootA, () => ownerFactory().factory);
+  bootstrapBackend.installBootstrap(
+    plan({ kind: 'bootstrap', createIds: [1n, 2n] }),
+    sceneView([child, parent]),
+  );
+  assert.strictEqual(bootstrapBackend.getAnchor(1n).parent, bootstrapBackend.getAnchor(2n));
+
+  const rootB = new FakeGroup();
+  const frameBackend = createBackend(rootB, () => ownerFactory().factory);
+  frameBackend.installBootstrap(
+    plan({ kind: 'bootstrap', createIds: [], commitSeq: 0, sourceTick: 0 }),
+    sceneView([], 1, 0, 0),
+  );
+  frameBackend.apply(
+    plan({ createIds: [1n, 2n], commitSeq: 1, sourceTick: 1 }),
+    sceneView([child, parent], 1, 1, 1),
+  );
+  assert.strictEqual(frameBackend.getAnchor(1n).parent, frameBackend.getAnchor(2n));
 });
 
 test('applies only declared changes and skips an unchanged owner profile', () => {
@@ -58,26 +94,26 @@ test('applies only declared changes and skips an unchanged owner profile', () =>
   assert.equal(root.matrixWorldUpdateCount, 2);
 });
 
-test('applies an ordered frame batch once without owning presentation events', () => {
+test('applies an ordered frame batch once without owning scene events', () => {
   const root = new FakeGroup();
   const backend = createBackend(root, () => ownerFactory().factory);
   const created = node(1);
   backend.applyBatch([
     {
       events: Object.freeze([{ eventId: 1n }]),
-      plan: plan({ createIds: [1n], frameSeq: 1n }),
+      plan: plan({ createIds: [1n], commitSeq: 1 }),
       view: sceneView([created]),
     },
     {
       events: Object.freeze([{ eventId: 2n }]),
-      plan: plan({ removeIds: [1n], frameSeq: 2n }),
-      view: sceneView([]),
+      plan: plan({ removeIds: [1n], commitSeq: 2 }),
+      view: sceneView([], 1, 2, 1),
     },
   ]);
 
   assert.equal(backend.capture().nodeCount, 0);
   assert.equal(root.matrixWorldUpdateCount, 1);
-  assert.equal('publishEvents' in ThreePresentationBackend.prototype, false);
+  assert.equal('publishEvents' in ThreeSceneBackend.prototype, false);
 });
 
 test('rejects stale asynchronous resources after replace and remove', async () => {
@@ -176,7 +212,7 @@ test('dispose does not wait forever for an owner that ignores AbortSignal', asyn
 });
 
 function createBackend(root, resolveFactory, overrides = {}) {
-  return new ThreePresentationBackend({
+  return new ThreeSceneBackend({
     createAnchor: () => new FakeGroup(),
     resolveFactory,
     root,
@@ -232,10 +268,12 @@ function payload(values) {
   return Object.freeze({ bytes: new Uint8Array(values), flags: 0, typeId: 101 });
 }
 
-function sceneView(nodes, generation = 1) {
+function sceneView(nodes, generation = 1, commitSeq = 1, sourceTick = 1) {
   const byId = new Map(nodes.map((value) => [value.displayId, value]));
   return Object.freeze({
     generation,
+    commitSeq,
+    sourceTick,
     nodeAt(index) { return nodes[index] ?? null; },
     nodeCount: nodes.length,
     getNode(displayId) { return byId.get(displayId) ?? null; },
@@ -247,7 +285,7 @@ function plan(overrides = {}) {
   return Object.freeze({
     animationDirtyIds: Object.freeze([]),
     createIds: Object.freeze([]),
-    frameSeq: 1n,
+    commitSeq: 1,
     generation: 1,
     interactionDirtyIds: Object.freeze([]),
     kind: 'frame',
@@ -255,7 +293,7 @@ function plan(overrides = {}) {
     profileStateDirtyIds: Object.freeze([]),
     removeIds: Object.freeze([]),
     reparentIds: Object.freeze([]),
-    sourceTick: 1n,
+    sourceTick: 1,
     visibilityDirtyIds: Object.freeze([]),
     visualReplaceIds: Object.freeze([]),
     ...overrides,

@@ -1,26 +1,72 @@
-"""Minimal convenience surface for the Scene Engine runtime."""
+"""Scene Engine 0.5: one runtime, packet stream, client state, and scene tree."""
 
-from .clock import ManualClock
+from .clock import ManualClock, SystemMonotonicClock
 from .errors import (
-    AuthorityCommitFatalError,
     ConfigurationError,
-    PresentationExportError,
+    JsonTreeError,
+    RecordingError,
     RuntimeBusyError,
-    RuntimeStoppedError,
+    RuntimeFatalError,
+    RuntimeStateError,
+    SceneCodecError,
     SceneEngineError,
-    SimulationFatalError,
+    SessionBackpressureError,
+    SessionError,
+    WireError,
 )
-from .runtime import RuntimeConfig, SceneEngineRuntime
+from .runtime import (
+    CheckpointContext,
+    CommitContext,
+    EngineCommit,
+    EngineInput,
+    EngineProgram,
+    EngineRecorder,
+    EngineTransport,
+    InputContext,
+    MutationResult,
+    ProductCheckpoint,
+    ProductCommit,
+    PumpResult,
+    RuntimeConfig,
+    RuntimeHealth,
+    SceneEngineRuntime,
+    TickContext,
+    WorldCounters,
+)
+
+
+__version__ = "0.5.0"
 
 __all__ = [
-    "AuthorityCommitFatalError",
+    "CheckpointContext",
+    "CommitContext",
     "ConfigurationError",
+    "EngineCommit",
+    "EngineInput",
+    "EngineProgram",
+    "EngineRecorder",
+    "EngineTransport",
+    "InputContext",
+    "JsonTreeError",
     "ManualClock",
-    "PresentationExportError",
+    "MutationResult",
+    "ProductCheckpoint",
+    "ProductCommit",
+    "PumpResult",
+    "RecordingError",
     "RuntimeBusyError",
     "RuntimeConfig",
-    "RuntimeStoppedError",
+    "RuntimeFatalError",
+    "RuntimeHealth",
+    "RuntimeStateError",
+    "SceneCodecError",
     "SceneEngineError",
     "SceneEngineRuntime",
-    "SimulationFatalError",
+    "SessionBackpressureError",
+    "SessionError",
+    "SystemMonotonicClock",
+    "TickContext",
+    "WireError",
+    "WorldCounters",
+    "__version__",
 ]

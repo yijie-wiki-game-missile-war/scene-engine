@@ -1,1036 +1,1008 @@
-"""Engine-owned fixed-tick runtime and authoritative world commit boundary.
-
-The runtime supports a small legacy ``GameSimulation`` mode for generic users,
-but the production ownership model is ``world + WorldProgram``: the mutable
-world is private to the Engine and is only borrowed synchronously by gameplay
-and commit adapters.  Tick, revision, commit ordering, authority publication
-and presentation sampling therefore share one owner and one serial boundary.
-"""
+"""Engine-owned fixed-step runtime, transaction boundary, and packet fan-out."""
 
 from __future__ import annotations
 
 import math
 import threading
+import uuid
+from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Callable, Optional, Protocol
+from typing import Any, Mapping, Protocol
 
 from .clock import MonotonicClock, SystemMonotonicClock
 from .errors import (
-    AuthorityCommitFatalError,
     ConfigurationError,
-    PresentationExportError,
     RuntimeBusyError,
-    RuntimeStoppedError,
-    SimulationFatalError,
+    RuntimeFatalError,
+    RuntimeStateError,
+    SessionError,
+    WireError,
 )
-from .types import GameSimulation, Tick, TickContext, WorldProgram
+from .json_tree import validate_json_patch, validate_json_value
+from .scene import (
+    SceneBootstrapView,
+    parse_scene_bootstrap,
+    parse_scene_frame,
+    validate_scene_frame_against_bootstrap,
+)
+from .session import ClientSession, InputOutcome, PacketRef, SessionHealth
+from .wire import (
+    DEFAULT_ENGINE_LIMITS,
+    MAXIMUM_SAFE_INTEGER,
+    EngineLimits,
+    PacketKind,
+    encode_checkpoint,
+    encode_commit,
+    encode_input_result,
+    read_engine_packet,
+)
 
 
-_RUNNING = "running"
-_STOPPED = "stopped"
-_FATAL = "fatal"
+CREATED = "created"
+RUNNING = "running"
+STOPPED = "stopped"
+FATAL = "fatal"
 
 
 @dataclass(frozen=True, slots=True)
-class RuntimeConfig:
-    """Validated runtime rates and bounded resource limits."""
-
-    ticks_per_second: int = 60
-    display_frames_per_second: int = 30
-    maximum_ticks_per_pump: int = 120
-    maximum_frame_nodes: int = 10_000
-    maximum_frame_bytes: int = 8 * 1024 * 1024
-    strict_authority_presentation: bool = False
+class WorldCounters:
+    source_tick: int
+    world_revision: int
 
     def __post_init__(self) -> None:
-        for name in (
-            "ticks_per_second",
-            "display_frames_per_second",
-            "maximum_ticks_per_pump",
-            "maximum_frame_nodes",
-            "maximum_frame_bytes",
-        ):
-            _require_positive_int(name, getattr(self, name))
-        if self.display_frames_per_second > self.ticks_per_second:
-            raise ConfigurationError(
-                "display_frames_per_second cannot exceed ticks_per_second"
-            )
-        if not isinstance(self.strict_authority_presentation, bool):
-            raise ConfigurationError("strict_authority_presentation must be a boolean")
-        if self.strict_authority_presentation and (
-            self.display_frames_per_second != self.ticks_per_second
-        ):
-            raise ConfigurationError(
-                "strict_authority_presentation requires one display frame per tick"
-            )
+        _counter(self.source_tick, "source_tick")
+        _counter(self.world_revision, "world_revision")
 
 
 @dataclass(frozen=True, slots=True)
 class EngineCommit:
-    """The sole ordered identity for one committed authoritative world state."""
-
-    generation_id: int
+    stream_id: str
     commit_seq: int
-    source_tick: Tick
+    source_tick: int
     world_revision: int
     cause: str
-    causation_id: str | None = None
+    causation_id: str | None
 
     def __post_init__(self) -> None:
-        _require_positive_int("generation_id", self.generation_id)
-        _require_non_negative_int("commit_seq", self.commit_seq)
-        _require_non_negative_int("source_tick", self.source_tick)
-        _require_non_negative_int("world_revision", self.world_revision)
-        if not isinstance(self.cause, str) or not self.cause:
-            raise ConfigurationError("cause must be a non-empty string")
-        if self.causation_id is not None and (
-            not isinstance(self.causation_id, str) or not self.causation_id
+        _text(self.stream_id, "stream_id")
+        _counter(self.commit_seq, "commit_seq")
+        _counter(self.source_tick, "source_tick")
+        _counter(self.world_revision, "world_revision")
+        if self.cause not in {"tick", "input", "system"}:
+            raise ConfigurationError("commit cause is invalid")
+        if self.cause == "input":
+            _text(self.causation_id, "causation_id")
+        elif self.causation_id is not None:
+            raise ConfigurationError("non-input causation_id must be null")
+
+
+@dataclass(frozen=True, slots=True)
+class EngineInput:
+    input_id: str
+    observed_stream_id: str
+    observed_commit_seq: int
+    command: str
+    args: Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        _text(self.input_id, "input_id")
+        _text(self.observed_stream_id, "observed_stream_id")
+        _counter(self.observed_commit_seq, "observed_commit_seq")
+        _text(self.command, "command")
+        if not isinstance(self.args, dict):
+            raise ConfigurationError("input args must be a JSON object")
+        validate_json_value(self.args)
+
+
+@dataclass(frozen=True, slots=True)
+class MutationResult:
+    status: str
+    detail: Any = None
+    reason_code: str | None = None
+    result_payload: Any = None
+
+    def __post_init__(self) -> None:
+        if self.status not in {"changed", "no-op", "rejected"}:
+            raise ConfigurationError("mutation status is invalid")
+        if self.status == "changed" and (
+            self.reason_code is not None or self.result_payload is not None
         ):
-            raise ConfigurationError("causation_id must be null or a non-empty string")
+            raise ConfigurationError(
+                "changed mutation cannot have a reason_code or result_payload"
+            )
+        if self.status == "rejected":
+            _text(self.reason_code, "reason_code")
+        elif self.reason_code is not None:
+            _text(self.reason_code, "reason_code")
+        if self.result_payload is not None:
+            validate_json_value(self.result_payload)
 
-    def as_dict(self) -> dict[str, Any]:
-        return {
-            "generation_id": self.generation_id,
-            "commit_seq": self.commit_seq,
-            "source_tick": self.source_tick,
-            "world_revision": self.world_revision,
-            "cause": self.cause,
-            "causation_id": self.causation_id,
-        }
+    @classmethod
+    def changed(cls, detail: Any = None) -> "MutationResult":
+        return cls("changed", detail)
+
+    @classmethod
+    def no_op(
+        cls,
+        detail: Any = None,
+        *,
+        reason_code: str | None = None,
+        result_payload: Any = None,
+    ) -> "MutationResult":
+        return cls("no-op", detail, reason_code, result_payload)
+
+    @classmethod
+    def rejected(
+        cls,
+        reason_code: str,
+        detail: Any = None,
+        *,
+        result_payload: Any = None,
+    ) -> "MutationResult":
+        return cls("rejected", detail, reason_code, result_payload)
 
 
 @dataclass(frozen=True, slots=True)
-class WorldOperationContext:
-    """Identity reserved for one Engine-serialized same-tick operation."""
-
-    current_tick: Tick
-    proposed_commit: EngineCommit
-
-
-@dataclass(frozen=True, slots=True)
-class WorldOperationResult:
-    """Result returned by a borrowed-world operation.
-
-    ``changed`` declares whether an authoritative commit was produced.  A
-    changed operation must leave ``world_revision`` at the revision reserved
-    in ``proposed_commit``; the Engine verifies this before publication.
-    """
-
-    changed: bool
-    value: Any = None
+class ProductCheckpoint:
+    world_codec: str
+    world_snapshot: Mapping[str, Any]
+    scene_bootstrap: bytes
+    scene_frame: bytes
 
     def __post_init__(self) -> None:
-        if not isinstance(self.changed, bool):
-            raise TypeError("world operation changed must be a boolean")
+        _text(self.world_codec, "world_codec")
+        if not isinstance(self.world_snapshot, dict):
+            raise ConfigurationError("world_snapshot must be a JSON object")
+        validate_json_value(self.world_snapshot)
+        _nonempty_bytes(self.scene_bootstrap, "scene_bootstrap")
+        _nonempty_bytes(self.scene_frame, "scene_frame")
 
 
 @dataclass(frozen=True, slots=True)
-class WorldOperationCommitResult:
-    changed: bool
-    value: Any
-    engine_commit: EngineCommit | None
-    authority_commit: Any = None
-    presentation_export: Any = None
+class ProductCommit:
+    world_codec: str
+    world_patch: Mapping[str, Any]
+    scene_frame: bytes | None
+    events: Any = None
+
+    def __post_init__(self) -> None:
+        _text(self.world_codec, "world_codec")
+        if not isinstance(self.world_patch, dict):
+            raise ConfigurationError("world_patch must be a JSON object")
+        validate_json_patch(self.world_patch)
+        if self.scene_frame is not None:
+            _nonempty_bytes(self.scene_frame, "scene_frame")
+        if self.events is not None:
+            validate_json_value(self.events)
 
 
 @dataclass(frozen=True, slots=True)
-class GenerationCheckpointResult:
-    """A checkpoint value materialized before its generation becomes live."""
-
-    engine_commit: EngineCommit
-    value: Any
-
-
-@dataclass(frozen=True, slots=True)
-class AuthorityCommitRequest:
-    """One post-mutation authority materialization over a borrowed world."""
-
-    simulation: GameSimulation | WorldProgram
-    context: TickContext
-    engine_commit: EngineCommit | None = None
-    program_result: Any = None
-    world: Any = None
-
-
-class AuthorityCommitCallback(Protocol):
-    def __call__(self, request: AuthorityCommitRequest) -> Any:
-        ...
-
-
-@dataclass(frozen=True, slots=True)
-class PresentationExportRequest:
-    """Metadata supplied to one complete presentation export attempt."""
-
-    simulation: GameSimulation | WorldProgram
-    scene_epoch: int
-    bootstrap_id: int
-    source_tick: Tick
-    frame_seq: int
+class TickContext:
+    commit: EngineCommit
     ticks_per_second: int
-    maximum_frame_nodes: int
-    maximum_frame_bytes: int
-    authority_commit: Any = None
-    engine_commit: EngineCommit | None = None
+
+    @property
+    def tick(self) -> int:
+        return self.commit.source_tick
 
 
-class FrameExportCallback(Protocol):
-    def __call__(self, request: PresentationExportRequest) -> Any:
-        ...
+@dataclass(frozen=True, slots=True)
+class InputContext:
+    proposed_commit: EngineCommit
+    stale_observation: bool
+
+
+@dataclass(frozen=True, slots=True)
+class CheckpointContext:
+    stream_id: str
+    commit_seq: int
+    source_tick: int
+    world_revision: int
+    ticks_per_second: int
+
+
+@dataclass(frozen=True, slots=True)
+class CommitContext:
+    commit: EngineCommit
+    ticks_per_second: int
+
+
+class EngineProgram(Protocol):
+    """The only product port allowed to borrow the authoritative world."""
+
+    def read_counters(self, world: Any) -> WorldCounters: ...
+
+    def write_counters(self, world: Any, counters: WorldCounters) -> None: ...
+
+    def step(self, world: Any, context: TickContext) -> MutationResult: ...
+
+    def handle_input(
+        self, world: Any, request: EngineInput, context: InputContext
+    ) -> MutationResult: ...
+
+    def build_checkpoint(
+        self, world: Any, context: CheckpointContext
+    ) -> ProductCheckpoint: ...
+
+    def build_commit(
+        self, world: Any, mutation: MutationResult, context: CommitContext
+    ) -> ProductCommit: ...
+
+
+class EngineTransport(Protocol):
+    def send(self, client_id: Any, packet_bytes: bytes) -> Any: ...
+
+    def close(self, client_id: Any, reason: str) -> Any: ...
+
+
+class EngineRecorder(Protocol):
+    def append(self, packet_bytes: bytes, *, checkpoint: bool) -> Any: ...
+
+    def seal(self) -> Any: ...
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeConfig:
+    ticks_per_second: int = 60
+    maximum_ticks_per_pump: int = 120
+    maximum_inputs_per_pump: int = 256
+    maximum_clients: int = 1024
+    maximum_in_flight_commits: int = 8
+    maximum_session_pending_bytes: int = 32 * 1024 * 1024
+    maximum_global_retained_packets: int = 4096
+    maximum_global_retained_bytes: int = 256 * 1024 * 1024
+    ack_timeout_ticks: int = 600
+    maximum_packet_bytes: int = 32 * 1024 * 1024
+    recording_checkpoint_interval_commits: int = 0
+
+    def __post_init__(self) -> None:
+        if self.ticks_per_second != 60 or isinstance(self.ticks_per_second, bool):
+            raise ConfigurationError("ticks_per_second must equal 60")
+        for field in (
+            "maximum_ticks_per_pump",
+            "maximum_inputs_per_pump",
+            "maximum_clients",
+            "maximum_in_flight_commits",
+            "maximum_session_pending_bytes",
+            "maximum_global_retained_packets",
+            "maximum_global_retained_bytes",
+            "ack_timeout_ticks",
+            "maximum_packet_bytes",
+        ):
+            _positive(getattr(self, field), field)
+        interval = self.recording_checkpoint_interval_commits
+        if isinstance(interval, bool) or not isinstance(interval, int) or interval < 0:
+            raise ConfigurationError(
+                "recording_checkpoint_interval_commits must be non-negative"
+            )
+
+    def engine_limits(self) -> EngineLimits:
+        defaults = DEFAULT_ENGINE_LIMITS
+        return EngineLimits(
+            maximum_packet_bytes=self.maximum_packet_bytes,
+            maximum_header_bytes=defaults.maximum_header_bytes,
+            maximum_attachment_count=defaults.maximum_attachment_count,
+            maximum_attachment_bytes=min(
+                defaults.maximum_attachment_bytes, self.maximum_packet_bytes
+            ),
+            maximum_world_patch_changes=defaults.maximum_world_patch_changes,
+            maximum_json_path_segments=defaults.maximum_json_path_segments,
+            maximum_json_depth=defaults.maximum_json_depth,
+            maximum_pending_inputs_per_client=self.maximum_inputs_per_pump,
+            maximum_in_flight_commits=self.maximum_in_flight_commits,
+            maximum_session_pending_bytes=self.maximum_session_pending_bytes,
+            maximum_global_retained_packets=self.maximum_global_retained_packets,
+            maximum_global_retained_bytes=self.maximum_global_retained_bytes,
+            ack_timeout_ticks=self.ack_timeout_ticks,
+        )
 
 
 @dataclass(frozen=True, slots=True)
 class PumpResult:
     clock_seconds: float
-    target_tick: Tick
-    ticks_overdue: int
+    target_tick: int
+    inputs_processed: int
     ticks_attempted: int
     ticks_committed: int
-    authority_commits_attempted: int
-    authority_commits_succeeded: int
     ticks_remaining: int
-    display_samples_due: int
-    display_samples_attempted: int
-    display_samples_succeeded: int
-    display_samples_failed: int
-    current_tick: Tick
+    current_tick: int
+    commit_seq: int
     caught_up: bool
-    stopped: bool
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class RuntimeHealth:
     state: str
-    current_tick: Tick
-    generation_id: int
+    stream_id: str
     commit_seq: int
-    world_owned: bool
-    world_revision: int | None
-    ticks_attempted: int
-    ticks_committed: int
-    authority_commits_attempted: int
-    authority_commits_succeeded: int
-    display_samples_attempted: int
-    display_samples_succeeded: int
-    display_samples_failed: int
-    consecutive_display_export_failures: int
-    last_successful_frame_seq: int
-    presentation_epoch_valid: bool
-    fatal_tick: Optional[Tick]
-    fatal_cause: Optional[BaseException]
-    last_display_export_error: Optional[BaseException]
-    last_authority_commit_error: Optional[BaseException]
+    source_tick: int
+    world_revision: int
+    client_count: int
+    retained_packet_count: int
+    retained_bytes: int
+    pending_input_count: int
+    fatal_cause: BaseException | None
+    sessions: tuple[SessionHealth, ...]
 
-    @property
-    def running(self) -> bool:
-        return self.state == _RUNNING
 
-    @property
-    def stopped(self) -> bool:
-        return self.state == _STOPPED
-
-    @property
-    def fatal(self) -> bool:
-        return self.state == _FATAL
-
-    @property
-    def healthy(self) -> bool:
-        return not self.fatal and self.presentation_epoch_valid
+@dataclass(frozen=True, slots=True)
+class _QueuedInput:
+    client_id: Any
+    request: EngineInput
+    raw_bytes: bytes
 
 
 class SceneEngineRuntime:
-    """Own time, authoritative world mutation, commits and publication order."""
+    """Own one mutable world, integer clock, commit stream, and all sessions."""
 
     def __init__(
         self,
-        simulation: GameSimulation | None = None,
         *,
-        world: Any = None,
-        world_program: WorldProgram | None = None,
-        config: Optional[RuntimeConfig] = None,
-        clock: Optional[MonotonicClock] = None,
-        frame_export: Optional[FrameExportCallback] = None,
-        authority_commit: Optional[AuthorityCommitCallback] = None,
-        scene_epoch: int = 1,
-        bootstrap_id: int = 1,
-        initial_tick: Tick | None = None,
-        generation_id: int = 1,
+        world: Any,
+        program: EngineProgram,
+        transport: EngineTransport | None = None,
+        recorder: EngineRecorder | None = None,
+        config: RuntimeConfig | None = None,
+        clock: MonotonicClock | None = None,
+        stream_id: str | None = None,
         initial_commit_seq: int = 0,
     ) -> None:
-        legacy_mode = simulation is not None
-        world_mode = world is not None or world_program is not None
-        if legacy_mode == world_mode:
-            raise ConfigurationError(
-                "provide either simulation or the complete world + world_program pair"
-            )
-        if world_mode and (world is None or world_program is None):
-            raise ConfigurationError("world and world_program are both required")
-        _require_positive_int("scene_epoch", scene_epoch)
-        _require_positive_int("bootstrap_id", bootstrap_id)
-        _require_positive_int("generation_id", generation_id)
-        _require_non_negative_int("initial_commit_seq", initial_commit_seq)
-
-        self._simulation = simulation
-        self._world = world
-        self._world_program = world_program
-        self._world_owned = world_mode
-        if world_mode:
-            world_tick = _world_counter(world, "tick")
-            _world_counter(world, "world_revision")
-            resolved_initial_tick = world_tick if initial_tick is None else initial_tick
-            _require_non_negative_int("initial_tick", resolved_initial_tick)
-            if resolved_initial_tick != world_tick:
-                raise ConfigurationError("initial_tick must match the Engine-owned world tick")
-        else:
-            resolved_initial_tick = 0 if initial_tick is None else initial_tick
-            _require_non_negative_int("initial_tick", resolved_initial_tick)
-
-        self._config = config if config is not None else RuntimeConfig()
+        if world is None:
+            raise ConfigurationError("world is required")
+        for method in (
+            "read_counters",
+            "write_counters",
+            "step",
+            "handle_input",
+            "build_checkpoint",
+            "build_commit",
+        ):
+            if not callable(getattr(program, method, None)):
+                raise ConfigurationError(f"program must provide {method}()")
+        if transport is not None and (
+            not callable(getattr(transport, "send", None))
+            or not callable(getattr(transport, "close", None))
+        ):
+            raise ConfigurationError("transport must provide send() and close()")
+        if recorder is not None and (
+            not callable(getattr(recorder, "append", None))
+            or not callable(getattr(recorder, "seal", None))
+        ):
+            raise ConfigurationError("recorder must provide append() and seal()")
+        self._config = config or RuntimeConfig()
         if not isinstance(self._config, RuntimeConfig):
-            raise ConfigurationError("config must be a RuntimeConfig")
-        if self._config.strict_authority_presentation:
-            if authority_commit is None:
-                raise ConfigurationError(
-                    "strict_authority_presentation requires an authority_commit callback"
-                )
-            if frame_export is None:
-                raise ConfigurationError(
-                    "strict_authority_presentation requires a complete frame_export callback"
-                )
-        self._clock = clock if clock is not None else SystemMonotonicClock()
+            raise ConfigurationError("config must be RuntimeConfig")
+        self._limits = self._config.engine_limits()
+        self._clock = clock or SystemMonotonicClock()
         if not callable(getattr(self._clock, "now", None)):
             raise ConfigurationError("clock must provide now()")
+        identity = stream_id or str(uuid.uuid4())
+        _text(identity, "stream_id")
+        _counter(initial_commit_seq, "initial_commit_seq")
 
-        self._frame_export = frame_export
-        self._authority_commit = authority_commit
-        self._scene_epoch = scene_epoch
-        self._bootstrap_id = bootstrap_id
-        self._generation_id = generation_id
+        self._world = world
+        self._program = program
+        self._transport = transport
+        self._recorder = recorder
+        self._stream_id = identity
         self._commit_seq = initial_commit_seq
-        self._initial_tick = resolved_initial_tick
-        self._current_tick = resolved_initial_tick
-        self._last_engine_commit: EngineCommit | None = None
-
-        origin = self._read_clock()
-        self._clock_origin = origin
-        self._last_clock_seconds = origin
-        self._display_phase = (
-            resolved_initial_tick * self._config.display_frames_per_second
-        ) % self._config.ticks_per_second
-
-        self._status = _RUNNING
-        self._active_tick: Optional[Tick] = None
-        self._ticks_attempted = 0
-        self._ticks_committed = 0
-        self._authority_commits_attempted = 0
-        self._authority_commits_succeeded = 0
-        self._display_samples_attempted = 0
-        self._display_samples_succeeded = 0
-        self._display_samples_failed = 0
-        self._consecutive_display_export_failures = 0
-        self._last_successful_frame_seq = 0
-        self._fatal_tick: Optional[Tick] = None
-        self._fatal_cause: Optional[BaseException] = None
-        self._last_display_export_error: Optional[BaseException] = None
-        self._last_authority_commit_error: Optional[BaseException] = None
-        self._last_authority_commit: Any = None
-        self._last_exported_frame: Any = None
-        self._presentation_epoch_valid = True
-
-        self._state_lock = threading.RLock()
-        self._pump_lock = threading.Lock()
+        counters = self._read_world_counters()
+        self._source_tick = counters.source_tick
+        self._world_revision = counters.world_revision
+        self._initial_tick = counters.source_tick
+        self._state = CREATED
+        self._clock_origin = 0.0
+        self._last_clock_seconds = 0.0
+        self._sessions: dict[Any, ClientSession] = {}
+        self._input_queue: deque[_QueuedInput] = deque()
+        self._pending_input_ids: dict[Any, dict[str, bytes]] = {}
+        self._retained: deque[PacketRef] = deque()
+        self._retained_bytes = 0
+        self._checkpoint_cache: PacketRef | None = None
+        self._world_codec: str | None = None
+        self._scene_bootstrap: SceneBootstrapView | None = None
+        self._scene_bootstrap_bytes: bytes | None = None
+        self._fatal_cause: BaseException | None = None
+        self._operation_lock = threading.Lock()
 
     @property
     def config(self) -> RuntimeConfig:
         return self._config
 
     @property
-    def current_tick(self) -> Tick:
-        with self._state_lock:
-            return self._current_tick
+    def stream_id(self) -> str:
+        return self._stream_id
 
     @property
-    def generation_id(self) -> int:
-        with self._state_lock:
-            return self._generation_id
+    def current_tick(self) -> int:
+        return self._source_tick
 
     @property
     def commit_seq(self) -> int:
-        with self._state_lock:
-            return self._commit_seq
-
-    @property
-    def last_engine_commit(self) -> EngineCommit | None:
-        with self._state_lock:
-            return self._last_engine_commit
-
-    @property
-    def scene_epoch(self) -> int:
-        return self._scene_epoch
-
-    @property
-    def bootstrap_id(self) -> int:
-        return self._bootstrap_id
-
-    @property
-    def last_successful_frame_seq(self) -> int:
-        with self._state_lock:
-            return self._last_successful_frame_seq
-
-    @property
-    def last_exported_frame(self) -> Any:
-        with self._state_lock:
-            return self._last_exported_frame
-
-    @property
-    def last_authority_commit(self) -> Any:
-        with self._state_lock:
-            return self._last_authority_commit
+        return self._commit_seq
 
     @property
     def health(self) -> RuntimeHealth:
-        with self._state_lock:
-            revision = (
-                _world_counter(self._world, "world_revision")
-                if self._world_owned
-                else None
-            )
-            return RuntimeHealth(
-                state=self._status,
-                current_tick=self._current_tick,
-                generation_id=self._generation_id,
-                commit_seq=self._commit_seq,
-                world_owned=self._world_owned,
-                world_revision=revision,
-                ticks_attempted=self._ticks_attempted,
-                ticks_committed=self._ticks_committed,
-                authority_commits_attempted=self._authority_commits_attempted,
-                authority_commits_succeeded=self._authority_commits_succeeded,
-                display_samples_attempted=self._display_samples_attempted,
-                display_samples_succeeded=self._display_samples_succeeded,
-                display_samples_failed=self._display_samples_failed,
-                consecutive_display_export_failures=self._consecutive_display_export_failures,
-                last_successful_frame_seq=self._last_successful_frame_seq,
-                presentation_epoch_valid=self._presentation_epoch_valid,
-                fatal_tick=self._fatal_tick,
-                fatal_cause=self._fatal_cause,
-                last_display_export_error=self._last_display_export_error,
-                last_authority_commit_error=self._last_authority_commit_error,
-            )
+        return RuntimeHealth(
+            self._state,
+            self._stream_id,
+            self._commit_seq,
+            self._source_tick,
+            self._world_revision,
+            len(self._sessions),
+            len(self._retained),
+            self._retained_bytes,
+            len(self._input_queue),
+            self._fatal_cause,
+            tuple(session.health for session in self._sessions.values()),
+        )
 
-    def inspect_world(self, reader: Callable[[Any], Any]) -> Any:
-        """Run a trusted synchronous read without releasing world ownership.
-
-        The generic Engine cannot prove that an arbitrary Python callback is
-        pure, but it fails closed if the callback changes either ordered world
-        counter.
-        """
-
-        if not callable(reader):
-            raise TypeError("world reader must be callable")
-        with _non_reentrant_pump(self._pump_lock):
-            with self._state_lock:
-                self._require_running()
-                if not self._world_owned:
-                    raise ConfigurationError("inspect_world requires world ownership mode")
-                tick = _world_counter(self._world, "tick")
-                revision = _world_counter(self._world, "world_revision")
+    def start(self, now_seconds: float | None = None) -> None:
+        with _serialized(self._operation_lock):
+            if self._state != CREATED:
+                raise RuntimeStateError("runtime can only start from CREATED")
+            now = self._clock_time() if now_seconds is None else _finite_time(now_seconds)
+            self._clock_origin = now
+            self._last_clock_seconds = now
             try:
-                result = reader(self._world)
-                _assert_world_counters(self._world, tick=tick, revision=revision)
+                packet = self._materialize_checkpoint()
+                if self._recorder is not None:
+                    self._recorder.append(packet.raw_bytes, checkpoint=True)
             except BaseException as exc:
-                try:
-                    _assert_world_counters(self._world, tick=tick, revision=revision)
-                except Exception as counter_exc:
-                    self._mark_fatal(tick, counter_exc)
-                    if not isinstance(exc, Exception):
-                        raise exc
-                    raise SimulationFatalError(
-                        "world inspection changed an authoritative counter"
-                    ) from exc
-                raise
-            return result
+                self._mark_fatal(exc)
+                if not isinstance(exc, Exception):
+                    raise
+                raise RuntimeFatalError("initial checkpoint failed") from exc
+            self._state = RUNNING
 
     def pump(self, now_seconds: float | None = None) -> PumpResult:
-        """Run overdue ticks in order, bounded by ``maximum_ticks_per_pump``."""
+        with _serialized(self._operation_lock):
+            self._require_running()
+            now = self._clock_time() if now_seconds is None else _finite_time(now_seconds)
+            if now < self._last_clock_seconds and not math.isclose(
+                now, self._last_clock_seconds, rel_tol=0, abs_tol=1e-12
+            ):
+                raise ConfigurationError("monotonic clock moved backwards")
+            self._last_clock_seconds = max(now, self._last_clock_seconds)
+            inputs_processed = 0
+            while self._input_queue and inputs_processed < self._config.maximum_inputs_per_pump:
+                queued = self._input_queue.popleft()
+                self._process_input(queued)
+                inputs_processed += 1
+                if self._state == FATAL:
+                    raise RuntimeFatalError("runtime became fatal while processing input") from self._fatal_cause
 
-        with _non_reentrant_pump(self._pump_lock):
-            with self._state_lock:
-                self._require_running()
-
-            now = self._read_clock() if now_seconds is None else _finite_seconds(now_seconds)
-            with self._state_lock:
-                if _clock_precedes(now, self._last_clock_seconds):
-                    raise ConfigurationError("monotonic clock moved backwards")
-                if now > self._last_clock_seconds:
-                    self._last_clock_seconds = now
-                start_tick = self._current_tick
-
-            elapsed = max(0.0, now - self._clock_origin)
-            scaled_ticks = elapsed * self._config.ticks_per_second
-            if not math.isfinite(scaled_ticks):
-                raise ConfigurationError("clock range is too large for scheduling")
-            target_offset = int(math.floor(scaled_ticks + 1.0e-9))
-            target_tick = self._initial_tick + target_offset
-            ticks_overdue = max(0, target_tick - start_tick)
-            tick_budget = min(ticks_overdue, self._config.maximum_ticks_per_pump)
-
-            ticks_attempted = 0
-            ticks_committed = 0
-            authority_commits_attempted = 0
-            authority_commits_succeeded = 0
-            samples_due = 0
-            samples_attempted = 0
-            samples_succeeded = 0
-            samples_failed = 0
-
-            for _ in range(tick_budget):
-                with self._state_lock:
-                    if self._status != _RUNNING:
-                        break
-                    tick = self._current_tick + 1
-                    self._active_tick = tick
-                    self._ticks_attempted += 1
-                    proposed_commit = self._proposed_commit(
-                        source_tick=tick,
-                        world_revision=(
-                            _world_counter(self._world, "world_revision") + 1
-                            if self._world_owned
-                            else self._commit_seq + 1
-                        ),
-                        cause="tick",
-                        causation_id=None,
-                    )
-                ticks_attempted += 1
-                context = TickContext(
-                    tick=tick,
-                    ticks_per_second=self._config.ticks_per_second,
-                    elapsed_ticks=1,
-                )
-
-                prior_tick: int | None = None
-                prior_revision: int | None = None
-                try:
-                    if self._world_owned:
-                        prior_tick = _world_counter(self._world, "tick")
-                        prior_revision = _world_counter(self._world, "world_revision")
-                        if prior_tick != tick - 1:
-                            raise RuntimeError("engine_world_tick_diverged")
-                        self._world.tick = tick
-                        assert self._world_program is not None
-                        program_result = self._world_program.step(self._world, context)
-                        if _world_counter(self._world, "tick") != tick:
-                            raise RuntimeError("world_program_must_not_write_tick")
-                        # Product internals may still increment revisions while
-                        # migrating. The Engine is the final and only externally
-                        # observable revision writer at the commit boundary.
-                        self._world.world_revision = proposed_commit.world_revision
-                    else:
-                        assert self._simulation is not None
-                        self._simulation.step(context)
-                        program_result = None
-                except BaseException as exc:
-                    if self._world_owned and prior_tick is not None and prior_revision is not None:
-                        self._world.tick = prior_tick
-                        self._world.world_revision = prior_revision
-                    self._mark_fatal(tick, exc)
-                    if not isinstance(exc, Exception):
-                        raise
-                    raise SimulationFatalError(
-                        f"gameplay raised while executing tick {tick}"
-                    ) from exc
-
-                with self._state_lock:
-                    self._current_tick = tick
-                    self._ticks_committed += 1
-                    self._commit_seq = proposed_commit.commit_seq
-                    self._last_engine_commit = proposed_commit
-                    self._display_phase += self._config.display_frames_per_second
-                    sample_is_due = self._display_phase >= self._config.ticks_per_second
-                    if sample_is_due:
-                        self._display_phase -= self._config.ticks_per_second
-                    status_after_step = self._status
-                ticks_committed += 1
-
-                authority_result = None
-                if self._authority_commit is not None:
-                    authority_commits_attempted += 1
-                    authority_result = self._attempt_authority_commit(
-                        AuthorityCommitRequest(
-                            simulation=self._active_program,
-                            context=context,
-                            engine_commit=proposed_commit,
-                            program_result=program_result,
-                            world=self._world if self._world_owned else None,
-                        )
-                    )
-                    authority_commits_succeeded += 1
-
-                if sample_is_due:
-                    samples_due += 1
-                    if (
-                        status_after_step == _RUNNING
-                        and self._has_export_strategy
-                        and self._presentation_epoch_valid
-                    ):
-                        samples_attempted += 1
-                        if self._attempt_display_export(
-                            tick,
-                            authority_result,
-                            engine_commit=proposed_commit,
-                        ):
-                            samples_succeeded += 1
-                        else:
-                            samples_failed += 1
-
-                with self._state_lock:
-                    self._active_tick = None
-                    if self._status != _RUNNING:
-                        break
-
-            with self._state_lock:
-                current_tick = self._current_tick
-                stopped = self._status == _STOPPED
-            ticks_remaining = max(0, target_tick - current_tick)
+            scaled = (now - self._clock_origin) * self._config.ticks_per_second
+            if not math.isfinite(scaled):
+                raise ConfigurationError("clock range is too large")
+            target_tick = self._initial_tick + int(math.floor(scaled + 1e-9))
+            overdue = max(0, target_tick - self._source_tick)
+            attempts = min(overdue, self._config.maximum_ticks_per_pump)
+            committed = 0
+            for _ in range(attempts):
+                self._commit_tick()
+                committed += 1
+            self._check_sessions()
+            remaining = max(0, target_tick - self._source_tick)
             return PumpResult(
-                clock_seconds=now,
-                target_tick=target_tick,
-                ticks_overdue=ticks_overdue,
-                ticks_attempted=ticks_attempted,
-                ticks_committed=ticks_committed,
-                authority_commits_attempted=authority_commits_attempted,
-                authority_commits_succeeded=authority_commits_succeeded,
-                ticks_remaining=ticks_remaining,
-                display_samples_due=samples_due,
-                display_samples_attempted=samples_attempted,
-                display_samples_succeeded=samples_succeeded,
-                display_samples_failed=samples_failed,
-                current_tick=current_tick,
-                caught_up=ticks_remaining == 0,
-                stopped=stopped,
+                now,
+                target_tick,
+                inputs_processed,
+                attempts,
+                committed,
+                remaining,
+                self._source_tick,
+                self._commit_seq,
+                remaining == 0,
             )
 
-    def execute_world_operation(
-        self,
-        operation: Callable[[Any, WorldOperationContext], WorldOperationResult],
-        *,
-        cause: str,
-        causation_id: str | None = None,
-        export_presentation: bool = True,
-    ) -> WorldOperationCommitResult:
-        """Serialize one command/query/control admission against the owned world.
-
-        The operation may build its immutable product batch while borrowing the
-        world. A changed result consumes exactly one Engine commit identity;
-        rejected commands, queries, ACKs and accepted no-ops consume none.
-        """
-
-        if not callable(operation):
-            raise TypeError("world operation must be callable")
-        if not isinstance(cause, str) or not cause:
-            raise ValueError("world operation cause must be non-empty")
-        if not isinstance(export_presentation, bool):
-            raise TypeError("export_presentation must be a boolean")
-        with _non_reentrant_pump(self._pump_lock):
-            with self._state_lock:
-                self._require_running()
-                if not self._world_owned:
-                    raise ConfigurationError(
-                        "execute_world_operation requires world ownership mode"
-                    )
-                if self._active_tick is not None:
-                    raise RuntimeBusyError("cannot execute a world operation during an active tick")
-                if (
-                    export_presentation
-                    and self._has_export_strategy
-                    and not self._config.strict_authority_presentation
-                ):
-                    raise ConfigurationError(
-                        "same-tick operation export requires strict_authority_presentation"
-                )
-                operation_tick = self._current_tick
-                previous_tick = _world_counter(self._world, "tick")
-                if previous_tick != operation_tick:
-                    exc = RuntimeError("engine_world_tick_diverged")
-                    self._mark_fatal(operation_tick, exc)
-                    raise SimulationFatalError(
-                        "Engine-owned world tick diverged before operation"
-                    ) from exc
-                previous_revision = _world_counter(self._world, "world_revision")
-                proposed = self._proposed_commit(
-                    source_tick=operation_tick,
-                    world_revision=previous_revision + 1,
-                    cause=cause,
-                    causation_id=causation_id,
-                )
-                context = WorldOperationContext(operation_tick, proposed)
-
+    def client_connected(self, client_id: Any) -> None:
+        with _serialized(self._operation_lock):
+            self._require_running()
+            if self._transport is None:
+                raise ConfigurationError("client connections require a transport")
+            if client_id in self._sessions:
+                self._drop_session(client_id, "client-replaced")
+            if len(self._sessions) >= self._config.maximum_clients:
+                try:
+                    self._transport.close(client_id, "maximum-clients")
+                except Exception:
+                    pass
+                return
             try:
-                outcome = operation(self._world, context)
+                checkpoint = self._checkpoint_for_client()
+                if checkpoint is None:
+                    try:
+                        self._transport.close(client_id, "global-retention-capacity")
+                    except Exception:
+                        pass
+                    return
+                session = ClientSession(
+                    client_id=client_id,
+                    stream_id=self._stream_id,
+                    baseline_commit_seq=self._commit_seq,
+                    current_tick=self._source_tick,
+                    send=self._transport.send,
+                    close=self._transport.close,
+                    limits=self._limits,
+                )
+                self._sessions[client_id] = session
+                self._pending_input_ids[client_id] = {}
+                session.enqueue(checkpoint, current_tick=self._source_tick)
+            except SessionError:
+                self._drop_session(client_id, "checkpoint-send-failed")
             except BaseException as exc:
-                # There is no generic, lossless rollback for an arbitrary
-                # product aggregate. Quarantine the borrowed instance so any
-                # partial mutation can never receive a later commit identity.
-                self._mark_fatal(operation_tick, exc)
+                self._mark_fatal(exc)
                 if not isinstance(exc, Exception):
                     raise
-                raise SimulationFatalError(
-                    "world operation raised before its Engine commit"
-                ) from exc
-            if not isinstance(outcome, WorldOperationResult):
-                exc = TypeError("world operation must return WorldOperationResult")
-                self._mark_fatal(operation_tick, exc)
-                raise SimulationFatalError(
-                    "world operation returned an invalid result"
-                ) from exc
+                raise RuntimeFatalError("client checkpoint materialization failed") from exc
 
+    def client_disconnected(self, client_id: Any) -> None:
+        with _serialized(self._operation_lock):
+            self._drop_session(client_id, "client-disconnected")
+
+    def receive_client_packet(self, client_id: Any, raw_bytes: Any) -> None:
+        with _serialized(self._operation_lock):
+            self._require_running()
+            session = self._sessions.get(client_id)
+            if session is None or session.closed:
+                return
             try:
-                _assert_world_counters(
-                    self._world,
-                    tick=previous_tick,
-                    revision=(
-                        proposed.world_revision
-                        if outcome.changed
-                        else previous_revision
-                    ),
-                )
-            except Exception as exc:
-                self._mark_fatal(operation_tick, exc)
-                raise SimulationFatalError(
-                    "world operation violated its reserved Engine counters"
-                ) from exc
-
-            if not outcome.changed:
-                return WorldOperationCommitResult(False, outcome.value, None)
-
-            with self._state_lock:
-                self._commit_seq = proposed.commit_seq
-                self._last_engine_commit = proposed
-            authority_result = None
-            if self._authority_commit is not None:
-                authority_result = self._attempt_authority_commit(
-                    AuthorityCommitRequest(
-                        simulation=self._active_program,
-                        context=TickContext(
-                            tick=operation_tick,
-                            ticks_per_second=self._config.ticks_per_second,
-                            elapsed_ticks=0,
-                        ),
-                        engine_commit=proposed,
-                        program_result=outcome.value,
-                        world=self._world,
+                packet = read_engine_packet(raw_bytes, limits=self._limits)
+                if packet.kind is PacketKind.ACK:
+                    session.acknowledge(
+                        stream_id=packet.header["stream_id"],
+                        commit_seq=packet.header["commit_seq"],
+                        current_tick=self._source_tick,
                     )
+                    return
+                if packet.kind is not PacketKind.INPUT:
+                    raise SessionError("client packet kind is not accepted")
+                attachment = packet.attachments[0]
+                if not isinstance(attachment.value, dict):
+                    raise SessionError("input payload must be a JSON object")
+                request = EngineInput(
+                    packet.header["input_id"],
+                    packet.header["observed_stream_id"],
+                    packet.header["observed_commit_seq"],
+                    packet.header["command"],
+                    attachment.value,
                 )
-            exported = None
-            if export_presentation and self._has_export_strategy:
-                if not self._attempt_display_export(
-                    operation_tick,
-                    authority_result,
-                    engine_commit=proposed,
-                ):
-                    raise PresentationExportError(
-                        "same-tick committed state export invalidated presentation epoch"
-                    )
-                exported = self.last_exported_frame
-            return WorldOperationCommitResult(
-                True,
-                outcome.value,
-                proposed,
-                authority_result,
-                exported,
-            )
+                raw = packet.raw_bytes
+                previous = session.previous_input(request.input_id, raw)
+                if previous is not None:
+                    if previous.response_bytes is not None:
+                        session.send_ephemeral(previous.response_bytes)
+                    return
+                pending = self._pending_input_ids[client_id]
+                pending_raw = pending.get(request.input_id)
+                if pending_raw is not None:
+                    if pending_raw != raw:
+                        raise SessionError("input-id-conflict")
+                    return
+                session.begin_input()
+                pending[request.input_id] = raw
+                self._input_queue.append(_QueuedInput(client_id, request, raw))
+            except (WireError, SessionError, ConfigurationError):
+                self._drop_session(client_id, "client-packet-invalid")
 
     def stop(self) -> None:
-        with self._state_lock:
-            if self._status in {_FATAL, _STOPPED}:
+        with _serialized(self._operation_lock):
+            if self._state == STOPPED:
                 return
-            self._status = _STOPPED
-
-    def rotate_generation(
-        self,
-        materialize: Callable[[Any, EngineCommit], Any],
-    ) -> GenerationCheckpointResult:
-        """Atomically materialize and install a fresh checkpoint generation.
-
-        The candidate identity is visible only to ``materialize`` until that
-        callback returns successfully and the Engine verifies that checkpoint
-        construction did not mutate the world's tick or revision.
-        """
-
-        if not callable(materialize):
-            raise TypeError("generation checkpoint materializer must be callable")
-        with _non_reentrant_pump(self._pump_lock):
-            with self._state_lock:
-                self._require_running()
-                if not self._world_owned:
-                    raise ConfigurationError(
-                        "rotate_generation requires world ownership mode"
-                    )
-                if self._active_tick is not None:
-                    raise RuntimeBusyError("cannot rotate generation during an active tick")
-                tick = _world_counter(self._world, "tick")
-                revision = _world_counter(self._world, "world_revision")
-                if tick != self._current_tick:
-                    exc = RuntimeError("engine_world_tick_diverged")
-                    self._mark_fatal(self._current_tick, exc)
-                    raise SimulationFatalError(
-                        "Engine-owned world tick diverged before checkpoint"
-                    ) from exc
-                checkpoint = EngineCommit(
-                    generation_id=self._generation_id + 1,
-                    commit_seq=0,
-                    source_tick=tick,
-                    world_revision=revision,
-                    cause="checkpoint",
-                    causation_id=None,
-                )
+            if self._state == FATAL:
+                raise RuntimeFatalError("fatal runtime cannot be normally stopped") from self._fatal_cause
             try:
-                value = materialize(self._world, checkpoint)
-                _assert_world_counters(self._world, tick=tick, revision=revision)
+                if self._recorder is not None and self._state == RUNNING:
+                    self._recorder.seal()
             except BaseException as exc:
-                self._mark_fatal(tick, exc)
+                self._mark_fatal(exc)
                 if not isinstance(exc, Exception):
                     raise
-                raise SimulationFatalError(
-                    "generation checkpoint materialization failed"
-                ) from exc
-            with self._state_lock:
-                self._require_running()
-                self._generation_id = checkpoint.generation_id
-                self._commit_seq = checkpoint.commit_seq
-                self._last_engine_commit = checkpoint
-            return GenerationCheckpointResult(checkpoint, value)
+                raise RuntimeFatalError("recorder seal failed") from exc
+            self._state = STOPPED
+            for client_id in tuple(self._sessions):
+                self._drop_session(client_id, "runtime-stopped")
+            self._input_queue.clear()
 
-    def activate_presentation_epoch(
-        self, *, scene_epoch: int, bootstrap_id: int
-    ) -> None:
-        _require_positive_int("scene_epoch", scene_epoch)
-        _require_positive_int("bootstrap_id", bootstrap_id)
-        with self._state_lock:
-            self._require_running()
-            if scene_epoch <= self._scene_epoch:
-                raise ConfigurationError("scene_epoch must increase")
-            if bootstrap_id <= self._bootstrap_id:
-                raise ConfigurationError("bootstrap_id must increase")
-            self._scene_epoch = scene_epoch
-            self._bootstrap_id = bootstrap_id
-            self._last_successful_frame_seq = 0
-            self._last_exported_frame = None
-            self._last_display_export_error = None
-            self._consecutive_display_export_failures = 0
-            self._presentation_epoch_valid = True
-
-    def export_committed_state(
-        self,
-        authority_commit: Any,
-        *,
-        engine_commit: EngineCommit | None = None,
-    ) -> Any:
-        """Export one complete frame at the current already-committed tick."""
-
-        with _non_reentrant_pump(self._pump_lock):
-            with self._state_lock:
-                self._require_running()
-                if self._active_tick is not None:
-                    raise RuntimeBusyError(
-                        "cannot export an external commit during an active tick"
-                    )
-                if not self._config.strict_authority_presentation:
-                    raise ConfigurationError(
-                        "export_committed_state requires strict_authority_presentation"
-                    )
-                if not self._has_export_strategy:
-                    raise ConfigurationError(
-                        "export_committed_state requires a display export strategy"
-                    )
-                if not self._presentation_epoch_valid:
-                    raise PresentationExportError("presentation epoch is invalid")
-                source_tick = self._current_tick
-                identity = engine_commit or self._last_engine_commit
-            if not self._attempt_display_export(
-                source_tick,
-                authority_commit,
-                engine_commit=identity,
-            ):
-                raise PresentationExportError(
-                    "same-tick committed state export invalidated presentation epoch"
-                )
-            return self.last_exported_frame
-
-    @property
-    def _active_program(self) -> GameSimulation | WorldProgram:
-        value = self._world_program if self._world_owned else self._simulation
-        assert value is not None
-        return value
-
-    @property
-    def _has_export_strategy(self) -> bool:
-        return self._frame_export is not None
-
-    def _proposed_commit(
-        self,
-        *,
-        source_tick: int,
-        world_revision: int,
-        cause: str,
-        causation_id: str | None,
-    ) -> EngineCommit:
-        return EngineCommit(
-            generation_id=self._generation_id,
-            commit_seq=self._commit_seq + 1,
-            source_tick=source_tick,
-            world_revision=world_revision,
-            cause=cause,
-            causation_id=causation_id,
+    def _commit_tick(self) -> None:
+        before = self._assert_world_counters()
+        proposed = EngineCommit(
+            self._stream_id,
+            self._commit_seq + 1,
+            self._source_tick + 1,
+            self._world_revision + 1,
+            "tick",
+            None,
         )
-
-    def _attempt_authority_commit(self, request: AuthorityCommitRequest) -> Any:
-        with self._state_lock:
-            self._authority_commits_attempted += 1
         try:
-            assert self._authority_commit is not None
-            result = self._authority_commit(request)
-            if self._config.strict_authority_presentation and result is None:
-                raise AuthorityCommitFatalError(
-                    "strict_authority_presentation authority_commit returned None"
-                )
+            self._write_world_counters(
+                WorldCounters(proposed.source_tick, before.world_revision)
+            )
+            mutation = self._program.step(
+                self._world,
+                TickContext(proposed, self._config.ticks_per_second),
+            )
+            if not isinstance(mutation, MutationResult) or mutation.status != "changed":
+                raise RuntimeError("tick step must return a changed MutationResult")
+            self._write_world_counters(
+                WorldCounters(proposed.source_tick, proposed.world_revision)
+            )
+            product = self._program.build_commit(
+                self._world,
+                mutation,
+                CommitContext(proposed, self._config.ticks_per_second),
+            )
+            packet = self._encode_product_commit(proposed, product, require_frame=True)
+            self._record_state_packet(packet.raw_bytes, checkpoint=False)
         except BaseException as exc:
-            with self._state_lock:
-                self._active_tick = None
-                self._status = _FATAL
-                self._fatal_tick = request.context.tick
-                self._fatal_cause = exc
-                self._last_authority_commit_error = exc
+            self._mark_fatal(exc)
             if not isinstance(exc, Exception):
                 raise
-            if isinstance(exc, AuthorityCommitFatalError):
-                raise
-            raise AuthorityCommitFatalError(
-                f"authority commit failed after tick {request.context.tick} committed"
-            ) from exc
-        with self._state_lock:
-            self._authority_commits_succeeded += 1
-            self._last_authority_commit = result
-        return result
+            raise RuntimeFatalError("tick transaction failed") from exc
+        self._publish_commit(proposed, packet)
 
-    def _attempt_display_export(
-        self,
-        source_tick: Tick,
-        authority_commit: Any = None,
-        *,
-        engine_commit: EngineCommit | None = None,
-    ) -> bool:
-        with self._state_lock:
-            frame_seq = self._last_successful_frame_seq + 1
-            self._display_samples_attempted += 1
-
-        request = PresentationExportRequest(
-            simulation=self._active_program,
-            scene_epoch=self._scene_epoch,
-            bootstrap_id=self._bootstrap_id,
-            source_tick=source_tick,
-            frame_seq=frame_seq,
-            ticks_per_second=self._config.ticks_per_second,
-            maximum_frame_nodes=self._config.maximum_frame_nodes,
-            maximum_frame_bytes=self._config.maximum_frame_bytes,
-            authority_commit=authority_commit,
-            engine_commit=engine_commit,
-        )
+    def _process_input(self, queued: _QueuedInput) -> None:
+        session = self._sessions.get(queued.client_id)
+        if session is None or session.closed:
+            return
+        pending = self._pending_input_ids.get(queued.client_id)
         try:
-            assert self._frame_export is not None
-            exported = self._frame_export(request)
-            if self._config.strict_authority_presentation and exported is None:
-                raise PresentationExportError(
-                    "strict_authority_presentation frame_export returned None"
+            before = self._assert_world_counters()
+            proposed = EngineCommit(
+                self._stream_id,
+                self._commit_seq + 1,
+                self._source_tick,
+                self._world_revision + 1,
+                "input",
+                queued.request.input_id,
+            )
+            stale = (
+                queued.request.observed_stream_id != self._stream_id
+                or queued.request.observed_commit_seq != self._commit_seq
+            )
+            mutation = self._program.handle_input(
+                self._world, queued.request, InputContext(proposed, stale)
+            )
+            if not isinstance(mutation, MutationResult):
+                raise RuntimeError("handle_input must return MutationResult")
+            if mutation.status != "changed":
+                after = self._read_world_counters()
+                if after != before:
+                    raise RuntimeError("unchanged input modified Engine counters")
+                response = encode_input_result(
+                    input_id=queued.request.input_id,
+                    status=mutation.status,
+                    reason_code=mutation.reason_code,
+                    result=mutation.result_payload,
+                    limits=self._limits,
                 )
-        except Exception as exc:
-            with self._state_lock:
-                self._display_samples_failed += 1
-                self._consecutive_display_export_failures += 1
-                self._last_display_export_error = exc
-                if self._config.strict_authority_presentation:
-                    self._presentation_epoch_valid = False
-            return False
+                outcome = InputOutcome(queued.raw_bytes, response, None)
+                session.remember_input(queued.request.input_id, outcome)
+                try:
+                    session.send_ephemeral(response)
+                except SessionError:
+                    self._drop_session(queued.client_id, "input-result-send-failed")
+                return
 
-        with self._state_lock:
-            self._display_samples_succeeded += 1
-            self._consecutive_display_export_failures = 0
-            self._last_successful_frame_seq = frame_seq
-            self._last_exported_frame = exported
-        return True
+            self._write_world_counters(
+                WorldCounters(proposed.source_tick, proposed.world_revision)
+            )
+            product = self._program.build_commit(
+                self._world,
+                mutation,
+                CommitContext(proposed, self._config.ticks_per_second),
+            )
+            packet = self._encode_product_commit(proposed, product, require_frame=False)
+            self._record_state_packet(packet.raw_bytes, checkpoint=False)
+            self._publish_commit(proposed, packet)
+            session = self._sessions.get(queued.client_id)
+            if session is not None and not session.closed:
+                session.remember_input(
+                    queued.request.input_id,
+                    InputOutcome(queued.raw_bytes, None, proposed.commit_seq),
+                )
+        except BaseException as exc:
+            self._mark_fatal(exc)
+            if not isinstance(exc, Exception):
+                raise
+            raise RuntimeFatalError("input transaction failed") from exc
+        finally:
+            if pending is not None:
+                pending.pop(queued.request.input_id, None)
+            current_session = self._sessions.get(queued.client_id)
+            if current_session is not None and current_session.health.pending_input_count:
+                current_session.finish_input()
 
-    def _mark_fatal(self, tick: int, exc: BaseException) -> None:
-        with self._state_lock:
-            self._active_tick = None
-            self._status = _FATAL
-            self._fatal_tick = tick
-            self._fatal_cause = exc
+    def _encode_product_commit(
+        self, proposed: EngineCommit, product: Any, *, require_frame: bool
+    ) -> PacketRef:
+        if not isinstance(product, ProductCommit):
+            raise RuntimeError("build_commit must return ProductCommit")
+        if self._world_codec is None or self._scene_bootstrap is None:
+            raise RuntimeError("stream publication contract is not initialized")
+        if product.world_codec != self._world_codec:
+            raise RuntimeError("world_codec changed within one stream")
+        if require_frame and product.scene_frame is None:
+            raise RuntimeError("tick commit must include a complete scene frame")
+        validate_json_patch(
+            product.world_patch,
+            maximum_changes=self._limits.maximum_world_patch_changes,
+            maximum_path_segments=self._limits.maximum_json_path_segments,
+            maximum_json_depth=self._limits.maximum_json_depth,
+        )
+        if product.scene_frame is not None:
+            frame = parse_scene_frame(
+                product.scene_frame,
+                source_tick=proposed.source_tick,
+                maximum_frame_bytes=min(
+                    self._scene_bootstrap.header.maximum_frame_bytes,
+                    self._limits.maximum_attachment_bytes,
+                ),
+                maximum_frame_nodes=self._scene_bootstrap.header.maximum_dynamic_nodes,
+            )
+            validate_scene_frame_against_bootstrap(frame, self._scene_bootstrap)
+        raw = encode_commit(
+            stream_id=proposed.stream_id,
+            commit_seq=proposed.commit_seq,
+            source_tick=proposed.source_tick,
+            world_revision=proposed.world_revision,
+            cause=proposed.cause,
+            causation_id=proposed.causation_id,
+            world_codec=product.world_codec,
+            world_patch=product.world_patch,
+            scene_frame=product.scene_frame,
+            events=product.events,
+            limits=self._limits,
+        )
+        return PacketRef(
+            raw,
+            proposed.stream_id,
+            proposed.commit_seq,
+            proposed.source_tick,
+            proposed.world_revision,
+            False,
+        )
 
-    def _read_clock(self) -> float:
-        try:
-            value = float(self._clock.now())
-        except (TypeError, ValueError, OverflowError) as exc:
-            raise ConfigurationError("clock.now() must return finite seconds") from exc
-        if not math.isfinite(value):
-            raise ConfigurationError("clock.now() must return finite seconds")
+    def _materialize_checkpoint(self) -> PacketRef:
+        before = self._assert_world_counters()
+        context = CheckpointContext(
+            self._stream_id,
+            self._commit_seq,
+            self._source_tick,
+            self._world_revision,
+            self._config.ticks_per_second,
+        )
+        product = self._program.build_checkpoint(self._world, context)
+        if not isinstance(product, ProductCheckpoint):
+            raise RuntimeError("build_checkpoint must return ProductCheckpoint")
+        if self._read_world_counters() != before:
+            raise RuntimeError("build_checkpoint modified Engine counters")
+        bootstrap = parse_scene_bootstrap(
+            product.scene_bootstrap,
+            maximum_bootstrap_bytes=self._limits.maximum_attachment_bytes,
+        )
+        frame = parse_scene_frame(
+            product.scene_frame,
+            source_tick=self._source_tick,
+            maximum_frame_bytes=min(
+                bootstrap.header.maximum_frame_bytes,
+                self._limits.maximum_attachment_bytes,
+            ),
+            maximum_frame_nodes=bootstrap.header.maximum_dynamic_nodes,
+        )
+        validate_scene_frame_against_bootstrap(frame, bootstrap)
+        bootstrap_bytes = bytes(product.scene_bootstrap)
+        if self._world_codec is not None and product.world_codec != self._world_codec:
+            raise RuntimeError("world_codec changed within one stream")
+        if (
+            self._scene_bootstrap_bytes is not None
+            and bootstrap_bytes != self._scene_bootstrap_bytes
+        ):
+            raise RuntimeError("scene bootstrap changed within one stream")
+        raw = encode_checkpoint(
+            stream_id=self._stream_id,
+            commit_seq=self._commit_seq,
+            source_tick=self._source_tick,
+            world_revision=self._world_revision,
+            world_codec=product.world_codec,
+            world_snapshot=product.world_snapshot,
+            scene_bootstrap=product.scene_bootstrap,
+            scene_frame=product.scene_frame,
+            limits=self._limits,
+        )
+        if self._world_codec is None:
+            self._world_codec = product.world_codec
+            self._scene_bootstrap = bootstrap
+            self._scene_bootstrap_bytes = bootstrap_bytes
+        return PacketRef(
+            raw,
+            self._stream_id,
+            self._commit_seq,
+            self._source_tick,
+            self._world_revision,
+            True,
+        )
+
+    def _record_state_packet(self, raw_bytes: bytes, *, checkpoint: bool) -> None:
+        if self._recorder is not None:
+            self._recorder.append(raw_bytes, checkpoint=checkpoint)
+
+    def _publish_commit(self, proposed: EngineCommit, packet: PacketRef) -> None:
+        self._commit_seq = proposed.commit_seq
+        self._source_tick = proposed.source_tick
+        self._world_revision = proposed.world_revision
+        self._checkpoint_cache = None
+        current_retained = self._retain_packet(packet)
+        if not current_retained:
+            for client_id in tuple(self._sessions):
+                self._drop_session(client_id, "global-retention-capacity")
+        else:
+            for client_id, session in tuple(self._sessions.items()):
+                try:
+                    session.enqueue(packet, current_tick=self._source_tick)
+                except SessionError:
+                    self._drop_session(client_id, "session-backpressure")
+        interval = self._config.recording_checkpoint_interval_commits
+        if self._recorder is not None and interval and self._commit_seq % interval == 0:
+            try:
+                checkpoint = self._materialize_checkpoint()
+                self._record_state_packet(checkpoint.raw_bytes, checkpoint=True)
+            except BaseException as exc:
+                self._mark_fatal(exc)
+                if not isinstance(exc, Exception):
+                    raise
+                raise RuntimeFatalError("periodic recording checkpoint failed") from exc
+
+    def _checkpoint_for_client(self) -> PacketRef | None:
+        cached = self._checkpoint_cache
+        if (
+            cached is not None
+            and cached.commit_seq == self._commit_seq
+            and cached.source_tick == self._source_tick
+            and cached.world_revision == self._world_revision
+            and any(item is cached for item in self._retained)
+        ):
+            return cached
+        checkpoint = self._materialize_checkpoint()
+        if not self._retain_packet(checkpoint):
+            return None
+        self._checkpoint_cache = checkpoint
+        return checkpoint
+
+    def _retain_packet(self, packet: PacketRef) -> bool:
+        if any(item is packet for item in self._retained):
+            return True
+        self._retained.append(packet)
+        self._retained_bytes += packet.byte_length
+        evicted: list[PacketRef] = []
+        while (
+            len(self._retained) > self._config.maximum_global_retained_packets
+            or self._retained_bytes > self._config.maximum_global_retained_bytes
+        ):
+            removed = self._retained.popleft()
+            self._retained_bytes -= removed.byte_length
+            evicted.append(removed)
+            if removed is self._checkpoint_cache:
+                self._checkpoint_cache = None
+        if evicted:
+            for client_id, session in tuple(self._sessions.items()):
+                if any(session.references_packet(removed) for removed in evicted):
+                    self._drop_session(client_id, "global-retention-evicted")
+        return any(retained is packet for retained in self._retained)
+
+    def _check_sessions(self) -> None:
+        for client_id, session in tuple(self._sessions.items()):
+            try:
+                session.check_timeout(current_tick=self._source_tick)
+                session.flush(current_tick=self._source_tick)
+            except SessionError:
+                self._drop_session(client_id, "session-timeout")
+
+    def _drop_session(self, client_id: Any, reason: str) -> None:
+        session = self._sessions.pop(client_id, None)
+        self._pending_input_ids.pop(client_id, None)
+        if self._input_queue:
+            self._input_queue = deque(
+                queued for queued in self._input_queue if queued.client_id != client_id
+            )
+        if session is not None:
+            session.close(reason)
+
+    def _read_world_counters(self) -> WorldCounters:
+        value = self._program.read_counters(self._world)
+        if not isinstance(value, WorldCounters):
+            raise ConfigurationError("read_counters must return WorldCounters")
         return value
 
+    def _write_world_counters(self, counters: WorldCounters) -> None:
+        self._program.write_counters(self._world, counters)
+        if self._read_world_counters() != counters:
+            raise RuntimeError("write_counters did not install the requested counters")
+
+    def _assert_world_counters(self) -> WorldCounters:
+        value = self._read_world_counters()
+        expected = WorldCounters(self._source_tick, self._world_revision)
+        if value != expected:
+            raise RuntimeError("authoritative world counters diverged from Engine")
+        return value
+
+    def _clock_time(self) -> float:
+        try:
+            return _finite_time(self._clock.now())
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ConfigurationError("clock.now() must return finite seconds") from exc
+
     def _require_running(self) -> None:
-        if self._status == _FATAL:
-            tick = self._fatal_tick
-            message = "simulation is fatal"
-            if tick is not None:
-                message += f" at tick {tick}"
-            raise SimulationFatalError(message) from self._fatal_cause
-        if self._status == _STOPPED:
-            raise RuntimeStoppedError("runtime has been stopped")
+        if self._state == FATAL:
+            raise RuntimeFatalError("runtime is fatal") from self._fatal_cause
+        if self._state != RUNNING:
+            raise RuntimeStateError("runtime is not running")
+
+    def _require_available(self) -> None:
+        if self._state == FATAL:
+            raise RuntimeFatalError("runtime is fatal") from self._fatal_cause
+        if self._state == STOPPED:
+            raise RuntimeStateError("runtime is stopped")
+
+    def _mark_fatal(self, exc: BaseException) -> None:
+        self._state = FATAL
+        self._fatal_cause = exc
+        for client_id in tuple(self._sessions):
+            self._drop_session(client_id, "runtime-fatal")
+        close_incomplete = getattr(self._recorder, "close_incomplete", None)
+        if callable(close_incomplete):
+            try:
+                close_incomplete()
+            except Exception:
+                pass
 
 
-def _world_counter(world: Any, name: str) -> int:
-    value = getattr(world, name, None)
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise ConfigurationError(f"Engine-owned world.{name} must be a non-negative integer")
+def _counter(value: Any, field: str) -> int:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value < 0
+        or value > MAXIMUM_SAFE_INTEGER
+    ):
+        raise ConfigurationError(f"{field} must be a non-negative safe integer")
     return value
 
 
-def _assert_world_counters(world: Any, *, tick: int, revision: int) -> None:
-    if (
-        _world_counter(world, "tick") != tick
-        or _world_counter(world, "world_revision") != revision
-    ):
-        raise RuntimeError("engine_world_counters_diverged")
-
-
-def _require_positive_int(name: str, value: object) -> None:
+def _positive(value: Any, field: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        raise ConfigurationError(f"{name} must be a positive integer")
+        raise ConfigurationError(f"{field} must be a positive integer")
+    return value
 
 
-def _require_non_negative_int(name: str, value: object) -> None:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise ConfigurationError(f"{name} must be a non-negative integer")
+def _text(value: Any, field: str) -> str:
+    if not isinstance(value, str) or not value or value.strip() != value:
+        raise ConfigurationError(f"{field} must be a non-empty canonical string")
+    return value
 
 
-def _finite_seconds(value: Any) -> float:
+def _nonempty_bytes(value: Any, field: str) -> bytes:
     try:
-        result = float(value)
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise ConfigurationError("pump time must be finite seconds") from exc
-    if not math.isfinite(result):
-        raise ConfigurationError("pump time must be finite seconds")
+        result = bytes(value)
+    except (TypeError, ValueError) as exc:
+        raise ConfigurationError(f"{field} must be bytes-like") from exc
+    if not result:
+        raise ConfigurationError(f"{field} must not be empty")
     return result
 
 
-def _clock_precedes(value: float, previous: float) -> bool:
-    return value < previous and not math.isclose(
-        value, previous, rel_tol=0.0, abs_tol=1.0e-12
-    )
+def _finite_time(value: Any) -> float:
+    result = float(value)
+    if not math.isfinite(result):
+        raise ConfigurationError("time must be finite seconds")
+    return result
 
 
 @contextmanager
-def _non_reentrant_pump(lock: Any) -> Any:
+def _serialized(lock: threading.Lock):
     if not lock.acquire(blocking=False):
-        raise RuntimeBusyError("runtime pump is already active")
+        raise RuntimeBusyError("runtime operation is already active")
     try:
         yield
     finally:
@@ -1038,17 +1010,25 @@ def _non_reentrant_pump(lock: Any) -> Any:
 
 
 __all__ = [
-    "AuthorityCommitCallback",
-    "AuthorityCommitRequest",
+    "CREATED",
+    "FATAL",
+    "RUNNING",
+    "STOPPED",
+    "CheckpointContext",
+    "CommitContext",
     "EngineCommit",
-    "FrameExportCallback",
-    "GenerationCheckpointResult",
-    "PresentationExportRequest",
+    "EngineInput",
+    "EngineProgram",
+    "EngineRecorder",
+    "EngineTransport",
+    "InputContext",
+    "MutationResult",
+    "ProductCheckpoint",
+    "ProductCommit",
     "PumpResult",
     "RuntimeConfig",
     "RuntimeHealth",
     "SceneEngineRuntime",
-    "WorldOperationCommitResult",
-    "WorldOperationContext",
-    "WorldOperationResult",
+    "TickContext",
+    "WorldCounters",
 ]

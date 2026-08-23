@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "scene-engine"
-version = "0.4.0+worldstate.test.1"
-description = "Generic tick runtime, presentation protocol, display, archive, and Replay core"
+version = "0.5.0"
+description = "One fixed-step runtime, unified packet stream, atomic client, and packet log"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = []

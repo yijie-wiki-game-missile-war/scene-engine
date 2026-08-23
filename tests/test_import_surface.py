@@ -1,79 +1,55 @@
 from __future__ import annotations
 
+import pkgutil
+
 import scene_engine
-import scene_engine.presentation_frame as presentation_frame
-import scene_engine.scene_bootstrap as scene_bootstrap
-import scene_engine.runtime as runtime
 
 
-def test_root_package_has_one_minimal_explicit_runtime_surface() -> None:
-    assert scene_engine.__all__ == [
-        "AuthorityCommitFatalError",
+def test_python_root_exports_are_exact() -> None:
+    assert set(scene_engine.__all__) == {
+        "CheckpointContext",
+        "CommitContext",
         "ConfigurationError",
+        "EngineCommit",
+        "EngineInput",
+        "EngineProgram",
+        "EngineRecorder",
+        "EngineTransport",
+        "InputContext",
+        "JsonTreeError",
         "ManualClock",
-        "PresentationExportError",
+        "MutationResult",
+        "ProductCheckpoint",
+        "ProductCommit",
+        "PumpResult",
+        "RecordingError",
         "RuntimeBusyError",
         "RuntimeConfig",
-        "RuntimeStoppedError",
+        "RuntimeFatalError",
+        "RuntimeHealth",
+        "RuntimeStateError",
+        "SceneCodecError",
         "SceneEngineError",
         "SceneEngineRuntime",
-        "SimulationFatalError",
-    ]
-    for internal_name in (
-        "AuthorityCommitRequest",
-        "PresentationNodeV3",
-        "PresentationArchiveWriter",
-        "PresentationIdAllocator",
-        "encode_presentation_frame_v3",
-        "parse_scene_bootstrap_v3",
-    ):
-        assert internal_name not in scene_engine.__dict__
+        "SessionBackpressureError",
+        "SessionError",
+        "SystemMonotonicClock",
+        "TickContext",
+        "WireError",
+        "WorldCounters",
+        "__version__",
+    }
+    assert scene_engine.__version__ == "0.5.0"
 
 
-def test_semantic_codec_modules_have_explicit_stable_exports() -> None:
-    assert runtime.__all__ == [
-        "AuthorityCommitCallback",
-        "AuthorityCommitRequest",
-        "EngineCommit",
-        "FrameExportCallback",
-        "GenerationCheckpointResult",
-        "PresentationExportRequest",
-        "PumpResult",
-        "RuntimeConfig",
-        "RuntimeHealth",
-        "SceneEngineRuntime",
-        "WorldOperationCommitResult",
-        "WorldOperationContext",
-        "WorldOperationResult",
-    ]
-    assert presentation_frame.__all__ == [
-        "OpaquePayloadV3",
-        "PresentationEventV3",
-        "PresentationFrameHeaderV3",
-        "PresentationFrameV3View",
-        "PresentationNodeRecordV3",
-        "PresentationNodeV3",
-        "PresentationSectionEntryV3",
-        "PresentationTreeValidationV3",
-        "PresentationWorldPoseV3",
-        "encode_presentation_frame_v3",
-        "parse_presentation_frame_v3",
-        "validate_presentation_frame_tree",
-    ]
-    assert scene_bootstrap.__all__ == [
-        "AnimationStateRecordV3",
-        "EngineSessionIdentityV3",
-        "OpaquePayloadV3",
-        "PresentationNodeRecordV3",
-        "PresentationNodeV3",
-        "PresentationSectionEntryV3",
-        "PresentationTreeValidationV3",
-        "PresentationWorldPoseV3",
-        "SceneBootstrapHeaderV3",
-        "SceneBootstrapV3View",
-        "SceneMetadataV3",
-        "VisualTypeRecordV3",
-        "encode_scene_bootstrap_v3",
-        "parse_scene_bootstrap_v3",
-        "validate_presentation_node_tree",
-    ]
+def test_python_package_contains_only_current_modules() -> None:
+    assert {module.name for module in pkgutil.iter_modules(scene_engine.__path__)} == {
+        "clock",
+        "errors",
+        "json_tree",
+        "recording",
+        "runtime",
+        "scene",
+        "session",
+        "wire",
+    }

@@ -1,61 +1,60 @@
-"""Public exception hierarchy for the scene engine."""
+"""Public Scene Engine error hierarchy."""
 
 
 class SceneEngineError(Exception):
-    """Base class for engine failures."""
+    """Base class for deterministic Scene Engine failures."""
 
 
 class ConfigurationError(SceneEngineError, ValueError):
-    """Runtime or resource limits are invalid."""
+    """Invalid static configuration or construction input."""
 
 
-class RuntimeStoppedError(SceneEngineError, RuntimeError):
-    """An operation requires a running runtime."""
+class RuntimeStateError(SceneEngineError, RuntimeError):
+    """An operation is not valid in the runtime's current state."""
 
 
-class RuntimeBusyError(SceneEngineError, RuntimeError):
-    """A caller attempted to enter pump while another pump was active."""
+class RuntimeBusyError(RuntimeStateError):
+    """A serialized runtime operation attempted to re-enter the runtime."""
 
 
-class SimulationFatalError(SceneEngineError, RuntimeError):
-    """Gameplay raised from a tick and the runtime became permanently fatal."""
+class RuntimeFatalError(RuntimeStateError):
+    """The authoritative runtime is permanently quarantined."""
 
 
-class AuthorityCommitFatalError(SimulationFatalError):
-    """Mandatory authority publication failed after gameplay committed a tick."""
+class WireError(SceneEngineError, ValueError):
+    """An Engine packet is malformed or violates a wire invariant."""
 
 
-class PresentationExportError(SceneEngineError, RuntimeError):
-    """An adapter could not export a complete presentation sample."""
+class JsonTreeError(SceneEngineError, ValueError):
+    """A JSON snapshot or patch is malformed or cannot be applied."""
 
 
-class SceneBootstrapError(SceneEngineError, ValueError):
-    """A SceneBootstrap violates the ordered presentation profile."""
+class SceneCodecError(SceneEngineError, ValueError):
+    """A scene bootstrap or complete frame body is malformed."""
 
 
-class PresentationTreeError(SceneEngineError, ValueError):
-    """A V3 parent/local presentation tree is invalid."""
+class SessionError(SceneEngineError, RuntimeError):
+    """A client session violated ordering, ACK, or resource limits."""
 
 
-class PresentationFrameError(SceneEngineError, ValueError):
-    """A schema-V3 presentation frame is malformed or non-canonical."""
+class SessionBackpressureError(SessionError):
+    """A session exceeded a configured pending or in-flight limit."""
 
 
-class PresentationControlError(SceneEngineError, ValueError):
-    """A presentation control/correlation envelope is invalid."""
+class RecordingError(SceneEngineError, RuntimeError):
+    """A packet log could not be written, verified, or sealed."""
 
 
-class PresentationTransportError(SceneEngineError, RuntimeError):
-    """An ordered presentation session violated flow-control state."""
-
-
-class PresentationBackpressureError(PresentationTransportError):
-    """A viewer queue reached a hard frame or byte limit."""
-
-
-class PresentationArchiveError(SceneEngineError, RuntimeError):
-    """A presentation archive stream or identity is invalid."""
-
-
-class PacketError(SceneEngineError, ValueError):
-    """A transport packet is malformed or unsupported."""
+__all__ = [
+    "ConfigurationError",
+    "JsonTreeError",
+    "RecordingError",
+    "RuntimeBusyError",
+    "RuntimeFatalError",
+    "RuntimeStateError",
+    "SceneCodecError",
+    "SceneEngineError",
+    "SessionBackpressureError",
+    "SessionError",
+    "WireError",
+]

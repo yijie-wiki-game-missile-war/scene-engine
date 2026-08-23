@@ -1,6 +1,7 @@
 {
   "name": "@scene-engine/renderer-three",
-  "version": "0.4.0",
+  "version": "0.5.0",
+  "description": "Rebuildable Three.js backend for the sole Scene Engine client tree",
   "type": "module",
   "sideEffects": false,
   "files": ["src"],

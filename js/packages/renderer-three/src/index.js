@@ -1,25 +1,24 @@
 const NODE_VISIBLE = 1;
 
-export const THREE_PRESENTATION_BACKEND_SCHEMA =
-  'scene-engine-three-presentation-backend-v3@1';
+export const THREE_SCENE_BACKEND_SCHEMA = 'scene-engine-three-backend@1';
 
-export class ThreePresentationBackendError extends Error {
+export class ThreeSceneBackendError extends Error {
   constructor(code, message = code) {
     super(message);
-    this.name = 'ThreePresentationBackendError';
+    this.name = 'ThreeSceneBackendError';
     this.code = code;
   }
 }
 
 /**
- * Rebuildable Three.js projection of the current SceneDisplayEngine view.
+ * Rebuildable Three.js projection of the current SceneEngineClient view.
  *
- * The backend deliberately retains no presentation node/entity records. Its
+ * The backend deliberately retains no scene node/entity records. Its
  * resident Map contains only renderer mechanics: anchors, visual handles,
  * equality fingerprints and resource request tokens. All hierarchy, pose and
  * current profile/animation values are read from the supplied Engine view.
  */
-export class ThreePresentationBackend {
+export class ThreeSceneBackend {
   constructor({
     THREE = null,
     createAnchor = null,
@@ -46,7 +45,7 @@ export class ThreePresentationBackend {
       if (value !== null && typeof value !== 'function') fail(`${name}-port-invalid`);
     }
 
-    this.schema = THREE_PRESENTATION_BACKEND_SCHEMA;
+    this.schema = THREE_SCENE_BACKEND_SCHEMA;
     this.root = root;
     this.createAnchorPort = anchorFactory;
     this.resolveFactory = resolveFactory;
@@ -74,6 +73,7 @@ export class ThreePresentationBackend {
   apply(plan, view) {
     this.requireOpen();
     assertPlanView(plan, view);
+    if (plan.kind !== 'frame') fail('three-frame-plan-invalid');
     this.requireGeneration(view.generation);
     const dirty = this.applyPlan(plan, view);
     if (dirty) this.finishMatrixBatch();
@@ -88,6 +88,7 @@ export class ThreePresentationBackend {
     for (const step of steps) {
       if (!step?.plan || !step?.view) fail('three-frame-batch-invalid');
       assertPlanView(step.plan, step.view);
+      if (step.plan.kind !== 'frame') fail('three-frame-plan-invalid');
       this.requireGeneration(step.view.generation);
     }
     let dirty = false;
@@ -100,11 +101,16 @@ export class ThreePresentationBackend {
     assertSceneView(view);
     let dirty = this.clearRecords('renderer-rebuild');
     this.generation = integerGeneration(view.generation);
+    const created = [];
     for (let index = 0; index < view.nodeCount; index += 1) {
       const node = view.nodeAt(index);
       const record = this.createRecord(node);
-      this.startVisualCreate(record, node, profileFor(view, node));
+      created.push({ node, record });
       dirty = true;
+    }
+    for (const { node, record } of created) this.reparent(record, node);
+    for (const { node, record } of created) {
+      this.startVisualCreate(record, node, profileFor(view, node));
     }
     if (dirty) this.finishMatrixBatch();
   }
@@ -146,11 +152,16 @@ export class ThreePresentationBackend {
     for (const displayId of plan.removeIds) {
       dirty = this.removeRecord(displayId, 'node-removed') || dirty;
     }
+    const created = [];
     for (const displayId of plan.createIds) {
       const node = requireNode(view, displayId);
       const record = this.createRecord(node);
-      this.startVisualCreate(record, node, profileFor(view, node));
+      created.push({ node, record });
       dirty = true;
+    }
+    for (const { node, record } of created) this.reparent(record, node);
+    for (const { node, record } of created) {
+      this.startVisualCreate(record, node, profileFor(view, node));
     }
     for (const displayId of plan.visualReplaceIds) {
       const node = requireNode(view, displayId);
@@ -197,11 +208,10 @@ export class ThreePresentationBackend {
     if (this.records.has(displayId)) fail('three-node-duplicate');
     const anchor = this.createAnchorPort();
     assertAnchor(anchor);
-    anchor.name = `PresentationAnchor:${displayId}`;
+    anchor.name = `SceneAnchor:${displayId}`;
     anchor.matrixAutoUpdate = false;
     writeLocalPose(anchor, node);
     anchor.visible = Boolean(node.flags & NODE_VISIBLE);
-    this.resolveParent(node.parentDisplayId).add(anchor);
     const record = {
       abortController: null,
       anchor,
@@ -485,13 +495,17 @@ export class ThreePresentationBackend {
   }
 }
 
-export function createThreePresentationBackend(options) {
-  return new ThreePresentationBackend(options);
+export function createThreeSceneBackend(options) {
+  return new ThreeSceneBackend(options);
 }
 
 function assertPlanView(plan, view) {
   assertSceneView(view);
-  if (!plan || integerGeneration(plan.generation) !== integerGeneration(view.generation)) {
+  if (!plan || integerGeneration(plan.generation) !== integerGeneration(view.generation)
+      || nonnegativeInteger(plan.commitSeq, 'commitSeq')
+        !== nonnegativeInteger(view.commitSeq, 'commitSeq')
+      || nonnegativeInteger(plan.sourceTick, 'sourceTick')
+        !== nonnegativeInteger(view.sourceTick, 'sourceTick')) {
     fail('three-plan-view-mismatch');
   }
   for (const field of [
@@ -515,6 +529,8 @@ function assertSceneView(view) {
     fail('three-scene-view-invalid');
   }
   integerGeneration(view.generation);
+  nonnegativeInteger(view.commitSeq, 'commitSeq');
+  nonnegativeInteger(view.sourceTick, 'sourceTick');
 }
 
 function assertAnchor(anchor) {
@@ -665,5 +681,5 @@ function isThenable(value) {
 }
 
 function fail(code, message = code) {
-  throw new ThreePresentationBackendError(code, message);
+  throw new ThreeSceneBackendError(code, message);
 }
