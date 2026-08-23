@@ -49,10 +49,10 @@ The wheel and archives installed in the three consumers are byte-identical to th
 
 | Gate | Result |
 | --- | --- |
-| Scene Engine Python | 59 passed |
+| Scene Engine Python | 60 passed |
 | Scene Engine JavaScript | client 16 passed; renderer 9 passed |
 | Scene Engine cutover verifier | passed |
-| python-game | 219 passed in 480.03 seconds |
+| python-game | 220 passed (219 migration tests plus the source-package regression) |
 | Arts | `npm run check` passed; `npm run build` passed |
 | Replay | 23 passed |
 | 500-node product packet log | 602 byte-exact records, 2 checkpoints, 600 commits, every selected frame has 500 dynamic nodes |
@@ -98,12 +98,29 @@ Evidence files:
 - `../python-game/docs/evidence/runtime-500.json`
   (`ec8c179419490547dce7d0c8270ec3118a95d2eae7e755762940b320c32e91b3`)
 
+## Source-only delivery
+
+The handoff archive is deliberately a small source package rather than a runtime asset bundle. It contains source code,
+tests, lockfiles, contracts, code-adjacent documentation, and acceptance evidence from the four migrated repositories plus
+the workspace report. It excludes Git metadata, dependency/install trees, build and distribution output, Replay recordings
+and deployment staging, virtual environments, caches, nested archives, and all media assets.
+
+The archive was extracted outside every repository with no `.git` directories and with inherited Python and Node module
+paths cleared. Scene Engine passed 60 Python tests, 4 benchmark-entry tests, 16 client tests, 9 renderer tests, and the
+cutover verifier. python-game passed 220 tests. Replay passed 23 tests. The Arts source passed its architecture, workspace,
+authoring, manifest, transform, projection, lifecycle, controller, backend, and summary gates; the 5,000-commit controller
+soak retained one world and acknowledged every commit.
+
+Because media is intentionally absent, the extracted source package does not claim a standalone Arts production build or
+runtime-projection check. Those two media-dependent gates passed against the full working tree before packaging. The
+archive's generated `SOURCE-MANIFEST.json` records every included path and SHA-256 digest.
+
 ## Commit and rollback tuple
 
 | Repository | Tested source commit | Pre-cutover rollback commit |
 | --- | --- | --- |
-| scene-engine | `be1575d` | `60fc064` |
-| python-game | `aeb184f` | `93b03f8` |
+| scene-engine | `ad6a023` | `60fc064` |
+| python-game | `b29ba57` | `93b03f8` |
 | Arts | `67b4ba6` | `790f322` |
 | Replay | `001f010` | `29e220c` |
 
