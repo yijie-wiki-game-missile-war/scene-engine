@@ -470,9 +470,12 @@ class SceneEngineRuntime:
             self._clock_origin = now
             self._last_clock_seconds = now
             try:
-                packet = self._materialize_checkpoint()
-                if self._recorder is not None:
-                    self._recorder.append(packet.raw_bytes, checkpoint=True)
+                checkpoint, retained = self._get_or_build_current_checkpoint()
+                if not retained:
+                    raise RuntimeError(
+                        "initial checkpoint exceeds global retention capacity"
+                    )
+                self._record_state_packet(checkpoint.raw_bytes, checkpoint=True)
             except BaseException as exc:
                 self._mark_fatal(exc)
                 if not isinstance(exc, Exception):
@@ -535,8 +538,8 @@ class SceneEngineRuntime:
                     pass
                 return
             try:
-                checkpoint = self._checkpoint_for_client()
-                if checkpoint is None:
+                checkpoint, retained = self._get_or_build_current_checkpoint()
+                if not retained:
                     try:
                         self._transport.close(client_id, "global-retention-capacity")
                     except Exception:
@@ -871,7 +874,7 @@ class SceneEngineRuntime:
         interval = self._config.recording_checkpoint_interval_commits
         if self._recorder is not None and interval and self._commit_seq % interval == 0:
             try:
-                checkpoint = self._materialize_checkpoint()
+                checkpoint, _ = self._get_or_build_current_checkpoint()
                 self._record_state_packet(checkpoint.raw_bytes, checkpoint=True)
             except BaseException as exc:
                 self._mark_fatal(exc)
@@ -879,21 +882,22 @@ class SceneEngineRuntime:
                     raise
                 raise RuntimeFatalError("periodic recording checkpoint failed") from exc
 
-    def _checkpoint_for_client(self) -> PacketRef | None:
+    def _get_or_build_current_checkpoint(self) -> tuple[PacketRef, bool]:
         cached = self._checkpoint_cache
         if (
             cached is not None
+            and cached.stream_id == self._stream_id
             and cached.commit_seq == self._commit_seq
             and cached.source_tick == self._source_tick
             and cached.world_revision == self._world_revision
             and any(item is cached for item in self._retained)
         ):
-            return cached
+            return cached, True
         checkpoint = self._materialize_checkpoint()
-        if not self._retain_packet(checkpoint):
-            return None
-        self._checkpoint_cache = checkpoint
-        return checkpoint
+        retained = self._retain_packet(checkpoint)
+        if retained:
+            self._checkpoint_cache = checkpoint
+        return checkpoint, retained
 
     def _retain_packet(self, packet: PacketRef) -> bool:
         if any(item is packet for item in self._retained):

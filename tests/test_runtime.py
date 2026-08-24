@@ -27,6 +27,7 @@ from scene_engine.scene import (
     encode_scene_bootstrap,
     parse_scene_frame,
 )
+from scene_engine.session import PacketRef
 from scene_engine.wire import (
     AttachmentKind,
     PacketKind,
@@ -51,6 +52,7 @@ class Program:
         self.reenter = False
         self.steps = 0
         self.input_calls = 0
+        self.checkpoint_calls = 0
         self.invalid_commit_scene = False
         self.world_codec = "example-world@1"
 
@@ -82,6 +84,7 @@ class Program:
         return MutationResult.changed()
 
     def build_checkpoint(self, world: World, context) -> ProductCheckpoint:
+        self.checkpoint_calls += 1
         return ProductCheckpoint(
             self.world_codec,
             {"tick": world.tick, "value": world.value, "world_revision": world.world_revision},
@@ -139,6 +142,18 @@ class Transport:
 
     def close(self, client_id, reason):
         self.closed.append((client_id, reason))
+
+
+class Recorder:
+    def __init__(self) -> None:
+        self.appended = []
+        self.sealed = False
+
+    def append(self, packet_bytes, *, checkpoint):
+        self.appended.append((packet_bytes, checkpoint))
+
+    def seal(self):
+        self.sealed = True
 
 
 def bootstrap() -> bytes:
@@ -344,16 +359,87 @@ def test_disconnect_or_same_id_replacement_discards_queued_inputs() -> None:
     assert program.input_calls == 0
 
 
-def test_nonzero_checkpoint_is_independently_materialized_for_new_client() -> None:
-    runtime, clock, _, _, transport = make_runtime()
+def test_start_retains_one_checkpoint_shared_by_recorder_and_clients() -> None:
+    recorder = Recorder()
+    runtime, _, _, program, transport = make_runtime(recorder=recorder)
+
+    cached = runtime._checkpoint_cache
+    assert program.checkpoint_calls == 1
+    assert cached is not None
+    assert (
+        cached.stream_id,
+        cached.commit_seq,
+        cached.source_tick,
+        cached.world_revision,
+    ) == (runtime.stream_id, 0, 0, 0)
+    assert any(packet is cached for packet in runtime._retained)
+    assert runtime.health.retained_packet_count == 1
+    assert runtime.health.retained_bytes == cached.byte_length
+    assert recorder.appended == [(cached.raw_bytes, True)]
+    assert recorder.appended[0][0] is cached.raw_bytes
+
+    runtime.client_connected("first")
+    runtime.client_connected("second")
+
+    assert program.checkpoint_calls == 1
+    assert transport.sent["first"][0] is cached.raw_bytes
+    assert transport.sent["second"][0] is cached.raw_bytes
+    assert runtime._sessions["first"].references_packet(cached)
+    assert runtime._sessions["second"].references_packet(cached)
+
+
+def test_commit_invalidates_checkpoint_and_next_revision_builds_once() -> None:
+    runtime, clock, _, program, transport = make_runtime()
+    initial = runtime._checkpoint_cache
     clock.advance(2 / 60)
     runtime.pump()
-    runtime.client_connected("late")
-    checkpoint = read_engine_packet(transport.sent["late"][0])
+
+    assert program.checkpoint_calls == 1
+    assert runtime._checkpoint_cache is None
+
+    runtime.client_connected("late-first")
+    current = runtime._checkpoint_cache
+    runtime.client_connected("late-second")
+
+    assert program.checkpoint_calls == 2
+    assert current is not None and current is not initial
+    assert any(packet is current for packet in runtime._retained)
+    assert transport.sent["late-first"][0] is current.raw_bytes
+    assert transport.sent["late-second"][0] is current.raw_bytes
+    assert runtime._sessions["late-first"].references_packet(current)
+    assert runtime._sessions["late-second"].references_packet(current)
+    checkpoint = read_engine_packet(current.raw_bytes)
     assert checkpoint.kind is PacketKind.CHECKPOINT
     assert checkpoint.header["commit_seq"] == 2
     assert checkpoint.header["source_tick"] == 2
     assert checkpoint.header["world_revision"] == 2
+
+
+def test_evicted_current_checkpoint_is_rebuilt_and_retained_safely() -> None:
+    config = RuntimeConfig(maximum_global_retained_packets=1)
+    runtime, _, _, program, transport = make_runtime(config=config)
+    original = runtime._checkpoint_cache
+    assert original is not None
+
+    evictor = PacketRef(
+        b"evictor",
+        runtime.stream_id,
+        runtime.commit_seq,
+        runtime.current_tick,
+        0,
+    )
+    assert runtime._retain_packet(evictor)
+    assert runtime._checkpoint_cache is None
+    assert all(packet is not original for packet in runtime._retained)
+
+    runtime.client_connected("after-eviction")
+
+    rebuilt = runtime._checkpoint_cache
+    assert program.checkpoint_calls == 2
+    assert rebuilt is not None and rebuilt is not original
+    assert rebuilt.raw_bytes == original.raw_bytes
+    assert any(packet is rebuilt for packet in runtime._retained)
+    assert transport.sent["after-eviction"][0] is rebuilt.raw_bytes
 
 
 def test_multiple_clients_share_commit_bytes_and_bad_ack_is_isolated() -> None:
@@ -390,16 +476,30 @@ def test_global_count_retention_evicts_only_lagging_session() -> None:
     acknowledge(runtime, transport, "healthy")
 
 
-def test_global_byte_retention_closes_sessions_when_one_packet_cannot_fit() -> None:
+def test_checkpoint_over_global_byte_capacity_is_fatal_during_start() -> None:
     config = RuntimeConfig(maximum_global_retained_bytes=1)
-    runtime, clock, _, _, transport = make_runtime(config=config)
-    runtime.client_connected("a")
-    assert runtime.health.client_count == 0
-    assert transport.closed[-1] == ("a", "global-retention-capacity")
-    clock.advance(1 / 60)
-    runtime.pump()
+    world = World()
+    program = Program()
+    recorder = Recorder()
+    runtime = SceneEngineRuntime(
+        world=world,
+        program=program,
+        transport=Transport(),
+        recorder=recorder,
+        config=config,
+        clock=ManualClock(),
+        stream_id="runtime-stream",
+    )
+
+    with pytest.raises(RuntimeFatalError, match="initial checkpoint failed"):
+        runtime.start()
+
+    assert program.checkpoint_calls == 1
+    assert runtime.health.state == "fatal"
     assert runtime.health.retained_packet_count == 0
+    assert runtime._checkpoint_cache is None
     assert runtime.health.client_count == 0
+    assert recorder.appended == []
 
 
 def test_staggered_slow_checkpoints_are_shared_and_globally_bounded() -> None:
@@ -432,6 +532,113 @@ def test_recorder_starts_with_checkpoint_and_preserves_exact_commit(tmp_path) ->
     log = read_packet_log(tmp_path)
     assert [entry.checkpoint for entry in log.entries] == [True, False]
     assert read_engine_packet(log.packet_at(1)).header["cause"] == "tick"
+
+
+def test_periodic_recorder_uses_current_checkpoint_cache_after_commit() -> None:
+    recorder = Recorder()
+    config = RuntimeConfig(recording_checkpoint_interval_commits=1)
+    runtime, clock, _, program, transport = make_runtime(
+        config=config,
+        recorder=recorder,
+    )
+
+    clock.advance(1 / 60)
+    runtime.pump()
+
+    assert [checkpoint for _, checkpoint in recorder.appended] == [True, False, True]
+    commit = read_engine_packet(recorder.appended[1][0])
+    periodic = read_engine_packet(recorder.appended[2][0])
+    assert commit.kind is PacketKind.COMMIT
+    assert periodic.kind is PacketKind.CHECKPOINT
+    assert (
+        periodic.header["commit_seq"],
+        periodic.header["source_tick"],
+        periodic.header["world_revision"],
+    ) == (
+        commit.header["commit_seq"],
+        commit.header["source_tick"],
+        commit.header["world_revision"],
+    )
+    cached = runtime._checkpoint_cache
+    assert cached is not None
+    assert recorder.appended[2][0] is cached.raw_bytes
+    assert program.checkpoint_calls == 2
+
+    runtime.client_connected("after-periodic")
+
+    assert program.checkpoint_calls == 2
+    assert transport.sent["after-periodic"][0] is cached.raw_bytes
+
+
+def test_oversized_periodic_checkpoint_records_anchor_and_evicts_session(
+    tmp_path,
+) -> None:
+    probe_world = World(tick=9, world_revision=9)
+    probe_program = Program()
+    probe = SceneEngineRuntime(
+        world=probe_world,
+        program=probe_program,
+        transport=Transport(),
+        clock=ManualClock(),
+        stream_id="runtime-stream",
+        initial_commit_seq=9,
+    )
+    probe_program.runtime = probe
+    probe.start()
+    initial_checkpoint_bytes = probe.health.retained_bytes
+    probe.stop()
+
+    recorder = PacketLogWriter(tmp_path, fsync=False)
+    config = RuntimeConfig(
+        maximum_global_retained_bytes=initial_checkpoint_bytes,
+        recording_checkpoint_interval_commits=1,
+    )
+    clock = ManualClock()
+    world = World(tick=9, world_revision=9)
+    program = Program()
+    transport = Transport()
+    runtime = SceneEngineRuntime(
+        world=world,
+        program=program,
+        transport=transport,
+        recorder=recorder,
+        config=config,
+        clock=clock,
+        stream_id="runtime-stream",
+        initial_commit_seq=9,
+    )
+    program.runtime = runtime
+    runtime.start()
+    assert runtime.health.retained_bytes == initial_checkpoint_bytes
+    runtime.client_connected("active")
+    acknowledge(runtime, transport, "active")
+
+    clock.advance(1 / 60)
+    runtime.pump()
+
+    assert runtime.health.state == "running"
+    assert runtime.health.client_count == 0
+    assert runtime.health.retained_packet_count == 0
+    assert runtime._checkpoint_cache is None
+    assert program.checkpoint_calls == 2
+    assert transport.closed[-1] == ("active", "global-retention-evicted")
+    assert [
+        read_engine_packet(raw).kind for raw in transport.sent["active"]
+    ] == [PacketKind.CHECKPOINT, PacketKind.COMMIT]
+
+    runtime.stop()
+    log = read_packet_log(tmp_path)
+    assert [entry.checkpoint for entry in log.entries] == [True, False, True]
+    initial = read_engine_packet(log.packet_at(0))
+    commit = read_engine_packet(log.packet_at(1))
+    periodic = read_engine_packet(log.packet_at(2))
+    assert initial.header["commit_seq"] == 9
+    assert commit.header["commit_seq"] == 10
+    assert periodic.header["commit_seq"] == 10
+    assert periodic.header["source_tick"] == commit.header["source_tick"] == 10
+    assert periodic.header["world_revision"] == commit.header["world_revision"] == 10
+    assert len(log.packet_at(0)) == initial_checkpoint_bytes
+    assert len(log.packet_at(2)) > initial_checkpoint_bytes
 
 
 @pytest.mark.parametrize("failure", ["step", "build", "reenter"])
@@ -544,5 +751,5 @@ def test_bootstrap_is_parsed_once_and_each_scene_publication_encodes_once(
     runtime.pump()
 
     assert parse_calls == 1
-    assert encode_ticks == [0, 0, 1]
+    assert encode_ticks == [0, 1]
     assert not hasattr(runtime_module, "parse_scene_frame")

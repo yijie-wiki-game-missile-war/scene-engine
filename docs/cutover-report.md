@@ -1,129 +1,170 @@
-# Scene Engine 0.6 structured-scene and 500-node cutover report
+# Three Render Runtime 0.8 cutover report
 
-Scene Engine 0.6 is a one-step, breaking cutover. Product programs now submit structured complete `SceneNode` records and
-frame-scoped `SceneEvent` records. The Engine validates those records against its cached bootstrap and encodes the raw frame
-once. There is no encoded-frame product port, parse-after-encode path, independent product-events attachment, compatibility
-constructor, alias, or fallback decoder.
+Final evidence frozen at 2026-08-24 14:59:52 CST (+0800).
 
-Missile War consumers move atomically with this release to `missile-war-world-state@2`. Recordings created by an older
-deployment are retained by that deployment and are not accepted by the current Replay service.
+## Frozen target
 
-## Frozen runtime contract
+The atomic tuple is:
 
-| Boundary | Current contract |
+```text
+scene-engine Python runtime                 0.6.0
+@scene-engine/client                        0.6.0
+@scene-engine/renderer-three                0.8.0
+renderer artifact                           dist/scene-engine-renderer-three-0.8.0.tgz
+runtime schema                              scene-engine-three-render-runtime@2
+resource catalog schema                     scene-engine-render-resource-catalog@2
+composition schema                          scene-engine-render-composition@2
+snapshot schema                             scene-engine-render-snapshot@2
+batch schema                                scene-engine-render-batch@2
+pipelines                                   model@2, sprite@2, surface@2,
+                                            particle@2, scene-pass@2
+```
+
+The Python runtime, JavaScript client, wire, WorldState, sole SceneTree, 60 Hz tick ownership, packet log and Replay packet
+format are unchanged. Renderer 0.8 has no pre-V2 schema parser, package alias, feature flag, adapter or dual path.
+
+The Runtime is the only production Three host. It owns the perspective camera, pure-data pan/zoom controls, resources,
+projection roots, ResizeObserver and sole RAF. It validates node-composition and scene-layer scope before mutation. Materials
+use explicit `alphaMode` and source-material multiplication. Surface is limited to standard/water; scene pass is limited to
+background/lights. There is no hidden default light and no RenderTarget.
+
+Recovery always uses the latest view and a newly compiled complete snapshot. `render-draw-failed` additionally retires the
+tainted owned WebGLRenderer and creates a new one on the same canvas after releasing the failed projection; controls, sample,
+batch and diagnostics failures rebuild the projection without replacing the renderer. Health returns to healthy only after
+the idle/resource barrier succeeds.
+
+Arts retains business interpretation, UI-local display state, immutable resource declarations and pure-data composition.
+UI-local changes use `sceneLayers: null`. Review Three code is reachable only from explicit `./review` imports and is neither
+imported by Live/Replay nor used as a production fallback.
+
+## Final source and artifact tuple
+
+The tested trees were intentionally uncommitted. Base commits are not mislabeled as cutover commits; the exact identity is
+base commit plus tracked binary diff plus the untracked manifest in
+[the source-identity record](evidence/render-runtime-v2/source-identity.md).
+
+| Item | Final identity |
 | --- | --- |
-| checkpoint product port | `world_codec`, `world_snapshot`, `scene_bootstrap`, `scene_nodes`, `scene_events` |
-| commit product port | `world_codec`, `world_patch`, `scene_nodes`, `scene_events` |
-| product JSON numbers | finite native floating-point values and safe integers; non-finite values fail closed |
-| discrete protocol values | safe integers for kinds, lengths, ticks, revisions, commit counters, limits, and path indices |
-| checkpoint wire layout | world snapshot JSON, scene bootstrap bytes, scene frame bytes |
-| commit wire layout | world patch JSON and an optional same-tick scene frame |
-| scene events | binary records inside the scene frame only |
-| default limits | 64 MiB packet, 48 MiB attachment, 64 MiB session pending, 4,000,000 JSON values |
+| date/time/timezone | `2026-08-24 14:59:52 CST (+0800)` |
+| Scene Engine tested source | base `711b6dc3af9f1ca9b16e46f336fc54734a804907` + tracked diff `97ca8633e97b940d16cd433d9071101bf4890f818f667c9e10414f00f5265e76` + untracked manifest `1e5cf2d4c4d79cbc3e8b164bb3be0d7417303dcebc8e3ce8e63169442fd33353` (13 files) |
+| Arts tested source | base `67b4ba6aae421740a1031153e8fc2063ff7c953c` + tracked diff `cac95e3b3a10392fd67fe2aa45b7e5841d823009774e03219899880cbb41601b` + untracked manifest `3c4e7299297510d1173827a92f3b7d6089dd2f9597b68e71ffba193a2a307d32` (118 files) |
+| Replay tested commit | `001f0109101a3410905aaec1d04009a7a5924a45` |
+| toolchain | Node `24.14.0`; npm `11.9.0`; uv `0.12.5`; Python `3.12.14` |
+| browser / Three.js | Google Chrome `151.0.7922.172`; Three.js `0.181.2` |
+| renderer artifact SHA-256 | `b51dc2d7ef4c7ed234de56335896b6577254506fcc58d3ef0c7f4b3923796d28` |
+| renderer artifact integrity | `sha512-7IU6U83u8Xu7x6xMTR/iycIoMKn3jmHxjANpbgmYGS95zvpbJSW+H9UU9JB88IQzG+Ke91dA2S3u21LOuMj5pQ==` |
+| Scene Engine `package-lock.json` SHA-256 | `9ca8b758fee1cf9afaf6e17b081cf4a543090ecef4ae911cd876fa4a9bfd22d6` |
+| Arts `package-lock.json` SHA-256 | `a2e0cd17db8d72cf200800b5d1833eb4724126963dec995a5b0314d159a5da5f` |
+| Arts production build SHA-256 | `91750dfc64cca3ab6f05e6ee75eb621abee48f1c0617744fe40eaf6b5dfa019d` |
+| rollback tuple | Engine `711b6dc3af9f1ca9b16e46f336fc54734a804907` + Arts `67b4ba6aae421740a1031153e8fc2063ff7c953c` + Replay `001f0109101a3410905aaec1d04009a7a5924a45`; mixed rollback is forbidden |
 
-Attachment kind 5 is deliberately unassigned. Both Python and JavaScript reject it; numeric value 5 remains valid only as the
-unrelated `engine.input_result` packet kind.
+`scene-engine/dist/scene-engine-renderer-three-0.8.0.tgz` and
+`arts/vendor/scene-engine-renderer-three-0.8.0.tgz` are byte-identical. The final source hashes exclude only the two reports
+filled from this evidence after testing, generated builds, tarballs, evidence output and `.DS_Store` as documented by the
+source-identity record.
 
-## Deleted paths and hot-path work
+## Final automated evidence
 
-- The product `scene_frame: bytes` fields and independent product `events: bytes` route were physically removed.
-- `ProductCheckpoint` and `ProductCommit` reject legacy keyword arguments rather than adapting them.
-- The runtime caches one parsed bootstrap validation view per generation and never parses a frame it just encoded.
-- The sole JavaScript `SceneTree` caches static registry, topology, world poses, and visual/profile lookup data after checkpoint.
-  Ordinary frames process only the complete dynamic node set and reuse the static cache.
-- The Missile War producer removed its intermediate scene DTO graph, static-map rebuild, static fingerprint, guessed journal
-  scopes, partial input rollback, and per-tick idle-position writes.
-
-## Artifact tuple
-
-| Artifact | SHA-256 |
+| Gate | Exact command and final result |
 | --- | --- |
-| `scene_engine-0.6.0-py3-none-any.whl` | `6cf8eba39d097fc210f220c259f7d5781152c366f06c5ed4f4f6d4c8ae893491` |
-| `scene-engine-client-0.6.0.tgz` | `e7feeb9d197616f36379443e86e51157d0440cf022dbf4d4cb668df7a4936abb` |
-| `scene-engine-renderer-three-0.6.0.tgz` | `5763e54b4725108ec6e87e990af22181514974c388563f2ad1ee78b62871e0f0` |
+| Scene Engine clean dependency install | `npm ci --ignore-scripts` — exit 0; audit found 0 vulnerabilities |
+| JavaScript client | `npm test` (client workspace) — 16/16 passed |
+| renderer V2 unit/runtime/real-Three adapter | `npm test` (renderer workspace) — 59/59 passed |
+| Scene Engine Python | `uv run --with pytest python -m pytest -o addopts=''` — 60/60 passed |
+| Python bytecode validation | `uv run python -m compileall -q src tests scripts` — exit 0 |
+| strict cutover verifier | `uv run python scripts/verify_cutover.py` — exit 0 |
+| Arts clean dependency install | `npm ci --ignore-scripts` in `arts/` — exit 0; audit found 0 vulnerabilities |
+| Arts full check | `npm run check` in `arts/` — exit 0 |
+| Arts production build | `npm run build` in `arts/` — exit 0; Web3D build transformed 674 modules |
+| Web3D production check | `npm run check --workspace @missile-war-art/web3d` — exit 0; 18 scenes, 12 owners, 21 visuals; 5,000 ordered controller commits with one ACK each; 5/5 health tests; runtime projection 253 files / 23 bundles / 18 scenes |
+| Web3D review check | `npm run check:review --workspace @missile-war-art/web3d` — exit 0; 7 review definitions and 14 fixture scenes |
+| V2 composition inventory | `node web3d/scripts/checkSceneEngineRenderContractsV2.mjs` — exit 0; 18 descriptors, 15 render owners, 42 object compositions, 15 scene layers, 82 total layers and 80 resources |
+| Arts architecture | `node scripts/check-display-architecture.mjs` — exit 0; 22 code/resource pairs, 18 scenes and 1 state owner |
+| Replay regression | `npm test` in `replay/` — 23/23 passed |
 
-The wheel and archives installed in the three consumers are byte-identical to this tuple. Lockfiles contain only version
-0.6.0. Ignored development output containing retired artifacts was removed; it is not a compatibility source.
+## Final 500-node and lifecycle evidence
 
-## Correctness and integration gates
+The real-Three `acceptance-v2.test.mjs` case passed within the 59-test renderer run:
 
-| Gate | Result |
-| --- | --- |
-| Scene Engine Python | 60 passed |
-| Scene Engine JavaScript | client 16 passed; renderer 9 passed |
-| Scene Engine cutover verifier | passed |
-| python-game | 220 passed (219 migration tests plus the source-package regression) |
-| Arts | `npm run check` passed; `npm run build` passed |
-| Replay | 23 passed |
-| 500-node product packet log | 602 byte-exact records, 2 checkpoints, 600 commits, every selected frame has 500 dynamic nodes |
-| Replay product playback | full playback and seek from commit 300 to 600 passed through the shared client |
-| forbidden and retired-contract scan | zero production matches |
+- fixed mix: 200 sprite/card + 150 model + 100 terrain/model + 50 particle;
+- 50 dirty instance slots and 25 material/UI-dirty nodes checked;
+- three ordered commits retained transient create/remove/reparent lifecycle;
+- 100 formal create/remove/rebuild rounds passed; the emitted full rebuild count was 101 including initial recovery;
+- one Runtime, Renderer, Scene, camera and RAF; maximum RAF count was 1;
+- pending jobs returned to zero, resources did not resurrect, and idempotent final disposal reported 510 disposed resources
+  with no live handle, listener, observer or RAF.
 
-Input fault tests cover complete rollback after no-op, rejection, expected exceptions, and unexpected exceptions before the
-runtime becomes fatal. Chained patch oracles reconstruct the complete product snapshot across 600 ticks and targeted
-investment, diplomacy, combat, occupation, and production mutations.
+The non-gating quick diagnostics also passed:
 
-## 500-node evidence
-
-Synthetic Scene Engine and JavaScript client reports cover steady, full-motion, and 5% churn workloads with five rounds of
-600 measured samples per scenario. The real Missile War report uses exactly 500 visible dynamic entities, complete frames,
-600 acknowledged commits, periodic checkpoints, and a 3,600-commit bounded-retention soak.
-
-| Scenario | Python publication p95 | JavaScript apply p95 |
-| --- | ---: | ---: |
-| steady | 10.493 ms | 2.239 ms |
-| motion | 7.715 ms | 1.675 ms |
-| churn-25 | 6.519 ms | 1.957 ms |
-
-The real-product aggregate p95 values are 3.277 ms for gameplay step, 0.721 ms for journal finalization, 7.528 ms for direct
-projection, 8.169 ms for scene validation plus the single encode, 1.124 ms for wire encoding, 20.554 ms for publication after
-step, and 23.833 ms for step plus publication. A complete frame is 98,632 bytes. World patch p95 is 26,806 bytes and the
-one-second boundary maximum is 156,368 bytes; combined commit p95 is 125,737 bytes and the maximum is 255,304 bytes.
-
-The 3,600-commit soak finishes with zero session and transport backlog and configured global retention bounds intact. Latter
-half RSS is not monotonic and decreases by 74,530,816 bytes. Traced live allocations rise by 37,942,791 bytes while the raw
-packet retention window reaches its 256 MiB cap and product history continues to grow; that value is retained as a diagnostic
-rather than treated as a latency release gate.
-
-Absolute latency is recorded for diagnosis but is not a release blocker for this delivery, per the final acceptance decision.
-Node count, complete-frame semantics, packet limits, exact ACK progression, no pending backlog, replayability, and bounded
-retention remain correctness gates.
-
-Evidence files:
-
-- `docs/evidence/scene-engine-500.json`
-  (`dfafb8899944e6f1c3cf5fd7a04a9a375808629e79667578c93c46258869fd5f`)
-- `docs/evidence/client-500.json`
-  (`cbc791a3576864defef3c88e2bce7aa02086c8b3d31865473cb3cb029b34ea13`)
-- `../python-game/docs/evidence/runtime-500.json`
-  (`ec8c179419490547dce7d0c8270ec3118a95d2eae7e755762940b320c32e91b3`)
-
-## Source-only delivery
-
-The handoff archive is deliberately a small source package rather than a runtime asset bundle. It contains source code,
-tests, lockfiles, contracts, code-adjacent documentation, and acceptance evidence from the four migrated repositories plus
-the workspace report. It excludes Git metadata, dependency/install trees, build and distribution output, Replay recordings
-and deployment staging, virtual environments, caches, nested archives, and all media assets.
-
-The archive was extracted outside every repository with no `.git` directories and with inherited Python and Node module
-paths cleared. Scene Engine passed 60 Python tests, 4 benchmark-entry tests, 16 client tests, 9 renderer tests, and the
-cutover verifier. python-game passed 220 tests. Replay passed 23 tests. The Arts source passed its architecture, workspace,
-authoring, manifest, transform, projection, lifecycle, controller, backend, and summary gates; the 5,000-commit controller
-soak retained one world and acknowledged every commit.
-
-Because media is intentionally absent, the extracted source package does not claim a standalone Arts production build or
-runtime-projection check. Those two media-dependent gates passed against the full working tree before packaging. The
-archive's generated `SOURCE-MANIFEST.json` records every included path and SHA-256 digest.
-
-## Commit and rollback tuple
-
-| Repository | Tested source commit | Pre-cutover rollback commit |
+| Diagnostic | Command | p50 / p95 |
 | --- | --- | --- |
-| scene-engine | `ad6a023` | `60fc064` |
-| python-game | `b29ba57` | `93b03f8` |
-| Arts | `67b4ba6` | `790f322` |
-| Replay | `001f010` | `29e220c` |
+| Python steady | `uv run python scripts/benchmark_scene_500.py --quick` | 3.539166 / 4.307598 ms |
+| Python motion | same run | 3.113313 / 3.369944 ms |
+| Python churn-25 | same run | 3.270312 / 3.658579 ms |
+| JavaScript client steady | `node js/packages/client/scripts/benchmark-500.mjs --quick` | 1.204375 / 1.956292 ms |
+| JavaScript client motion | same run | 1.154208 / 1.858208 ms |
+| JavaScript client churn-25 | same run | 0.955042 / 1.524417 ms |
 
-The tested source commits precede this evidence-only report commit where necessary. Rollback is tuple-atomic: stop producer
-and consumers, deploy all four pre-cutover commits together, and use packet logs produced by that tuple. Cross-version packet
-history mixing is intentionally unsupported.
+Both quick benchmark commands exited 0. Timings are diagnostic; lifecycle, matrices and bounded ownership are the release
+conditions.
+
+## Final browser, Live and Replay evidence
+
+The final complete-media Live run used the tested vendor artifact and installed Chrome. The primary machine-readable record
+is [`final-live-runtime-b51dc2d7.json`](../../arts/docs/evidence/render-runtime-v2/final-live-runtime-b51dc2d7.json)
+(SHA-256 `dd7219c645391326ee7a448c481489e7f7a6a16f9fbcf9e0b1d42537b8896882`). Screenshots are
+[main](../../arts/docs/evidence/render-runtime-v2/final-live-main-b51dc2d7.png)
+(`11c4ff12a05364d138b28fef467222c44babdc823fef7be69002041eb5c2b976`),
+[zoom](../../arts/docs/evidence/render-runtime-v2/final-live-zoom-b51dc2d7.png)
+(`8383e2c4429e4dbc6863e2e865c9d8085ad5b98175743928b76eab64049b3bac`), and
+[pan](../../arts/docs/evidence/render-runtime-v2/final-live-pan-b51dc2d7.png)
+(`2484fae373d4c97e65187c7d9bf536f2811f618d1739506b7b914e427e593446`).
+
+Observed Live facts:
+
+- 648 presentation nodes = 16 dynamic + 632 static;
+- 1,895 object layers, 15 scene layers, 84 batches, 54 resources, 0 pending jobs, 1 RAF, 6 listeners and 1 observer;
+- commit sequence 1800 through 1929 was consecutive for 130 commits; packet delta and ACK delta were both 151;
+- all 102 media dependencies loaded: 82 images and 20 GLBs;
+- console errors, warnings, page errors, HTTP errors and non-abort request failures were all zero;
+- 42 AbortController cancellations were expected loader cancellation events and were recorded separately, not counted as
+  request failures.
+
+The run exercised complete media, explicit alpha, source GLTF materials, water, singleton background/lights, perspective
+pan/zoom and the absence of a RenderTarget.
+
+Replay control evidence is
+[`replay-500-control-smoke.json`](../../arts/docs/evidence/render-runtime-v2/replay-500-control-smoke.json)
+(SHA-256 `75b9d1e4aa81ae601294d93632b6d7a7e0becee11086943d837e520effb4c94d`) with the
+[seek-to-600 screenshot](../../arts/docs/evidence/render-runtime-v2/replay-500-control-seek-600.png)
+(`155dc3679a70e8f951000dc23bc5d94e886eed7fbd625bbf793ac22dad4c4b33`). It observed 500 dynamic /
+1,132 total nodes, a paused tick-0 checkpoint, 1x advance through tick 12, pause stable at tick 13 across two samples, and a
+fresh Replay WebSocket seek to tick/commit 600. Console warnings and errors were zero.
+
+The installed-Chrome draw-fault soak is
+[`replay-500-webgl-rebuild-soak.json`](../../arts/docs/evidence/render-runtime-v2/replay-500-webgl-rebuild-soak.json)
+(`cab793dbd0eba06624e786f6067ee77a0d2b8d6fac59ddea49feb6fb9bd9cb8e`) with
+[PNG evidence](../../arts/docs/evidence/render-runtime-v2/replay-500-webgl-rebuild-soak.png)
+(`a4a602d9a021ae0f918464bc00b32b5a11feb2c9a6952083e2e398e761cbdd54`). Three warmups plus 20
+formal cycles produced 23/23 injected draw faults and 23/23 automatic rebuilds. Every stable sample returned to 38 textures,
+564 geometries, 54 resources, zero pending jobs, 6 listeners, 1 observer and 1 RAF; console, page and request errors were
+zero. The isolated Three root-cause record is
+[`webgl-clear-fault-root-cause.json`](../../arts/docs/evidence/render-runtime-v2/webgl-clear-fault-root-cause.json)
+(`36ab4820ce64d0454c2564695b3151343fa6a749d1f2590392ae88ac774842a5`).
+
+## Physical deletion audit
+
+The strict verifier and architecture gates confirmed:
+
+- exactly one renderer artifact in Scene Engine `dist` and one byte-identical Arts vendor artifact, both 0.8.0;
+- no obsolete renderer 0.6/0.7 artifact or current render schema/pipeline `@1` identity;
+- zero production RuntimeHandle export and zero direct Three edge reachable from Live/Replay;
+- 18 feature-owner package-level explicit `./review` exports (17 visual owners plus HUD), plus the display-sdk review-helper export;
+- coast-cliff and reef have empty production runtime records; their fixed compositions exist only under `./review`;
+- obsolete Three backends, the retired renderer-reconciler implementations and production compatibility paths are physically absent;
+- current production composition uses only the five V2 pipelines with explicit alpha, no hidden light and no RenderTarget.
+
+## Release decision
+
+Release decision: READY
+Known issues: zero

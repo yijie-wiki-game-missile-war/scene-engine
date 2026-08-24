@@ -10,7 +10,8 @@ import hashlib
 import math
 import struct
 from dataclasses import dataclass, replace
-from typing import Any, Iterable, Sequence
+from types import MappingProxyType
+from typing import Any, Iterable, Mapping, Sequence
 
 from .errors import SceneCodecError
 
@@ -150,8 +151,32 @@ class SceneBootstrapHeader:
     reserved: bytes
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, init=False)
 class SceneBootstrapView:
+    """Parse-only bootstrap value plus non-serialized validation indexes.
+
+    The private slots are deliberately not dataclass fields: callers cannot
+    initialize them, and they do not participate in repr/equality/hash or
+    ``dataclasses.asdict``.  Pickle persists only the authoritative body and
+    reparses it, so the mapping proxies are never serialized as a second
+    bootstrap representation.
+    """
+
+    __slots__ = (
+        "header",
+        "static_nodes",
+        "scene_metadata",
+        "visual_types",
+        "animation_states",
+        "directory",
+        "data",
+        "_visual_by_id",
+        "_animation_ids",
+        "_static_by_id",
+        "_static_depth_by_id",
+        "_maximum_static_depth",
+    )
+
     header: SceneBootstrapHeader
     static_nodes: tuple[SceneNode, ...]
     scene_metadata: tuple[SceneMetadata, ...]
@@ -159,6 +184,91 @@ class SceneBootstrapView:
     animation_states: tuple[AnimationState, ...]
     directory: tuple[SceneSection, ...]
     data: bytes
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+        raise TypeError(
+            "SceneBootstrapView is parse-only; use parse_scene_bootstrap()"
+        )
+
+    @classmethod
+    def _from_parsed(
+        cls,
+        *,
+        header: SceneBootstrapHeader,
+        static_nodes: tuple[SceneNode, ...],
+        scene_metadata: tuple[SceneMetadata, ...],
+        visual_types: tuple[VisualType, ...],
+        animation_states: tuple[AnimationState, ...],
+        directory: tuple[SceneSection, ...],
+        data: bytes,
+        visual_by_id: Mapping[int, VisualType],
+        animation_ids: frozenset[int],
+        static_by_id: Mapping[int, SceneNode],
+        static_depth_by_id: Mapping[int, int],
+    ) -> SceneBootstrapView:
+        if not all(
+            isinstance(value, MappingProxyType)
+            for value in (visual_by_id, static_by_id, static_depth_by_id)
+        ) or not isinstance(animation_ids, frozenset):
+            raise TypeError("bootstrap validation indexes must be read-only")
+        self = object.__new__(cls)
+        object.__setattr__(self, "header", header)
+        object.__setattr__(self, "static_nodes", static_nodes)
+        object.__setattr__(self, "scene_metadata", scene_metadata)
+        object.__setattr__(self, "visual_types", visual_types)
+        object.__setattr__(self, "animation_states", animation_states)
+        object.__setattr__(self, "directory", directory)
+        object.__setattr__(self, "data", data)
+        object.__setattr__(self, "_visual_by_id", visual_by_id)
+        object.__setattr__(self, "_animation_ids", animation_ids)
+        object.__setattr__(self, "_static_by_id", static_by_id)
+        object.__setattr__(
+            self,
+            "_static_depth_by_id",
+            static_depth_by_id,
+        )
+        object.__setattr__(
+            self,
+            "_maximum_static_depth",
+            max(static_depth_by_id.values(), default=0),
+        )
+        return self
+
+    @classmethod
+    def _from_pickle(
+        cls,
+        data: bytes,
+        static_count: int,
+        metadata_count: int,
+        visual_count: int,
+        animation_count: int,
+        maximum_static_depth: int,
+    ) -> SceneBootstrapView:
+        del cls
+        return parse_scene_bootstrap(
+            data,
+            maximum_bootstrap_bytes=len(data),
+            maximum_static_nodes=static_count,
+            maximum_scene_metadata=metadata_count,
+            maximum_visual_types=visual_count,
+            maximum_animation_states=animation_count,
+            maximum_tree_depth=max(1, maximum_static_depth),
+        )
+
+    def __reduce_ex__(self, protocol: int):
+        del protocol
+        return (
+            type(self)._from_pickle,
+            (
+                self.data,
+                len(self.static_nodes),
+                len(self.scene_metadata),
+                len(self.visual_types),
+                len(self.animation_states),
+                self._maximum_static_depth,
+            ),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,8 +323,23 @@ def encode_scene_bootstrap(
     animations = tuple(animation_states)
     _validate_visuals(visuals)
     _validate_animations(animations)
-    _validate_nodes(nodes, visuals, animations, source_tick=None)
-    _validate_tree(nodes, (), maximum_depth=64)
+    visual_by_id = {item.visual_type_id: item for item in visuals}
+    animation_ids = frozenset(
+        item.animation_state_id for item in animations
+    )
+    _validate_nodes(
+        nodes,
+        visual_by_id,
+        animation_ids,
+        source_tick=None,
+    )
+    _validate_dynamic_tree_against_bootstrap(
+        nodes,
+        static_by_id={},
+        static_depth_by_id={},
+        maximum_static_depth=0,
+        maximum_depth=64,
+    )
     _validate_metadata(metadata)
     if len(nodes) > _UINT32_MAX:
         raise SceneCodecError("static node count exceeds uint32")
@@ -332,11 +457,38 @@ def parse_scene_bootstrap(
     metadata = _parse_metadata(raw, entries[5], entries[6])
     _validate_visuals(visuals)
     _validate_animations(animations)
-    _validate_nodes(nodes, visuals, animations, source_tick=None)
-    _validate_tree(nodes, (), maximum_depth=maximum_tree_depth)
+    visual_by_id = {item.visual_type_id: item for item in visuals}
+    animation_ids = frozenset(
+        item.animation_state_id for item in animations
+    )
+    _validate_nodes(
+        nodes,
+        visual_by_id,
+        animation_ids,
+        source_tick=None,
+    )
+    static_by_id, static_depth_by_id = (
+        _validate_dynamic_tree_against_bootstrap(
+            nodes,
+            static_by_id={},
+            static_depth_by_id={},
+            maximum_static_depth=0,
+            maximum_depth=maximum_tree_depth,
+        )
+    )
     _validate_metadata(metadata)
-    return SceneBootstrapView(
-        header, nodes, metadata, visuals, animations, entries, raw
+    return SceneBootstrapView._from_parsed(
+        header=header,
+        static_nodes=nodes,
+        scene_metadata=metadata,
+        visual_types=visuals,
+        animation_states=animations,
+        directory=entries,
+        data=raw,
+        visual_by_id=MappingProxyType(visual_by_id),
+        animation_ids=animation_ids,
+        static_by_id=MappingProxyType(static_by_id),
+        static_depth_by_id=MappingProxyType(static_depth_by_id),
     )
 
 
@@ -374,12 +526,18 @@ def encode_scene_frame_against_bootstrap(
         raise SceneCodecError("frame exceeds bootstrap node limit")
     _validate_nodes(
         nodes,
-        bootstrap.visual_types,
-        bootstrap.animation_states,
+        bootstrap._visual_by_id,
+        bootstrap._animation_ids,
         source_tick=tick,
     )
     _validate_events(events, tick)
-    _validate_tree(nodes, bootstrap.static_nodes, maximum_depth=maximum_depth)
+    _validate_dynamic_tree_against_bootstrap(
+        nodes,
+        static_by_id=bootstrap._static_by_id,
+        static_depth_by_id=bootstrap._static_depth_by_id,
+        maximum_static_depth=bootstrap._maximum_static_depth,
+        maximum_depth=maximum_depth,
+    )
     raw = _encode_scene_frame(tick, nodes, events)
     byte_limit = bootstrap.header.maximum_frame_bytes
     if maximum_frame_bytes is not None:
@@ -532,8 +690,8 @@ def validate_scene_frame_against_bootstrap(
         raise SceneCodecError("frame exceeds bootstrap limits")
     _validate_nodes(
         frame.nodes,
-        bootstrap.visual_types,
-        bootstrap.animation_states,
+        bootstrap._visual_by_id,
+        bootstrap._animation_ids,
         source_tick=frame.source_tick,
     )
     return _validate_tree(
@@ -743,9 +901,7 @@ def _parse_events(
     return tuple(result)
 
 
-def _validate_nodes(nodes, visuals, animations, source_tick) -> None:
-    visual_by_id = None if visuals is None else {item.visual_type_id: item for item in visuals}
-    animation_ids = None if animations is None else {item.animation_state_id for item in animations}
+def _validate_nodes(nodes, visual_by_id, animation_ids, source_tick) -> None:
     previous = 0
     for node in nodes:
         if not isinstance(node, SceneNode):
@@ -789,7 +945,12 @@ def _validate_nodes(nodes, visuals, animations, source_tick) -> None:
 
 
 def _validate_payload_type(value, expected, field) -> None:
-    actual = 0 if value is None else value.payload_type_id
+    if value is None:
+        actual = 0
+    elif isinstance(value, OpaquePayload):
+        actual = value.payload_type_id
+    else:
+        raise SceneCodecError(f"node {field} must be OpaquePayload")
     if actual != expected:
         raise SceneCodecError(f"node {field} payload type does not match registry")
 
@@ -861,6 +1022,75 @@ def _validate_events(values: Sequence[SceneEvent], source_tick: int) -> None:
         if _uint(item.start_tick, "event.start_tick", _UINT64_MAX) > source_tick:
             raise SceneCodecError("event start_tick is later than source_tick")
         _owned_bytes(item.payload, "event.payload")
+
+
+def _validate_dynamic_tree_against_bootstrap(
+    nodes,
+    *,
+    static_by_id,
+    static_depth_by_id,
+    maximum_static_depth: int,
+    maximum_depth: int,
+) -> tuple[dict[int, SceneNode], dict[int, int]]:
+    """Validate only ``nodes`` against immutable static parent/depth indexes."""
+
+    if (
+        isinstance(maximum_depth, bool)
+        or not isinstance(maximum_depth, int)
+        or not 1 <= maximum_depth <= 65535
+    ):
+        raise SceneCodecError("maximum_depth must be in [1, 65535]")
+    if maximum_static_depth > maximum_depth:
+        raise SceneCodecError("scene tree exceeds maximum_depth")
+
+    dynamic_by_id: dict[int, SceneNode] = {}
+    for node in nodes:
+        identity = node.display_id
+        if identity in static_by_id:
+            raise SceneCodecError("display_id is duplicated across the tree")
+        if identity in dynamic_by_id:
+            raise SceneCodecError("display_id is duplicated across the tree")
+        dynamic_by_id[identity] = node
+
+    for node in nodes:
+        parent = node.parent_display_id
+        if (
+            parent
+            and parent not in static_by_id
+            and parent not in dynamic_by_id
+        ):
+            raise SceneCodecError("node parent is not present in the complete tree")
+
+    dynamic_depth_by_id: dict[int, int] = {}
+    for identity in dynamic_by_id:
+        if identity in dynamic_depth_by_id:
+            continue
+        chain: list[int] = []
+        active: set[int] = set()
+        cursor = identity
+        while cursor not in dynamic_depth_by_id:
+            if cursor in active:
+                raise SceneCodecError("scene parent graph contains a cycle")
+            chain.append(cursor)
+            active.add(cursor)
+            parent = dynamic_by_id[cursor].parent_display_id
+            if parent == 0:
+                base_depth = 0
+                break
+            if parent in static_by_id:
+                base_depth = static_depth_by_id[parent]
+                break
+            cursor = parent
+        else:
+            base_depth = dynamic_depth_by_id[cursor]
+
+        for current in reversed(chain):
+            base_depth += 1
+            if base_depth > maximum_depth:
+                raise SceneCodecError("scene tree exceeds maximum_depth")
+            dynamic_depth_by_id[current] = base_depth
+
+    return dynamic_by_id, dynamic_depth_by_id
 
 
 def _validate_tree(nodes, static_nodes, *, maximum_depth: int) -> dict[int, tuple[float, ...]]:

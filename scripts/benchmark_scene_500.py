@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Benchmark the frozen 0.6 structured scene publication path at 500 nodes."""
+"""Benchmark 632 frozen static nodes plus the 500-node frame hot path."""
 
 from __future__ import annotations
 
@@ -26,7 +26,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 import scene_engine  # noqa: E402
+import scene_engine.scene as scene_module  # noqa: E402
 from scene_engine.scene import (  # noqa: E402
+    AnimationState,
     SCENE_CODEC,
     SceneNode,
     VisualType,
@@ -37,13 +39,44 @@ from scene_engine.scene import (  # noqa: E402
 from scene_engine.wire import WIRE_SCHEMA, encode_commit  # noqa: E402
 
 
+STATIC_NODE_COUNT = 632
+STATIC_ROOT_COUNT = 8
+STATIC_ID_BASE = 10_000_000
 NODE_COUNT = 500
 CHURN_NODE_COUNT = 25
 SCENARIOS = ("steady", "motion", "churn-25")
+FORMAL_MINIMUM_WARMUP = 60
+FORMAL_MINIMUM_SAMPLES = 600
+FORMAL_MINIMUM_ROUNDS = 5
+STRUCTURED_P95_MAXIMUM_MS = 4.0
+STRUCTURED_P99_MAXIMUM_MS = 6.0
+PUBLICATION_P95_MAXIMUM_MS = 8.0
 CHURN_OFFSETS = tuple(
     offset for offset in range(1, NODE_COUNT + 1) if offset % 10 != 0
 )[:CHURN_NODE_COUNT]
 CHURN_INDEX = {offset: index for index, offset in enumerate(CHURN_OFFSETS, 1)}
+
+
+def static_nodes() -> tuple[SceneNode, ...]:
+    records = []
+    for offset in range(1, STATIC_NODE_COUNT + 1):
+        parent_display_id = (
+            0
+            if offset <= STATIC_ROOT_COUNT
+            else STATIC_ID_BASE + ((offset - STATIC_ROOT_COUNT - 1) % STATIC_ROOT_COUNT) + 1
+        )
+        records.append(
+            SceneNode(
+                display_id=STATIC_ID_BASE + offset,
+                parent_display_id=parent_display_id,
+                visual_type_id=1,
+                flags=1,
+                local_position=(float(offset), 0.0, 0.0),
+                local_rotation_xyzw=(0.0, 0.0, 0.0, 1.0),
+                local_scale=(1.0, 1.0, 1.0),
+            )
+        )
+    return tuple(records)
 
 
 def percentile(values: list[float], probability: float) -> float:
@@ -67,6 +100,56 @@ def summarize(values: list[float]) -> dict[str, float | int]:
     }
 
 
+def performance_gates(
+    scenario_reports: dict[str, object],
+    *,
+    enforce_time_gates: bool,
+) -> dict[str, object]:
+    scenarios: dict[str, object] = {}
+    observed_passed = True
+    for scenario in SCENARIOS:
+        scenario_report = scenario_reports[scenario]
+        assert isinstance(scenario_report, dict)
+        aggregate = scenario_report["aggregate"]
+        assert isinstance(aggregate, dict)
+        structured = aggregate["structured_validate_encode_ms"]
+        publication = aggregate["publication_total_ms"]
+        assert isinstance(structured, dict)
+        assert isinstance(publication, dict)
+        checks = {
+            "structured_validate_encode_p95": {
+                "actual_ms": structured["p95"],
+                "maximum_ms": STRUCTURED_P95_MAXIMUM_MS,
+                "passed": structured["p95"] <= STRUCTURED_P95_MAXIMUM_MS,
+            },
+            "structured_validate_encode_p99": {
+                "actual_ms": structured["p99"],
+                "maximum_ms": STRUCTURED_P99_MAXIMUM_MS,
+                "passed": structured["p99"] <= STRUCTURED_P99_MAXIMUM_MS,
+            },
+            "publication_total_p95": {
+                "actual_ms": publication["p95"],
+                "maximum_ms": PUBLICATION_P95_MAXIMUM_MS,
+                "passed": publication["p95"] <= PUBLICATION_P95_MAXIMUM_MS,
+            },
+        }
+        scenario_passed = all(check["passed"] for check in checks.values())
+        observed_passed = observed_passed and scenario_passed
+        scenarios[scenario] = {
+            "checks": checks,
+            "observed_passed": scenario_passed,
+        }
+    return {
+        "mode": "formal" if enforce_time_gates else "quick",
+        "structural_gates_enforced": True,
+        "structural_gates_passed": True,
+        "time_gates_enforced": enforce_time_gates,
+        "time_gates_observed_passed": observed_passed,
+        "overall_passed": observed_passed if enforce_time_gates else True,
+        "scenarios": scenarios,
+    }
+
+
 def nodes_for(scenario: str, variant: int) -> tuple[SceneNode, ...]:
     if scenario not in SCENARIOS:
         raise ValueError(f"unknown scenario: {scenario}")
@@ -79,7 +162,7 @@ def nodes_for(scenario: str, variant: int) -> tuple[SceneNode, ...]:
             display_id = offset
         group_offset = offset % 10
         parent_display_id = (
-            0
+            STATIC_ID_BASE + ((offset // 10 - 1) % STATIC_NODE_COUNT) + 1
             if group_offset == 0
             else ((offset - 1) // 10 + 1) * 10
         )
@@ -96,9 +179,139 @@ def nodes_for(scenario: str, variant: int) -> tuple[SceneNode, ...]:
                 ),
                 local_rotation_xyzw=(0.0, 0.0, 0.0, 1.0),
                 local_scale=(1.0, 1.0, 1.0),
+                animation_state_id=1,
             )
         )
     return tuple(sorted(records, key=lambda item: item.display_id))
+
+
+class IterationProbe:
+    def __init__(self, values) -> None:
+        self.values = values
+        self.iterations = 0
+
+    def __iter__(self):
+        self.iterations += 1
+        return iter(self.values)
+
+
+class MappingProbe(IterationProbe):
+    def __init__(self, values) -> None:
+        super().__init__(values)
+        self.lookups = 0
+
+    def __len__(self) -> int:
+        return len(self.values)
+
+    def __contains__(self, key) -> bool:
+        self.lookups += 1
+        return key in self.values
+
+    def __getitem__(self, key):
+        self.lookups += 1
+        return self.values[key]
+
+    def get(self, key, default=None):
+        self.lookups += 1
+        return self.values.get(key, default)
+
+
+class SetProbe(IterationProbe):
+    def __init__(self, values) -> None:
+        super().__init__(values)
+        self.lookups = 0
+
+    def __contains__(self, key) -> bool:
+        self.lookups += 1
+        return key in self.values
+
+
+def structural_probe(*, bootstrap, nodes: tuple[SceneNode, ...]) -> dict[str, int]:
+    """Instrument one frame without adding telemetry to production code."""
+
+    original_values = {
+        name: getattr(bootstrap, name)
+        for name in (
+            "static_nodes",
+            "visual_types",
+            "animation_states",
+            "_visual_by_id",
+            "_animation_ids",
+            "_static_by_id",
+            "_static_depth_by_id",
+        )
+    }
+    static_source = IterationProbe(original_values["static_nodes"])
+    visual_source = IterationProbe(original_values["visual_types"])
+    animation_source = IterationProbe(original_values["animation_states"])
+    visual_index = MappingProbe(original_values["_visual_by_id"])
+    animation_index = SetProbe(original_values["_animation_ids"])
+    static_index = MappingProbe(original_values["_static_by_id"])
+    static_depth_index = MappingProbe(original_values["_static_depth_by_id"])
+    probes = {
+        "static_nodes": static_source,
+        "visual_types": visual_source,
+        "animation_states": animation_source,
+        "_visual_by_id": visual_index,
+        "_animation_ids": animation_index,
+        "_static_by_id": static_index,
+        "_static_depth_by_id": static_depth_index,
+    }
+    pose_compositions = 0
+    original_compose_pose = scene_module._compose_pose
+
+    def counted_compose_pose(*args, **kwargs):
+        nonlocal pose_compositions
+        pose_compositions += 1
+        return original_compose_pose(*args, **kwargs)
+
+    try:
+        for name, probe in probes.items():
+            object.__setattr__(bootstrap, name, probe)
+        scene_module._compose_pose = counted_compose_pose
+        encode_scene_frame_against_bootstrap(
+            source_tick=1,
+            nodes=nodes,
+            bootstrap=bootstrap,
+        )
+    finally:
+        scene_module._compose_pose = original_compose_pose
+        for name, value in original_values.items():
+            object.__setattr__(bootstrap, name, value)
+
+    result = {
+        "frames": 1,
+        "static_node_iterations_per_frame": static_source.iterations,
+        "static_pose_compositions_per_frame": pose_compositions,
+        "static_registry_rebuilds_per_frame": (
+            visual_source.iterations + animation_source.iterations
+        ),
+        "visual_registry_source_iterations_per_frame": visual_source.iterations,
+        "animation_registry_source_iterations_per_frame": animation_source.iterations,
+        "cached_index_iterations_per_frame": (
+            visual_index.iterations
+            + animation_index.iterations
+            + static_index.iterations
+            + static_depth_index.iterations
+        ),
+        "cached_index_lookups_per_frame": (
+            visual_index.lookups
+            + animation_index.lookups
+            + static_index.lookups
+            + static_depth_index.lookups
+        ),
+    }
+    hard_gates = (
+        "static_node_iterations_per_frame",
+        "static_pose_compositions_per_frame",
+        "static_registry_rebuilds_per_frame",
+        "cached_index_iterations_per_frame",
+    )
+    if any(result[name] != 0 for name in hard_gates):
+        raise RuntimeError(f"frame hot-path structural gate failed: {result}")
+    if result["cached_index_lookups_per_frame"] == 0:
+        raise RuntimeError("frame hot path did not use cached bootstrap indexes")
+    return result
 
 
 def physical_memory_bytes() -> int | None:
@@ -188,17 +401,34 @@ def git(*arguments: str) -> str | None:
 
 
 def run_benchmark(
-    *, warmup: int, samples: int, rounds: int
+    *,
+    warmup: int,
+    samples: int,
+    rounds: int,
+    enforce_time_gates: bool,
 ) -> dict[str, object]:
     if warmup < 0 or samples <= 0 or rounds <= 0:
         raise ValueError(
             "warmup must be non-negative; samples and rounds must be positive"
         )
+    if enforce_time_gates and (
+        warmup < FORMAL_MINIMUM_WARMUP
+        or samples < FORMAL_MINIMUM_SAMPLES
+        or rounds < FORMAL_MINIMUM_ROUNDS
+    ):
+        raise ValueError(
+            "formal benchmark minimums are "
+            f"warmup >= {FORMAL_MINIMUM_WARMUP}, "
+            f"samples >= {FORMAL_MINIMUM_SAMPLES}, and "
+            f"rounds >= {FORMAL_MINIMUM_ROUNDS}"
+        )
     bootstrap = parse_scene_bootstrap(
         encode_scene_bootstrap(
             maximum_dynamic_nodes=NODE_COUNT,
             maximum_frame_bytes=1024 * 1024,
+            static_nodes=static_nodes(),
             visual_types=(VisualType(1),),
+            animation_states=(AnimationState(1, 0, 60),),
         )
     )
     variants = {
@@ -254,6 +484,8 @@ def run_benchmark(
             "physical_memory_bytes": physical_memory_bytes(),
         },
         "parameters": {
+            "benchmark_mode": "formal" if enforce_time_gates else "quick",
+            "static_node_count": STATIC_NODE_COUNT,
             "node_count": NODE_COUNT,
             "churn_nodes": CHURN_NODE_COUNT,
             "churn_ratio": CHURN_NODE_COUNT / NODE_COUNT,
@@ -264,14 +496,23 @@ def run_benchmark(
             "scenario_order": list(SCENARIOS),
         },
         "measured_path": (
-            "Engine validate structured SceneNode records against cached bootstrap + "
-            "single scene-frame encode -> wire encode_commit"
+            "Engine validate 500 dynamic SceneNode records against cached indexes "
+            "from a 632-static-node bootstrap + single scene-frame encode -> "
+            "wire encode_commit"
         ),
         "projection_cost_included": False,
+        "bootstrap_bytes": len(bootstrap.data),
         "scenario_contracts": {
-            "steady": "500 unchanged structured node records",
-            "motion": "500 stable identities with changed local positions",
-            "churn-25": "25 of 500 leaf identities replaced per frame (5%)",
+            "steady": "632 cached static + 500 unchanged dynamic node records",
+            "motion": "632 cached static + 500 stable dynamic identities with changed local positions",
+            "churn-25": "632 cached static + 25 of 500 dynamic leaf identities replaced per frame (5%)",
+        },
+        "structural_counts": {
+            scenario: structural_probe(
+                bootstrap=bootstrap,
+                nodes=scenario_variants[0],
+            )
+            for scenario, scenario_variants in variants.items()
         },
         "scenarios": {},
     }
@@ -355,6 +596,10 @@ def run_benchmark(
                 samples=min(samples, 60),
             ),
         }
+    report["performance_gates"] = performance_gates(
+        scenario_reports,
+        enforce_time_gates=enforce_time_gates,
+    )
     return report
 
 
@@ -375,7 +620,24 @@ def main() -> None:
     warmup = args.warmup if args.warmup is not None else (5 if args.quick else 60)
     samples = args.samples if args.samples is not None else (30 if args.quick else 600)
     rounds = args.rounds if args.rounds is not None else (1 if args.quick else 5)
-    report = run_benchmark(warmup=warmup, samples=samples, rounds=rounds)
+    if not args.quick and (
+        warmup < FORMAL_MINIMUM_WARMUP
+        or samples < FORMAL_MINIMUM_SAMPLES
+        or rounds < FORMAL_MINIMUM_ROUNDS
+    ):
+        parser.error(
+            "formal benchmark minimums are "
+            f"warmup >= {FORMAL_MINIMUM_WARMUP}, "
+            f"samples >= {FORMAL_MINIMUM_SAMPLES}, and "
+            f"rounds >= {FORMAL_MINIMUM_ROUNDS}; received "
+            f"warmup={warmup}, samples={samples}, rounds={rounds}"
+        )
+    report = run_benchmark(
+        warmup=warmup,
+        samples=samples,
+        rounds=rounds,
+        enforce_time_gates=not args.quick,
+    )
     encoded = json.dumps(report, indent=2, sort_keys=True) + "\n"
     digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
     if args.output is not None:
@@ -402,10 +664,18 @@ def main() -> None:
         )
     output_label = "-" if args.output is None else str(args.output.resolve())
     print(
-        "scene-engine-perf-500@1 nodes=500 "
+        "scene-engine-perf-500@1 static=632 dynamic=500 "
         + " ".join(scenario_fields)
         + f" output={output_label} sha256={digest}"
     )
+    gates = report["performance_gates"]
+    assert isinstance(gates, dict)
+    if gates["overall_passed"] is not True:
+        print(
+            f"formal performance gates failed; report saved to {output_label}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
