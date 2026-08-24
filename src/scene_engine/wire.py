@@ -1,4 +1,4 @@
-"""Canonical ``scene-engine-wire@1`` packet container and codecs.
+"""Canonical ``scene-engine-wire@2`` packet container and codecs.
 
 The decoder validates an entire WebSocket binary message before exposing any
 attachment. Product JSON remains opaque to the Engine, but every numeric value
@@ -10,19 +10,20 @@ from __future__ import annotations
 import json
 import math
 import struct
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import IntEnum
 from types import MappingProxyType
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any
 
-from .errors import WireError
+from .errors import ConfigurationError, WireError
 
 
-WIRE_SCHEMA = "scene-engine-wire@1"
+WIRE_SCHEMA = "scene-engine-wire@2"
 WORLD_TREE_SCHEMA = "scene-engine-json-tree@1"
-SCENE_SCHEMA = "scene-engine-scene@1"
+DISPLAY_CODEC = "scene-engine-display-node@2"
 WIRE_MAGIC = b"SENG"
-WIRE_MAJOR_VERSION = 1
+WIRE_MAJOR_VERSION = 2
 _PACKET_HEADER = struct.Struct("<4sBBHIHH")
 _ATTACHMENT_HEADER = struct.Struct("<BBHI")
 MAXIMUM_SAFE_INTEGER = (1 << 53) - 1
@@ -40,8 +41,8 @@ class PacketKind(IntEnum):
 class AttachmentKind(IntEnum):
     WORLD_SNAPSHOT = 1
     WORLD_PATCH = 2
-    SCENE_BOOTSTRAP = 3
-    SCENE_FRAME = 4
+    DISPLAY_CHECKPOINT = 3
+    DISPLAY_COMMAND_STREAM = 4
     INPUT_PAYLOAD = 6
     RESULT_PAYLOAD = 7
 
@@ -69,8 +70,9 @@ _HEADER_FIELDS = {
         "commit_seq",
         "source_tick",
         "world_revision",
+        "last_command_seq",
         "world_codec",
-        "scene_codec",
+        "display_codec",
     ),
     PacketKind.COMMIT: (
         "schema",
@@ -79,10 +81,11 @@ _HEADER_FIELDS = {
         "commit_seq",
         "source_tick",
         "world_revision",
+        "last_command_seq",
         "cause",
         "causation_id",
         "world_codec",
-        "scene_codec",
+        "display_codec",
     ),
     PacketKind.INPUT: (
         "schema",
@@ -92,7 +95,13 @@ _HEADER_FIELDS = {
         "observed_commit_seq",
         "command",
     ),
-    PacketKind.ACK: ("schema", "type", "stream_id", "commit_seq"),
+    PacketKind.ACK: (
+        "schema",
+        "type",
+        "stream_id",
+        "commit_seq",
+        "last_command_seq",
+    ),
     PacketKind.INPUT_RESULT: (
         "schema",
         "type",
@@ -177,7 +186,9 @@ def encode_engine_packet(
     normalized_attachments = tuple(
         _normalize_attachment(value, limits=limits) for value in attachments
     )
-    _validate_attachment_layout(packet_kind, normalized_attachments, limits)
+    _validate_attachment_layout(
+        packet_kind, normalized_header, normalized_attachments, limits
+    )
     chunks = [
         _PACKET_HEADER.pack(
             WIRE_MAGIC,
@@ -281,7 +292,7 @@ def read_engine_packet(
     if cursor != len(raw):
         raise WireError("packet has trailing bytes")
     frozen_attachments = tuple(attachments)
-    _validate_attachment_layout(kind, frozen_attachments, limits)
+    _validate_attachment_layout(kind, header, frozen_attachments, limits)
     return EnginePacket(kind, MappingProxyType(header), frozen_attachments, raw)
 
 
@@ -291,11 +302,11 @@ def encode_checkpoint(
     commit_seq: int,
     source_tick: int,
     world_revision: int,
+    last_command_seq: int,
     world_codec: str,
     world_snapshot: Any,
-    scene_bootstrap: Any,
-    scene_frame: Any,
-    scene_codec: str = SCENE_SCHEMA,
+    display_checkpoint: Any,
+    display_codec: str = DISPLAY_CODEC,
     limits: EngineLimits = DEFAULT_ENGINE_LIMITS,
 ) -> bytes:
     return encode_engine_packet(
@@ -307,13 +318,17 @@ def encode_checkpoint(
             "commit_seq": commit_seq,
             "source_tick": source_tick,
             "world_revision": world_revision,
+            "last_command_seq": last_command_seq,
             "world_codec": world_codec,
-            "scene_codec": scene_codec,
+            "display_codec": display_codec,
         },
         (
             (AttachmentKind.WORLD_SNAPSHOT, AttachmentEncoding.JSON, world_snapshot),
-            (AttachmentKind.SCENE_BOOTSTRAP, AttachmentEncoding.RAW, scene_bootstrap),
-            (AttachmentKind.SCENE_FRAME, AttachmentEncoding.RAW, scene_frame),
+            (
+                AttachmentKind.DISPLAY_CHECKPOINT,
+                AttachmentEncoding.JSON,
+                display_checkpoint,
+            ),
         ),
         limits=limits,
     )
@@ -325,21 +340,25 @@ def encode_commit(
     commit_seq: int,
     source_tick: int,
     world_revision: int,
+    last_command_seq: int,
     cause: str,
     causation_id: str | None,
     world_codec: str,
     world_patch: Any,
-    scene_frame: Any | None,
-    scene_codec: str = SCENE_SCHEMA,
+    display_commands: Any,
+    display_codec: str = DISPLAY_CODEC,
     limits: EngineLimits = DEFAULT_ENGINE_LIMITS,
 ) -> bytes:
     attachments: list[tuple[Any, Any, Any]] = [
         (AttachmentKind.WORLD_PATCH, AttachmentEncoding.JSON, world_patch)
     ]
-    if scene_frame is not None:
-        attachments.append(
-            (AttachmentKind.SCENE_FRAME, AttachmentEncoding.RAW, scene_frame)
+    attachments.append(
+        (
+            AttachmentKind.DISPLAY_COMMAND_STREAM,
+            AttachmentEncoding.JSON,
+            display_commands,
         )
+    )
     return encode_engine_packet(
         PacketKind.COMMIT,
         {
@@ -349,10 +368,11 @@ def encode_commit(
             "commit_seq": commit_seq,
             "source_tick": source_tick,
             "world_revision": world_revision,
+            "last_command_seq": last_command_seq,
             "cause": cause,
             "causation_id": causation_id,
             "world_codec": world_codec,
-            "scene_codec": scene_codec,
+            "display_codec": display_codec,
         },
         attachments,
         limits=limits,
@@ -387,6 +407,7 @@ def encode_ack(
     *,
     stream_id: str,
     commit_seq: int,
+    last_command_seq: int,
     limits: EngineLimits = DEFAULT_ENGINE_LIMITS,
 ) -> bytes:
     return encode_engine_packet(
@@ -396,6 +417,7 @@ def encode_ack(
             "type": "engine.ack",
             "stream_id": stream_id,
             "commit_seq": commit_seq,
+            "last_command_seq": last_command_seq,
         },
         limits=limits,
     )
@@ -492,9 +514,10 @@ def _validate_header(kind: PacketKind, value: Any) -> dict[str, Any]:
         _safe_integer(result["commit_seq"], "commit_seq")
         _safe_integer(result["source_tick"], "source_tick")
         _safe_integer(result["world_revision"], "world_revision")
+        _safe_integer(result["last_command_seq"], "last_command_seq")
         _identity(result["world_codec"], "world_codec")
-        if result["scene_codec"] != SCENE_SCHEMA:
-            raise WireError("scene_codec is unsupported")
+        if result["display_codec"] != DISPLAY_CODEC:
+            raise WireError("display_codec is unsupported")
     if kind is PacketKind.COMMIT:
         cause = result["cause"]
         if cause not in {"tick", "input", "system"}:
@@ -512,6 +535,7 @@ def _validate_header(kind: PacketKind, value: Any) -> dict[str, Any]:
     elif kind is PacketKind.ACK:
         _text(result["stream_id"], "stream_id")
         _safe_integer(result["commit_seq"], "commit_seq")
+        _safe_integer(result["last_command_seq"], "last_command_seq")
     elif kind is PacketKind.INPUT_RESULT:
         _text(result["input_id"], "input_id")
         if result["status"] not in {"rejected", "no-op"}:
@@ -540,10 +564,12 @@ def _normalize_attachment(
         except (TypeError, ValueError) as exc:
             raise WireError("attachment tuple is invalid") from exc
     if encoding is AttachmentEncoding.JSON:
+        prevalidated = _prevalidated_display_stream(source, kind=kind, limits=limits)
         payload = _json_dumps(
             source,
             sort_keys=True,
             maximum_depth=limits.maximum_json_depth,
+            prevalidated=prevalidated,
         )
         decoded = source
     else:
@@ -556,6 +582,7 @@ def _normalize_attachment(
 
 def _validate_attachment_layout(
     kind: PacketKind,
+    header: Mapping[str, Any],
     attachments: Sequence[EngineAttachment],
     limits: EngineLimits,
 ) -> None:
@@ -563,26 +590,21 @@ def _validate_attachment_layout(
         raise WireError("attachment count exceeds maximum_attachment_count")
     actual = tuple((item.kind, item.encoding) for item in attachments)
     json_encoding = AttachmentEncoding.JSON
-    raw_encoding = AttachmentEncoding.RAW
     valid: bool
     if kind is PacketKind.CHECKPOINT:
         valid = actual == (
             (AttachmentKind.WORLD_SNAPSHOT, json_encoding),
-            (AttachmentKind.SCENE_BOOTSTRAP, raw_encoding),
-            (AttachmentKind.SCENE_FRAME, raw_encoding),
+            (AttachmentKind.DISPLAY_CHECKPOINT, json_encoding),
         )
     elif kind is PacketKind.COMMIT:
         valid = bool(actual) and actual[0] == (
             AttachmentKind.WORLD_PATCH,
             json_encoding,
         )
-        cursor = 1
-        if valid and cursor < len(actual) and actual[cursor] == (
-            AttachmentKind.SCENE_FRAME,
-            raw_encoding,
-        ):
-            cursor += 1
-        valid = valid and cursor == len(actual)
+        valid = valid and len(actual) == 2 and actual[1] == (
+            AttachmentKind.DISPLAY_COMMAND_STREAM,
+            json_encoding,
+        )
         if valid and attachments[0].value is not None:
             patch = attachments[0].value
             if isinstance(patch, Mapping):
@@ -600,15 +622,54 @@ def _validate_attachment_layout(
         valid = actual == ()
     if not valid:
         raise WireError("attachment order or encoding is invalid for packet kind")
+    try:
+        if kind is PacketKind.CHECKPOINT:
+            from .display import validate_display_checkpoint
+
+            validate_display_checkpoint(
+                attachments[1].value,
+                expected_last_command_seq=header["last_command_seq"],
+            )
+        elif kind is PacketKind.COMMIT:
+            from .display import (
+                _ValidatedDisplayCommandStream,
+                validate_display_command_stream,
+            )
+
+            display_stream = attachments[1].value
+            if isinstance(display_stream, _ValidatedDisplayCommandStream):
+                if (
+                    display_stream.source_tick != header["source_tick"]
+                    or display_stream["last_command_seq"]
+                    != header["last_command_seq"]
+                ):
+                    raise ConfigurationError(
+                        "display command stream seal does not match packet header"
+                    )
+            else:
+                validate_display_command_stream(
+                    display_stream,
+                    expected_source_tick=header["source_tick"],
+                    expected_last_command_seq=header["last_command_seq"],
+                )
+    except ConfigurationError as exc:
+        raise WireError("display attachment is invalid") from exc
 
 
-def _json_dumps(value: Any, *, sort_keys: bool, maximum_depth: int) -> bytes:
-    _validate_json_value(
-        value,
-        active=set(),
-        depth=0,
-        maximum_depth=maximum_depth,
-    )
+def _json_dumps(
+    value: Any,
+    *,
+    sort_keys: bool,
+    maximum_depth: int,
+    prevalidated: bool = False,
+) -> bytes:
+    if not prevalidated:
+        _validate_json_value(
+            value,
+            active=set(),
+            depth=0,
+            maximum_depth=maximum_depth,
+        )
     try:
         return json.dumps(
             value,
@@ -619,6 +680,19 @@ def _json_dumps(value: Any, *, sort_keys: bool, maximum_depth: int) -> bytes:
         ).encode("utf-8")
     except (TypeError, ValueError, UnicodeError) as exc:
         raise WireError("value is not canonical JSON") from exc
+
+
+def _prevalidated_display_stream(
+    value: Any, *, kind: AttachmentKind, limits: EngineLimits
+) -> bool:
+    if kind is not AttachmentKind.DISPLAY_COMMAND_STREAM:
+        return False
+    from .display import _ValidatedDisplayCommandStream
+
+    return (
+        isinstance(value, _ValidatedDisplayCommandStream)
+        and value.maximum_json_depth <= limits.maximum_json_depth
+    )
 
 
 def _json_loads(data: bytes, *, label: str, maximum_depth: int) -> Any:
@@ -762,7 +836,7 @@ __all__ = [
     "EnginePacket",
     "MAXIMUM_SAFE_INTEGER",
     "PacketKind",
-    "SCENE_SCHEMA",
+    "DISPLAY_CODEC",
     "WIRE_MAJOR_VERSION",
     "WIRE_MAGIC",
     "WIRE_SCHEMA",

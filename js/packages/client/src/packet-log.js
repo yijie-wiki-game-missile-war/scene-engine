@@ -1,4 +1,5 @@
 import { sha256HexBytes } from './hash.js';
+import { parseDisplayCheckpoint, parseDisplayCommandStream } from './display.js';
 import {
   DEFAULT_ENGINE_LIMITS,
   ENGINE_WIRE_SCHEMA,
@@ -7,16 +8,17 @@ import {
   readEnginePacket,
 } from './wire.js';
 
-const LOG_SCHEMA = 'scene-engine-packet-log@1';
+const LOG_SCHEMA = 'scene-engine-packet-log@2';
 const PREFIX_BYTES = 8;
 const MANIFEST_FIELDS = Object.freeze([
   'schema', 'wire_schema', 'complete', 'packet_count', 'checkpoint_count',
   'packets_bytes', 'packets_sha256', 'index_sha256', 'stream_id',
   'first_commit_seq', 'last_commit_seq', 'first_source_tick', 'last_source_tick',
+  'first_command_seq', 'last_command_seq',
 ]);
 const ENTRY_FIELDS = Object.freeze([
   'stream_id', 'commit_seq', 'source_tick', 'world_revision', 'offset',
-  'packet_length', 'checkpoint',
+  'packet_length', 'checkpoint', 'last_command_seq',
 ]);
 
 export class PacketLogClientError extends Error {
@@ -62,7 +64,9 @@ export function readPacketLog({ manifest, index, packets } = {}, limits = DEFAUL
       || manifestValue.first_commit_seq !== first.commit_seq
       || manifestValue.last_commit_seq !== last.commit_seq
       || manifestValue.first_source_tick !== first.source_tick
-      || manifestValue.last_source_tick !== last.source_tick) {
+      || manifestValue.last_source_tick !== last.source_tick
+      || manifestValue.first_command_seq !== first.last_command_seq
+      || manifestValue.last_command_seq !== last.last_command_seq) {
     fail('packet-log-manifest-content-mismatch');
   }
 
@@ -103,6 +107,16 @@ function rebuildRecords(bytes, limits) {
     }
     validateProgression(previous, packet);
     const header = packet.header;
+    if (packet.kind === 'engine.checkpoint') {
+      parseDisplayCheckpoint(attachment(packet, 'display_checkpoint').value, {
+        header,
+      });
+    } else {
+      parseDisplayCommandStream(attachment(packet, 'display_command_stream').value, {
+        header,
+        baseCommandSeq: previous.header.last_command_seq,
+      });
+    }
     const entry = Object.freeze({
       stream_id: header.stream_id,
       commit_seq: header.commit_seq,
@@ -111,6 +125,7 @@ function rebuildRecords(bytes, limits) {
       offset,
       packet_length: packetLength,
       checkpoint: packet.kind === 'engine.checkpoint',
+      last_command_seq: header.last_command_seq,
     });
     records.push(Object.freeze({ entry, rawBytes, packet }));
     previous = packet;
@@ -131,13 +146,15 @@ function validateProgression(previous, packet) {
   if (next.stream_id !== before.stream_id) fail('packet-log-stream-changed');
   if (packet.kind === 'engine.checkpoint') {
     if (next.commit_seq !== before.commit_seq || next.source_tick !== before.source_tick
-        || next.world_revision !== before.world_revision) {
+        || next.world_revision !== before.world_revision
+        || next.last_command_seq !== before.last_command_seq) {
       fail('packet-log-periodic-checkpoint-cursor-mismatch');
     }
     return;
   }
   if (next.commit_seq !== before.commit_seq + 1
-      || next.world_revision !== before.world_revision + 1) {
+      || next.world_revision !== before.world_revision + 1
+      || next.last_command_seq < before.last_command_seq) {
     fail('packet-log-commit-gap');
   }
   const tickDelta = next.source_tick - before.source_tick;
@@ -155,6 +172,7 @@ function validateManifest(value) {
   for (const field of [
     'packet_count', 'checkpoint_count', 'packets_bytes', 'first_commit_seq',
     'last_commit_seq', 'first_source_tick', 'last_source_tick',
+    'first_command_seq', 'last_command_seq',
   ]) safeInteger(value[field], 'packet-log-manifest-integer-invalid');
   for (const field of ['packets_sha256', 'index_sha256']) {
     if (typeof value[field] !== 'string' || !/^[0-9a-f]{64}$/u.test(value[field])) {
@@ -169,6 +187,7 @@ function validateEntry(value) {
       || typeof value.checkpoint !== 'boolean') fail('packet-log-index-entry-invalid');
   for (const field of [
     'commit_seq', 'source_tick', 'world_revision', 'offset', 'packet_length',
+    'last_command_seq',
   ]) safeInteger(value[field], 'packet-log-index-entry-integer-invalid');
   if (value.packet_length === 0) fail('packet-log-index-entry-length-invalid');
   return Object.freeze({ ...value });
@@ -189,6 +208,11 @@ function isRecord(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const prototype = Object.getPrototypeOf(value);
   return prototype === Object.prototype || prototype === null;
+}
+function attachment(packet, kind) {
+  const value = packet.attachments.find((item) => item.kind === kind);
+  if (!value) fail(`packet-log-${kind}-missing`);
+  return value;
 }
 function ownedBytes(value, code) {
   if (value instanceof Uint8Array) return value.slice();

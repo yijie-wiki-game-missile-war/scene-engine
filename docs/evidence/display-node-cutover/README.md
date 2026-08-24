@@ -1,0 +1,31 @@
+# JavaScript DisplayRuntime formal acceptance evidence
+
+`js-display-runtime-500-formal.json` is generated, not hand-authored. Reproduce it from the
+Scene Engine repository with:
+
+```bash
+node --expose-gc scripts/benchmark_display_runtime_500.mjs \
+  --output docs/evidence/display-node-cutover/js-display-runtime-500-formal.json
+```
+
+The formal run commits 600 validation ticks followed by a 36,000-tick logical soak. Every
+tick is committed individually at the 60 Hz authority cursor and contains 40 real
+single-target AuthorityPort operations. No timing sample is excluded.
+
+The fixture contains 500 `py/` authority roots (250 `initial`, 250 `live`), exactly 1,000
+prefab-local Nodes, 501 real Three bindings, one 500-instance batch, and 20 scheduled
+BehaviourComponents. It uses the production DisplayRuntime and ThreeRenderBackend code.
+The injected renderer replaces only the unavailable Node WebGL context; Three objects,
+bindings, batching, matrices, ResourceManager leases, scheduling, and disposal remain the
+real implementations.
+
+The evidence records command apply, transform flush, complete RenderSystem prepare,
+backend prepare, total CPU before draw, command payload size, forced-GC memory checkpoints,
+NodeIndex lookup diagnostics, a separately tracked correctness hash, cardinalities, and
+the final disposal baseline. Formal status is `READY` only when every gate passes.
+
+For a short development check that does not qualify as formal evidence:
+
+```bash
+node --expose-gc scripts/benchmark_display_runtime_500.mjs --quick
+```

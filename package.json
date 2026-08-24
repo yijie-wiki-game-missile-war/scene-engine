@@ -1,6 +1,6 @@
 {
   "name": "scene-engine-workspace",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "private": true,
   "type": "module",
   "packageManager": "npm@11.9.0",
@@ -13,6 +13,6 @@
   ],
   "scripts": {
     "test": "npm test --workspaces --if-present",
-    "verify": "python3 scripts/verify_cutover.py"
+    "verify": "uv run python scripts/verify_cutover.py"
   }
 }

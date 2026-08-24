@@ -8,9 +8,10 @@ diff.  ``apply_json_patch`` is suitable for consumers and test oracles.
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from functools import cmp_to_key
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 from .errors import JsonTreeError
 from .wire import MAXIMUM_SAFE_INTEGER, WORLD_TREE_SCHEMA

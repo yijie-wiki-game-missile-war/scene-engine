@@ -29,10 +29,6 @@ class JsonTreeError(SceneEngineError, ValueError):
     """A JSON snapshot or patch is malformed or cannot be applied."""
 
 
-class SceneCodecError(SceneEngineError, ValueError):
-    """A scene bootstrap or complete frame body is malformed."""
-
-
 class SessionError(SceneEngineError, RuntimeError):
     """A client session violated ordering, ACK, or resource limits."""
 
@@ -52,7 +48,6 @@ __all__ = [
     "RuntimeBusyError",
     "RuntimeFatalError",
     "RuntimeStateError",
-    "SceneCodecError",
     "SceneEngineError",
     "SessionBackpressureError",
     "SessionError",

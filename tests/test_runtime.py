@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
-from pathlib import Path
-
 import pytest
 
 import scene_engine.runtime as runtime_module
@@ -20,12 +18,11 @@ from scene_engine import (
     WorldCounters,
 )
 from scene_engine.recording import PacketLogWriter, read_packet_log
-from scene_engine.scene import (
-    SceneEvent,
-    SceneNode,
-    VisualType,
-    encode_scene_bootstrap,
-    parse_scene_frame,
+from scene_engine.display import (
+    DisplayCatalogIdentity,
+    DisplayCommand,
+    DisplayNode,
+    DisplayTransform,
 )
 from scene_engine.session import PacketRef
 from scene_engine.wire import (
@@ -53,7 +50,7 @@ class Program:
         self.steps = 0
         self.input_calls = 0
         self.checkpoint_calls = 0
-        self.invalid_commit_scene = False
+        self.invalid_commit_display = False
         self.world_codec = "example-world@1"
 
     def read_counters(self, world: World) -> WorldCounters:
@@ -88,9 +85,9 @@ class Program:
         return ProductCheckpoint(
             self.world_codec,
             {"tick": world.tick, "value": world.value, "world_revision": world.world_revision},
-            bootstrap(),
+            "main",
+            catalog(),
             nodes(world),
-            events(world),
         )
 
     def build_commit(self, world: World, mutation, context) -> ProductCommit:
@@ -109,25 +106,22 @@ class Program:
                 },
             ]
         )
-        product_nodes = nodes(world) if context.commit.cause == "tick" else None
-        scene_events = events(world) if context.commit.cause == "tick" else ()
-        if self.invalid_commit_scene:
-            product_nodes = (
-                SceneNode(
-                    1,
-                    0,
-                    2,
-                    1,
-                    (world.value, 0.0, 0.0),
-                    (0.0, 0.0, 0.0, 1.0),
-                    (1.0, 1.0, 1.0),
+        display_commands = (
+            (
+                DisplayCommand.set_transform("py/example", transform(world)),
+                DisplayCommand.set_state(
+                    "py/example", {"tick": world.tick, "value": world.value}
                 ),
             )
+            if context.commit.cause == "tick"
+            else ()
+        )
+        if self.invalid_commit_display:
+            display_commands = ("not-a-display-command",)
         return ProductCommit(
             self.world_codec,
             {"schema": "scene-engine-json-tree@1", "changes": changes},
-            product_nodes,
-            scene_events,
+            display_commands,
         )
 
 
@@ -156,30 +150,30 @@ class Recorder:
         self.sealed = True
 
 
-def bootstrap() -> bytes:
-    return encode_scene_bootstrap(
-        maximum_dynamic_nodes=8,
-        maximum_frame_bytes=4096,
-        visual_types=(VisualType(1),),
+def catalog() -> DisplayCatalogIdentity:
+    return DisplayCatalogIdentity("a" * 64, "b" * 64, "c" * 64)
+
+
+def transform(world: World) -> DisplayTransform:
+    return DisplayTransform(
+        position=(world.value, 0.0, 0.0),
+        rotation_xyzw=(0.0, 0.0, 0.0, 1.0),
+        scale=(1.0, 1.0, 1.0),
     )
 
 
-def nodes(world: World) -> tuple[SceneNode, ...]:
+def nodes(world: World) -> tuple[DisplayNode, ...]:
     return (
-        SceneNode(
-            1,
-            0,
-            1,
-            1,
-            (world.value, 0.0, 0.0),
-            (0.0, 0.0, 0.0, 1.0),
-            (1.0, 1.0, 1.0),
+        DisplayNode(
+            name="py/example",
+            parent_name=None,
+            prefab_type="example.node",
+            transform_mode="live",
+            transform=transform(world),
+            visible=True,
+            state={"tick": world.tick, "value": world.value},
         ),
     )
-
-
-def events(world: World) -> tuple[SceneEvent, ...]:
-    return (SceneEvent(1, 1, 0, 1, 0, world.tick, b"tick"),)
 
 
 def make_runtime(*, config=None, recorder=None):
@@ -205,7 +199,11 @@ def acknowledge(runtime, transport, client_id, packet=None):
     state = read_engine_packet(packet or transport.sent[client_id][-1])
     runtime.receive_client_packet(
         client_id,
-        encode_ack(stream_id=state.header["stream_id"], commit_seq=state.header["commit_seq"]),
+        encode_ack(
+            stream_id=state.header["stream_id"],
+            commit_seq=state.header["commit_seq"],
+            last_command_seq=state.header["last_command_seq"],
+        ),
     )
 
 
@@ -222,7 +220,7 @@ def send_input(runtime, client_id, *, input_id, command, args=None):
     )
 
 
-def test_tick_and_changed_input_have_one_commit_cursor_and_tick_frame() -> None:
+def test_tick_and_changed_input_have_one_commit_cursor_and_display_seal() -> None:
     runtime, clock, world, _, transport = make_runtime()
     runtime.client_connected("a")
     acknowledge(runtime, transport, "a")
@@ -235,12 +233,15 @@ def test_tick_and_changed_input_have_one_commit_cursor_and_tick_frame() -> None:
     assert tick.header["commit_seq"] == tick.header["source_tick"] == 1
     assert [item.kind for item in tick.attachments] == [
         AttachmentKind.WORLD_PATCH,
-        AttachmentKind.SCENE_FRAME,
+        AttachmentKind.DISPLAY_COMMAND_STREAM,
     ]
-    scene_frame = next(
-        item.bytes for item in tick.attachments if item.kind is AttachmentKind.SCENE_FRAME
-    )
-    assert parse_scene_frame(scene_frame, source_tick=1).events == events(world)
+    command_stream = tick.attachments[1].value
+    assert command_stream["base_command_seq"] == 0
+    assert command_stream["last_command_seq"] == tick.header["last_command_seq"] == 2
+    assert [record["kind"] for record in command_stream["commands"]] == [
+        "node-set-transform",
+        "node-set-state",
+    ]
     acknowledge(runtime, transport, "a")
 
     send_input(runtime, "a", input_id="a:1", command="increment", args={"amount": 2.5})
@@ -250,6 +251,8 @@ def test_tick_and_changed_input_have_one_commit_cursor_and_tick_frame() -> None:
     assert changed.header["causation_id"] == "a:1"
     assert changed.header["source_tick"] == 1
     assert changed.header["world_revision"] == changed.header["commit_seq"] == 2
+    assert changed.header["last_command_seq"] == 2
+    assert changed.attachments[1].value["commands"] == []
     assert world.value == 4.0
 
 
@@ -427,6 +430,7 @@ def test_evicted_current_checkpoint_is_rebuilt_and_retained_safely() -> None:
         runtime.commit_seq,
         runtime.current_tick,
         0,
+        original.last_command_seq,
     )
     assert runtime._retain_packet(evictor)
     assert runtime._checkpoint_cache is None
@@ -452,7 +456,12 @@ def test_multiple_clients_share_commit_bytes_and_bad_ack_is_isolated() -> None:
     runtime.pump()
     assert transport.sent["a"][-1] is transport.sent["b"][-1]
     runtime.receive_client_packet(
-        "b", encode_ack(stream_id=runtime.stream_id, commit_seq=runtime.commit_seq + 1)
+        "b",
+        encode_ack(
+            stream_id=runtime.stream_id,
+            commit_seq=runtime.commit_seq + 1,
+            last_command_seq=runtime._display_command_seq,
+        ),
     )
     assert runtime.health.client_count == 1
     assert transport.closed[-1][0] == "b"
@@ -554,10 +563,12 @@ def test_periodic_recorder_uses_current_checkpoint_cache_after_commit() -> None:
         periodic.header["commit_seq"],
         periodic.header["source_tick"],
         periodic.header["world_revision"],
+        periodic.header["last_command_seq"],
     ) == (
         commit.header["commit_seq"],
         commit.header["source_tick"],
         commit.header["world_revision"],
+        commit.header["last_command_seq"],
     )
     cached = runtime._checkpoint_cache
     assert cached is not None
@@ -575,22 +586,31 @@ def test_oversized_periodic_checkpoint_records_anchor_and_evicts_session(
 ) -> None:
     probe_world = World(tick=9, world_revision=9)
     probe_program = Program()
+    probe_clock = ManualClock()
     probe = SceneEngineRuntime(
         world=probe_world,
         program=probe_program,
         transport=Transport(),
-        clock=ManualClock(),
+        clock=probe_clock,
         stream_id="runtime-stream",
         initial_commit_seq=9,
     )
     probe_program.runtime = probe
     probe.start()
     initial_checkpoint_bytes = probe.health.retained_bytes
+    probe_clock.advance(1 / 60)
+    probe.pump()
+    probe_commit_bytes = next(
+        packet.byte_length for packet in probe._retained if not packet.checkpoint
+    )
     probe.stop()
 
     recorder = PacketLogWriter(tmp_path, fsync=False)
     config = RuntimeConfig(
-        maximum_global_retained_bytes=initial_checkpoint_bytes,
+        maximum_global_retained_bytes=max(
+            initial_checkpoint_bytes,
+            probe_commit_bytes,
+        ),
         recording_checkpoint_interval_commits=1,
     )
     clock = ManualClock()
@@ -618,8 +638,8 @@ def test_oversized_periodic_checkpoint_records_anchor_and_evicts_session(
 
     assert runtime.health.state == "running"
     assert runtime.health.client_count == 0
-    assert runtime.health.retained_packet_count == 0
-    assert runtime._checkpoint_cache is None
+    assert runtime.health.retained_packet_count == 1
+    assert runtime._checkpoint_cache is not None
     assert program.checkpoint_calls == 2
     assert transport.closed[-1] == ("active", "global-retention-evicted")
     assert [
@@ -637,6 +657,7 @@ def test_oversized_periodic_checkpoint_records_anchor_and_evicts_session(
     assert periodic.header["commit_seq"] == 10
     assert periodic.header["source_tick"] == commit.header["source_tick"] == 10
     assert periodic.header["world_revision"] == commit.header["world_revision"] == 10
+    assert periodic.header["last_command_seq"] == commit.header["last_command_seq"]
     assert len(log.packet_at(0)) == initial_checkpoint_bytes
     assert len(log.packet_at(2)) > initial_checkpoint_bytes
 
@@ -668,80 +689,80 @@ def test_runtime_has_no_public_mutable_world_escape_hatch() -> None:
     assert not hasattr(SceneEngineRuntime, "export_committed_state")
 
 
-@pytest.mark.parametrize("failure", ["codec", "scene"])
-def test_stream_codec_and_scene_catalog_are_frozen_before_first_commit(failure) -> None:
+@pytest.mark.parametrize("failure", ["codec", "display"])
+def test_stream_codec_and_display_commands_are_validated_before_commit(failure) -> None:
     runtime, clock, _, program, _ = make_runtime()
     if failure == "codec":
         program.world_codec = "other-world@1"
     else:
-        program.invalid_commit_scene = True
+        program.invalid_commit_display = True
     clock.advance(1 / 60)
     with pytest.raises(RuntimeFatalError):
         runtime.pump()
     assert runtime.health.state == "fatal"
 
 
-def test_product_scene_port_is_structured_and_has_no_encoded_alias() -> None:
+def test_product_display_port_is_structured_and_has_no_legacy_alias() -> None:
     product = ProductCheckpoint(
         "example-world@1",
         {"tick": 0},
-        bootstrap(),
+        "main",
+        catalog(),
         list(nodes(World())),
-        list(events(World())),
     )
-    assert isinstance(product.scene_nodes, tuple)
-    assert isinstance(product.scene_events, tuple)
+    assert isinstance(product.display_nodes, tuple)
     assert not hasattr(product, "scene_frame")
+    assert not hasattr(product, "scene_bootstrap")
     commit = ProductCommit(
         "example-world@1",
         {"schema": "scene-engine-json-tree@1", "changes": []},
-        None,
+        [],
     )
     assert not hasattr(commit, "events")
+    assert isinstance(commit.display_commands, tuple)
     with pytest.raises(TypeError):
         ProductCheckpoint(  # type: ignore[call-arg]
             "example-world@1",
             {"tick": 0},
-            bootstrap(),
+            "main",
+            catalog(),
             scene_frame=b"legacy",
         )
     with pytest.raises(ConfigurationError):
         ProductCommit(
             "example-world@1",
             {"schema": "scene-engine-json-tree@1", "changes": []},
-            None,
-            events(World()),
+            ("invalid",),
         )
     with pytest.raises(TypeError):
         ProductCommit(  # type: ignore[call-arg]
             "example-world@1",
             {"schema": "scene-engine-json-tree@1", "changes": []},
-            None,
             events={},
         )
 
 
-def test_bootstrap_is_parsed_once_and_each_scene_publication_encodes_once(
+def test_checkpoint_and_each_display_command_stream_encode_once(
     monkeypatch,
 ) -> None:
-    parse_calls = 0
+    checkpoint_calls = 0
     encode_ticks = []
-    real_parse = runtime_module.parse_scene_bootstrap
-    real_encode = runtime_module.encode_scene_frame_against_bootstrap
+    real_checkpoint = runtime_module.encode_display_checkpoint
+    real_encode = runtime_module.encode_display_command_stream
 
-    def counted_parse(*args, **kwargs):
-        nonlocal parse_calls
-        parse_calls += 1
-        return real_parse(*args, **kwargs)
+    def counted_checkpoint(*args, **kwargs):
+        nonlocal checkpoint_calls
+        checkpoint_calls += 1
+        return real_checkpoint(*args, **kwargs)
 
     def counted_encode(*args, **kwargs):
         encode_ticks.append(kwargs["source_tick"])
         return real_encode(*args, **kwargs)
 
-    monkeypatch.setattr(runtime_module, "parse_scene_bootstrap", counted_parse)
+    monkeypatch.setattr(runtime_module, "encode_display_checkpoint", counted_checkpoint)
     monkeypatch.setattr(
         runtime_module,
-        "encode_scene_frame_against_bootstrap",
+        "encode_display_command_stream",
         counted_encode,
     )
     runtime, clock, _, _, transport = make_runtime()
@@ -750,6 +771,6 @@ def test_bootstrap_is_parsed_once_and_each_scene_publication_encodes_once(
     clock.advance(1 / 60)
     runtime.pump()
 
-    assert parse_calls == 1
-    assert encode_ticks == [0, 1]
-    assert not hasattr(runtime_module, "parse_scene_frame")
+    assert checkpoint_calls == 1
+    assert encode_ticks == [1]
+    assert not hasattr(runtime_module, "encode_scene_frame_against_bootstrap")

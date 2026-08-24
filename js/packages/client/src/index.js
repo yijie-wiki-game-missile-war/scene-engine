@@ -1,7 +1,9 @@
+import {
+  parseDisplayCheckpoint,
+  parseDisplayCommandStream,
+} from './display.js';
 import { applyJsonPatch, prepareJsonSnapshot } from './json-tree.js';
 import { readPacketLog } from './packet-log.js';
-import { parseSceneBootstrap, parseSceneFrame } from './scene.js';
-import { SceneTree } from './tree.js';
 import {
   DEFAULT_ENGINE_LIMITS,
   encodeEngineAck,
@@ -9,7 +11,15 @@ import {
   readEnginePacket,
 } from './wire.js';
 
-const EMPTY_SCENE_EVENTS = Object.freeze([]);
+const AUTHORITY_METHOD = Object.freeze({
+  'node-create': 'createNode',
+  'node-set-transform': 'setNodeTransform',
+  'node-set-parent': 'setNodeParent',
+  'node-set-visible': 'setNodeVisible',
+  'node-set-state': 'setNodeState',
+  'node-replace-prefab': 'replaceNodePrefab',
+  'node-remove': 'removeNode',
+});
 
 export class SceneEngineClientError extends Error {
   constructor(code, message = code, options = undefined) {
@@ -21,20 +31,29 @@ export class SceneEngineClientError extends Error {
 
 export class SceneEngineClient {
   #commit = null;
+  #createDisplaySession;
+  #displaySession = null;
   #disposed = false;
   #failed = false;
+  #lastCommandSeq = null;
   #limits;
   #onCommit;
-  #tree;
   #worldCodec = null;
   #worldState = null;
 
-  constructor({ limits = DEFAULT_ENGINE_LIMITS, onCommit = null } = {}) {
+  constructor({
+    limits = DEFAULT_ENGINE_LIMITS,
+    onCommit = null,
+    createDisplaySession,
+  } = {}) {
     if (!limits || typeof limits !== 'object' || Array.isArray(limits)) {
       fail('client-limits-invalid');
     }
     if (onCommit !== null && typeof onCommit !== 'function') {
       fail('client-on-commit-invalid');
+    }
+    if (typeof createDisplaySession !== 'function') {
+      fail('client-display-session-factory-invalid');
     }
     const known = new Set(Object.keys(DEFAULT_ENGINE_LIMITS));
     for (const key of Reflect.ownKeys(limits)) {
@@ -45,7 +64,7 @@ export class SceneEngineClient {
       if (!Number.isSafeInteger(value) || value <= 0) fail('client-limit-invalid');
     }
     this.#onCommit = onCommit;
-    this.#tree = new SceneTree();
+    this.#createDisplaySession = createDisplaySession;
   }
 
   applyPacket(rawBytes) {
@@ -78,78 +97,135 @@ export class SceneEngineClient {
       if (header.stream_id !== this.#commit.streamId) fail('checkpoint-stream-changed');
       if (header.commit_seq <= this.#commit.commitSeq
           || header.source_tick < this.#commit.sourceTick
-          || header.world_revision < this.#commit.worldRevision) {
+          || header.world_revision < this.#commit.worldRevision
+          || header.last_command_seq < this.#lastCommandSeq) {
         fail('checkpoint-cursor-not-higher');
       }
       if (header.world_codec !== this.#worldCodec) fail('world-codec-changed');
     }
-    const world = prepareJsonSnapshot(attachment(packet, 'world_snapshot').value, this.#limits);
-    const bootstrap = parseSceneBootstrap(attachment(packet, 'scene_bootstrap').bytes, {
-      maximumBootstrapBytes: this.#limits.maximumAttachmentBytes,
-    });
-    const frame = parseSceneFrame(attachment(packet, 'scene_frame').bytes, {
-      sourceTick: header.source_tick,
-      limits: {
-        maximumFrameBytes: Math.min(
-          bootstrap.header.maximumFrameBytes,
-          this.#limits.maximumAttachmentBytes,
-        ),
-        maximumFrameNodes: bootstrap.header.maximumDynamicNodes,
-      },
-    });
+    const world = prepareJsonSnapshot(
+      attachment(packet, 'world_snapshot').value,
+      this.#limits,
+    );
+    const checkpoint = parseDisplayCheckpoint(
+      attachment(packet, 'display_checkpoint').value,
+      { header },
+    );
     const commit = commitView('checkpoint', header);
-    const candidate = this.#tree.prepareCheckpoint(bootstrap, frame, commit);
-    const ackPacket = encodeEngineAck({
-      streamId: commit.streamId,
-      commitSeq: commit.commitSeq,
-    }, this.#limits);
-    this.#tree.commit(candidate);
-    this.#worldState = world;
-    this.#worldCodec = header.world_codec;
-    this.#commit = commit;
-    const events = sceneEventView(candidate.sceneEvents);
-    this.#schedule('checkpoint', commit, candidate.plan, events);
-    return outcome('checkpoint', commit, ackPacket, null);
+    const cursor = displayCursor(commit);
+    const candidate = createSession(
+      callSynchronous(
+        this.#createDisplaySession,
+        undefined,
+        [Object.freeze({
+          sceneName: checkpoint.sceneName,
+          sceneCatalogHash: checkpoint.sceneCatalogHash,
+          prefabCatalogHash: checkpoint.prefabCatalogHash,
+          stateSchemaHash: checkpoint.stateSchemaHash,
+          commit,
+        })],
+        'display-session-factory-async',
+      ),
+    );
+    try {
+      callSynchronous(
+        candidate.runtime.installScene,
+        candidate.runtime,
+        [Object.freeze({ sceneName: checkpoint.sceneName })],
+        'display-install-scene-async',
+      );
+      for (const node of checkpoint.nodes) {
+        callAuthority(candidate.authorityPort, 'createNode', node);
+      }
+      callSynchronous(
+        candidate.runtime.activate,
+        candidate.runtime,
+        [cursor],
+        'display-activate-async',
+      );
+      const displayView = provideDisplayView(candidate);
+      callSynchronous(
+        candidate.runtime.start,
+        candidate.runtime,
+        [],
+        'display-start-async',
+      );
+      const ackPacket = encodeEngineAck({
+        streamId: commit.streamId,
+        commitSeq: commit.commitSeq,
+        lastCommandSeq: commit.lastCommandSeq,
+      }, this.#limits);
+      const previous = this.#displaySession;
+      this.#displaySession = candidate;
+      this.#worldState = world;
+      this.#worldCodec = header.world_codec;
+      this.#commit = commit;
+      this.#lastCommandSeq = checkpoint.lastCommandSeq;
+      safeDispose(previous);
+      this.#schedule('checkpoint', commit, world, displayView);
+      return outcome('checkpoint', commit, ackPacket, null);
+    } catch (error) {
+      safeDispose(candidate);
+      throw error;
+    }
   }
 
   #applyCommit(packet) {
     if (this.#commit === null) fail('checkpoint-required');
     const header = packet.header;
     validateCommitProgression(this.#commit, header, this.#worldCodec);
+    const stream = parseDisplayCommandStream(
+      attachment(packet, 'display_command_stream').value,
+      {
+        header,
+        baseCommandSeq: this.#lastCommandSeq,
+      },
+    );
     const world = applyJsonPatch(
       this.#worldState,
       attachment(packet, 'world_patch').value,
       this.#limits,
     );
     const commit = commitView('commit', header);
-    const frameAttachment = optionalAttachment(packet, 'scene_frame');
-    if (header.cause === 'tick' && frameAttachment === null) {
-      fail('tick-scene-frame-required');
+    const cursor = displayCursor(commit);
+    const session = this.#displaySession;
+    let gateBegun = false;
+    try {
+      callSynchronous(
+        session.commitGate.begin,
+        session.commitGate,
+        [cursor],
+        'display-gate-begin-async',
+      );
+      gateBegun = true;
+      for (const command of stream.commands) {
+        callAuthority(
+          session.authorityPort,
+          AUTHORITY_METHOD[command.kind],
+          authorityPayload(command),
+        );
+      }
+      callSynchronous(
+        session.commitGate.seal,
+        session.commitGate,
+        [cursor],
+        'display-gate-seal-async',
+      );
+      const displayView = provideDisplayView(session);
+      this.#worldState = world;
+      this.#commit = commit;
+      this.#lastCommandSeq = stream.lastCommandSeq;
+      const ackPacket = encodeEngineAck({
+        streamId: commit.streamId,
+        commitSeq: commit.commitSeq,
+        lastCommandSeq: commit.lastCommandSeq,
+      }, this.#limits);
+      this.#schedule('commit', commit, world, displayView);
+      return outcome('commit', commit, ackPacket, null);
+    } catch (error) {
+      if (gateBegun) safeGateFail(session, error);
+      throw error;
     }
-    let candidate;
-    if (frameAttachment) {
-      const frame = parseSceneFrame(frameAttachment.bytes, {
-        sourceTick: header.source_tick,
-        limits: {
-          maximumFrameBytes: this.#limits.maximumAttachmentBytes,
-        },
-      });
-      candidate = this.#tree.prepareFrame(frame, commit);
-    } else {
-      candidate = this.#tree.prepareNoFrame(commit);
-    }
-    const events = frameAttachment
-      ? sceneEventView(candidate.sceneEvents)
-      : EMPTY_SCENE_EVENTS;
-    const ackPacket = encodeEngineAck({
-      streamId: commit.streamId,
-      commitSeq: commit.commitSeq,
-    }, this.#limits);
-    this.#tree.commit(candidate);
-    this.#worldState = world;
-    this.#commit = commit;
-    this.#schedule('commit', commit, candidate.plan, events);
-    return outcome('commit', commit, ackPacket, null);
   }
 
   #applyInputResult(packet) {
@@ -168,13 +244,9 @@ export class SceneEngineClient {
 
   currentWorldState() { this.#requireOpen(); return this.#worldState; }
   currentCommit() { this.#requireOpen(); return this.#commit; }
-  currentView() { this.#requireOpen(); return this.#commit ? this.#tree.currentView() : null; }
-  getNode(displayId) { return this.currentView()?.getNode(displayId) ?? null; }
-  getProfile(displayId) { return this.currentView()?.getProfile(displayId) ?? null; }
-  getInteraction(displayId) { return this.currentView()?.getInteraction(displayId) ?? null; }
-  getWorldPose(displayId, out) {
-    const view = this.currentView();
-    return view === null ? false : view.getWorldPose(displayId, out);
+  currentDisplayView() {
+    this.#requireOpen();
+    return this.#displaySession === null ? null : provideDisplayView(this.#displaySession);
   }
 
   encodeInput({ inputId, command, args = {} } = {}) {
@@ -194,29 +266,26 @@ export class SceneEngineClient {
     return Object.freeze({
       commit: this.#commit,
       worldState: this.#worldState,
-      view: this.#commit ? this.#tree.currentView() : null,
+      displayView: this.currentDisplayView(),
     });
   }
 
   dispose() {
     if (this.#disposed) return;
     this.#disposed = true;
-    this.#tree.dispose();
+    safeDispose(this.#displaySession);
+    this.#displaySession = null;
     this.#worldState = null;
     this.#worldCodec = null;
     this.#commit = null;
+    this.#lastCommandSeq = null;
+    this.#createDisplaySession = null;
     this.#onCommit = null;
   }
 
-  #schedule(kind, commit, plan, events) {
+  #schedule(kind, commit, worldState, displayView) {
     if (this.#onCommit === null) return;
-    const payload = Object.freeze({
-      kind,
-      commit,
-      view: this.#tree.currentView(),
-      plan,
-      events,
-    });
+    const payload = Object.freeze({ kind, commit, worldState, displayView });
     queueMicrotask(() => {
       if (this.#disposed) return;
       try { this.#onCommit(payload); } catch { /* observers never roll back a commit */ }
@@ -235,6 +304,9 @@ function validateCommitProgression(previous, header, worldCodec) {
   if (header.world_codec !== worldCodec) fail('world-codec-changed');
   if (header.commit_seq !== previous.commitSeq + 1) fail('commit-sequence-gap');
   if (header.world_revision !== previous.worldRevision + 1) fail('world-revision-gap');
+  if (header.last_command_seq < previous.lastCommandSeq) {
+    fail('display-command-cursor-regressed');
+  }
   const delta = header.source_tick - previous.sourceTick;
   if (header.cause === 'tick' ? delta !== 1
     : header.cause === 'input' ? delta !== 0 : ![0, 1].includes(delta)) {
@@ -249,29 +321,143 @@ function commitView(kind, header) {
     commitSeq: header.commit_seq,
     sourceTick: header.source_tick,
     worldRevision: header.world_revision,
+    lastCommandSeq: header.last_command_seq,
     cause: kind === 'checkpoint' ? null : header.cause,
     causationId: kind === 'checkpoint' ? null : header.causation_id,
   });
 }
-function sceneEventView(events) {
-  return events.length === 0 ? EMPTY_SCENE_EVENTS : Object.freeze([...events]);
+
+function displayCursor(commit) {
+  return Object.freeze({
+    commitSeq: commit.commitSeq,
+    sourceTick: commit.sourceTick,
+    lastCommandSeq: commit.lastCommandSeq,
+  });
 }
+
+function createSession(value) {
+  if (isThenable(value)) fail('display-session-factory-async');
+  requireRecord(value, 'display-session-invalid');
+  const expected = new Set([
+    'runtime', 'authorityPort', 'displayViewProvider', 'commitGate', 'dispose',
+  ]);
+  const keys = Reflect.ownKeys(value);
+  if (keys.length !== expected.size
+      || keys.some((key) => typeof key !== 'string' || !expected.has(key))) {
+    fail('display-session-fields-invalid');
+  }
+  requireMethods(value.runtime, ['installScene', 'activate', 'start'], 'display-session-runtime-invalid');
+  requireMethods(value.authorityPort, Object.values(AUTHORITY_METHOD), 'authority-port-invalid');
+  requireMethods(value.commitGate, ['begin', 'seal', 'fail'], 'display-commit-gate-invalid');
+  if (typeof value.displayViewProvider !== 'function') fail('display-view-provider-invalid');
+  if (typeof value.dispose !== 'function') fail('display-session-dispose-invalid');
+  return value;
+}
+
+function callAuthority(authorityPort, method, record) {
+  if (!method) fail('display-command-kind-invalid');
+  return callSynchronous(
+    authorityPort[method],
+    authorityPort,
+    [record],
+    'authority-operation-async',
+  );
+}
+
+function authorityPayload(command) {
+  switch (command.kind) {
+    case 'node-create':
+      return Object.freeze({
+        name: command.name,
+        parentName: command.parentName,
+        prefabType: command.prefabType,
+        transformMode: command.transformMode,
+        transform: command.transform,
+        visible: command.visible,
+        state: command.state,
+      });
+    case 'node-set-transform':
+      return Object.freeze({ name: command.name, transform: command.transform });
+    case 'node-set-parent':
+      return Object.freeze({ name: command.name, parentName: command.parentName });
+    case 'node-set-visible':
+      return Object.freeze({ name: command.name, visible: command.visible });
+    case 'node-set-state':
+      return Object.freeze({ name: command.name, state: command.state });
+    case 'node-replace-prefab':
+      return Object.freeze({
+        name: command.name,
+        prefabType: command.prefabType,
+        state: command.state,
+      });
+    case 'node-remove':
+      return Object.freeze({ name: command.name });
+    default:
+      fail('display-command-kind-invalid');
+  }
+}
+
+function callSynchronous(method, receiver, args, asyncCode) {
+  const result = method.apply(receiver, args);
+  if (isThenable(result)) fail(asyncCode);
+  return result;
+}
+
+function provideDisplayView(session) {
+  const view = session.displayViewProvider();
+  if (isThenable(view)) fail('display-view-provider-async');
+  return view;
+}
+
+function safeGateFail(session, error) {
+  try {
+    const result = session.commitGate.fail(error);
+    if (isThenable(result)) result.catch?.(() => {});
+  } catch { /* the original projection error is authoritative */ }
+}
+
+function safeDispose(session) {
+  if (session === null) return;
+  try {
+    const result = session.dispose();
+    if (isThenable(result)) result.catch?.(() => {});
+  } catch { /* replacement/dispose cleanup cannot roll back the new session */ }
+}
+
+function isThenable(value) {
+  return value !== null && (typeof value === 'object' || typeof value === 'function')
+    && typeof value.then === 'function';
+}
+
+function requireMethods(value, methods, code) {
+  requireRecord(value, code);
+  for (const method of methods) if (typeof value[method] !== 'function') fail(code);
+}
+
+function requireRecord(value, code) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) fail(code);
+}
+
 function outcome(kind, commit, ackPacket, inputResult) {
   return Object.freeze({ kind, commit, ackPacket, inputResult });
 }
+
 function attachment(packet, kind) {
   const value = optionalAttachment(packet, kind);
   if (value === null) fail(`attachment-${kind}-missing`);
   return value;
 }
+
 function optionalAttachment(packet, kind) {
   return packet.attachments.find((value) => value.kind === kind) ?? null;
 }
+
 function deepFreezeOwned(value) {
   if (!value || typeof value !== 'object') return value;
   for (const item of Object.values(value)) deepFreezeOwned(item);
   return Object.freeze(value);
 }
+
 function fail(code) { throw new SceneEngineClientError(code); }
 
 export {

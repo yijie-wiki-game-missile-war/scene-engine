@@ -1,7 +1,7 @@
 {
   "name": "@scene-engine/renderer-three",
-  "version": "0.8.0",
-  "description": "Owned Three.js render runtime for Scene Engine compositions",
+  "version": "0.9.0",
+  "description": "Flat Three.js RenderBackendPort implementation for Scene Engine Display",
   "type": "module",
   "sideEffects": false,
   "files": ["src"],

@@ -1,42 +1,24 @@
 # Recording and Replay
 
-The packet-log identity is `scene-engine-packet-log@1`. A sealed directory contains:
+The only packet-log identity is `scene-engine-packet-log@2`. A sealed directory contains `manifest.json`, `index.json`, and
+`packets.bin`; `INCOMPLETE` exists until seal succeeds. `packets.bin` repeats `[u64 LE length][exact Engine packet]`.
+
+Index records contain:
 
 ```text
-manifest.json
-index.json
-packets.bin
+stream_id, commit_seq, source_tick, world_revision, last_command_seq,
+offset, packet_length, checkpoint
 ```
 
-While writing, `INCOMPLETE` is present. `packets.bin` is authoritative and repeats `[u64 LE packet_length][exact packet]`.
-The index is canonical JSON records with exact fields
-`{stream_id,commit_seq,source_tick,world_revision,offset,packet_length,checkpoint}`; offset points to the first packet byte after
-its length prefix. It is rebuildable from the packet file.
+Recording begins with a checkpoint. Commits advance commit/revision exactly once, obey tick/cause progression, and carry a
+command stream whose base cursor equals the previous record cursor. Periodic checkpoints repeat the immediately preceding
+World and Display cursor and serve only as seek anchors. The manifest hashes packets and index bytes and records first/last
+commit, tick, and command cursors.
 
-Recording starts with a checkpoint, then contains only state commits plus optional periodic checkpoints. Every record stays in
-one stream. Commits advance commit and revision by one and obey cause/tick progression. A periodic checkpoint repeats the
-immediately preceding cursor exactly and never creates a commit. Seal flushes packets, writes and hashes the index, writes the
-manifest, then removes the incomplete marker. Writer/encode/seal failure is runtime-fatal.
+The JavaScript reader validates fields, hashes, byte counts, packet framing, full stream progression, rebuilt index equality,
+and manifest cursors using the same decoder as live.
 
-The JS reader accepts only bytes:
-
-```js
-readPacketLog({
-  manifest: Uint8Array,
-  index: Uint8Array,
-  packets: Uint8Array,
-})
-// -> {manifest, entries, records, packetAt(index)}
-```
-
-It validates exact fields/types, safe integers, hashes, byte counts, framing, packet kinds, full stream progression, index
-equality, and manifest cursors. Each record is `{entry,rawBytes,packet}` using the same decoder as live.
-
-Linear Replay creates one client, applies the selected initial checkpoint, then applies commits. It skips later same-cursor
-periodic checkpoints; they are seek anchors, not live resets. Seek chooses the nearest earlier checkpoint, creates a fresh
-`SceneEngineClient`, applies that checkpoint, and continues commits. Playback/transmission uses exact recorded packet bytes and
-never copies the decoder or synthesizes a state checkpoint.
-
-The npm package contains valid fixture files at `fixtures/packet-log/{manifest.json,index.json,packets.bin}` and a malformed
-variant under `fixtures/packet-log/malformed/`. The valid fixture contains an initial checkpoint, two commits, and a second
-same-cursor periodic checkpoint so both linear-skip and fresh-client seek behavior are testable from the published package.
+Linear Replay creates one `SceneEngineClient`, applies the initial checkpoint, and applies subsequent commits in order while
+skipping same-cursor seek anchors. Seek chooses the nearest earlier checkpoint, creates a fresh client and Display session,
+then reapplies exact recorded commit bytes. Replay has no alternate decoder, synthetic display baseline, or duplicate Node
+graph. Playback speed changes wall scheduling only; record order and integer tick remain authoritative.

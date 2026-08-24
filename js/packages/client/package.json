@@ -1,7 +1,7 @@
 {
   "name": "@scene-engine/client",
-  "version": "0.6.0",
-  "description": "Unified Scene Engine wire decoder, atomic world/tree client, and packet-log reader",
+  "version": "0.7.0",
+  "description": "Scene Engine wire decoder, WorldState client, display authority bridge, and packet-log reader",
   "type": "module",
   "sideEffects": false,
   "files": [

@@ -1,21 +1,21 @@
 # Runtime and 60 Hz rule
 
-This document is binding for runtime, transport scheduling, recording, Replay timing, animation, and acceptance evidence.
+This document is binding for simulation, transport scheduling, recording, Replay timing, animation, display publication, and
+acceptance evidence.
 
 ## Sole time base
 
-The authoritative rate is exactly `60 tick/s`; one tick is `1/60` simulation second. Tick is the only logical clock.
-Wall-clock time, WebSocket arrival, `requestAnimationFrame`, video time, and encoder frame numbers may be derived from tick but
+The authoritative rate is exactly `60 tick/s`; one tick is `1/60` simulation second. Integer tick is the only logical clock.
+Wall-clock time, WebSocket arrival, `requestAnimationFrame`, media time, and encoder frame numbers may be derived from tick but
 never advance or rewrite it.
 
-Catch-up processes every overdue integer tick in order. It may execute several ticks in one `pump()`, but it publishes every
-intermediate commit. A normal tick transition is exactly `N -> N+1`; no sampling, merging, latest-only replacement, or hidden
-interpolation creates rule facts. Replay at 1× schedules a tick delta with `delta * 1000/60 ms`; speed scales wall time only.
-Display may apply several queued commits before one draw, but must apply them in order.
+Catch-up executes every overdue tick in order and publishes every intermediate commit. A normal tick is exactly `N -> N+1`;
+no sampling, merge, latest-only replacement, or interpolation creates rule facts. Same-tick changed input increments commit
+and revision but not tick. Replay speed changes wall scheduling only.
 
-Every committed tick includes one complete scene frame. Same-tick changed input includes a frame when visual state changed and
-may omit it only when the scene is exactly unchanged. Animation time is derived from `source_tick`, `animation_start_tick`, and
-60 TPS. A low-rate sprite may reuse artwork across ticks; its state consumption and clock checks still run at 60 Hz.
+Every changed transaction carries a World patch and a Display command-stream attachment, even when its command list is empty.
+Commands within one tick keep strict `command_seq` order. Display may apply multiple queued commits before one draw, but it
+must apply each transaction barrier in order.
 
 ## Product port
 
@@ -30,60 +30,59 @@ build_checkpoint(world, CheckpointContext) -> ProductCheckpoint
 build_commit(world, MutationResult, CommitContext) -> ProductCommit
 ```
 
-The read/write counter port makes Engine ownership explicit without knowing product fields. Product snapshot and patch values
-are plain mappings; they are not pre-encoded bytes. The breaking 0.6 product publication records are:
+The current publication records are:
 
 ```python
 ProductCheckpoint(
     world_codec: str,
     world_snapshot: Mapping[str, Any],
-    scene_bootstrap: bytes,
-    scene_nodes: tuple[SceneNode, ...],
-    scene_events: tuple[SceneEvent, ...] = (),
+    scene_name: str,
+    display_catalog: DisplayCatalogIdentity,
+    display_nodes: tuple[DisplayNode, ...],
 )
+
 ProductCommit(
     world_codec: str,
     world_patch: Mapping[str, Any],
-    scene_nodes: tuple[SceneNode, ...] | None,
-    scene_events: tuple[SceneEvent, ...] = (),
+    display_commands: tuple[DisplayCommand, ...] = (),
 )
 ```
 
-`scene_nodes` is a complete dynamic tree whenever present. A tick commit must provide it; a same-tick changed input may use
-`None` only when its visual state is unchanged. `scene_events` are binary records inside that frame and therefore require
-non-null `scene_nodes`. There is no encoded-frame product field, compatibility alias, or independent JSON product-events
-attachment.
+Checkpoint nodes are complete `py/` authority roots in parent-first order. Products choose stable node names, logical Prefab
+types, transform mode, one local Transform, visibility and complete authority state. After checkpoint, products publish only
+single-target logical commands. Engine owns `command_seq`, source tick, stream/commit/revision and encoded packet bytes.
 
-`start()` always builds and validates one checkpoint, even without a recorder or connected client. It parses bootstrap bytes
-once and freezes the stream's world codec, immutable bytes, and validation view. Every later checkpoint must match both
-identities and reuses the view. Each structured frame is validated directly against the frozen visual/animation registries,
-static nodes, bootstrap byte/node limits, and complete parent/cycle/depth closure, then encoded exactly once before it can be
-recorded or published. The retained bootstrap view is a catalog validator, not a second live scene tree.
+`start()` always builds and validates a checkpoint, even without recorder or clients. Scene name, World codec, Display codec
+and catalog identities are frozen for one stream. Every later checkpoint must match them. Product fields are plain data, never
+pre-encoded protocol bytes.
 
 ## Transactions
 
-Tick order is: reserve next commit/tick/revision; write next tick with the old revision; call `step` and require `changed`;
-write the next revision; build and validate the product commit; encode and record once; publish one shared packet; then expose
-the new counters. Any exception is fatal and the tick is never retried.
+Tick order is: reserve next counters; write proposed tick; call `step` and require changed; write proposed revision; build and
+fully validate ProductCommit; assign command sequence; encode/record once; publish shared bytes; expose counters. Any exception
+is fatal and the tick is not retried.
 
-Inputs are decoded and queued per client, then serialized on the runtime thread. `rejected` and `no-op` return an optional
-small result without changing counters. `changed` keeps tick fixed and increments revision and commit once; its commit
-`causation_id` is the input ID. `MutationResult.changed()` has no result payload; the commit is the success fact.
+Inputs are decoded and queued per client, then serialized on the runtime thread. `rejected` and `no-op` do not change counters.
+`changed` keeps tick fixed and increments revision/commit once; the commit causation ID is the input ID. An uncaught product
+mutation error quarantines the runtime and leaves the recording incomplete.
 
-The Engine deliberately does not copy an arbitrary world for generic rollback. A product command dispatcher must restore its
-known fields before returning rejected/no-op and must own any recoverable command rollback. An uncaught mutation exception
-quarantines the runtime, closes clients, leaves recording incomplete, and is never retried.
+## Client barrier and ACK
+
+Every connection receives a checkpoint before commits. For checkpoint, the client creates a fresh Display session, installs
+the Engine-provided scene, injects every authority baseline node, activates/starts, then swaps the World/Display projection.
+For commit, it validates the complete stream and World candidate, opens the exact commit gate, invokes every AuthorityPort
+operation, seals the cursor, then swaps state.
+
+ACK is cumulative over commit and command cursors and is generated only after that synchronous barrier succeeds. It does not
+wait for asynchronous resources, observers, RAF or drawing. A command failure invalidates the projection, produces no ACK,
+and requires a fresh checkpoint/session.
 
 ## Sessions and retention
 
-Every connection first receives a checkpoint and then ordered commits. ACK is cumulative and means the client's WorldState,
-scene tree, and cursor completed one synchronous barrier. It does not mean draw or observer completion.
+Sessions have bounded in-flight count, pending bytes, input count and ACK timeout. Packet bodies are encoded once and shared.
+Checkpoints and commits occupy the global count/byte ring. Eviction closes only lagging sessions; slow clients never block tick
+progression or recorder append.
 
-Sessions have fixed in-flight count, pending byte, input count, and ACK-timeout limits. State packet bodies are encoded once.
-Checkpoints at the same cursor are cached and shared; baseline checkpoints and commits both occupy the global count/byte ring.
-When eviction reaches a packet still referenced by a lagging session, that session closes. If one checkpoint or commit cannot
-fit in the global byte budget, no client may retain it. Slow clients never block tick progression or recorder append.
-
-Input IDs are idempotent within the bounded session ledger: an identical no-op/rejected request replays its exact result bytes,
-an identical changed request never executes twice, and conflicting bytes close only that session. Disconnect or same-ID
-connection replacement discards every queued input belonging to the old session before the new baseline is installed.
+Input IDs are idempotent within a bounded session ledger. Identical completed requests replay their exact result; a changed
+request never executes twice; conflicting bytes close that session. Disconnect or same-ID replacement discards queued input
+from the old session before installing a new baseline.

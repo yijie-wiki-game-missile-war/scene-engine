@@ -10,6 +10,10 @@ def test_python_root_exports_are_exact() -> None:
         "CheckpointContext",
         "CommitContext",
         "ConfigurationError",
+        "DisplayCatalogIdentity",
+        "DisplayCommand",
+        "DisplayNode",
+        "DisplayTransform",
         "EngineCommit",
         "EngineInput",
         "EngineProgram",
@@ -28,7 +32,6 @@ def test_python_root_exports_are_exact() -> None:
         "RuntimeFatalError",
         "RuntimeHealth",
         "RuntimeStateError",
-        "SceneCodecError",
         "SceneEngineError",
         "SceneEngineRuntime",
         "SessionBackpressureError",
@@ -39,17 +42,17 @@ def test_python_root_exports_are_exact() -> None:
         "WorldCounters",
         "__version__",
     }
-    assert scene_engine.__version__ == "0.6.1"
+    assert scene_engine.__version__ == "0.7.0"
 
 
 def test_python_package_contains_only_current_modules() -> None:
     assert {module.name for module in pkgutil.iter_modules(scene_engine.__path__)} == {
         "clock",
+        "display",
         "errors",
         "json_tree",
         "recording",
         "runtime",
-        "scene",
         "session",
         "wire",
     }

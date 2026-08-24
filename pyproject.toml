@@ -4,11 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "scene-engine"
-version = "0.6.1"
-description = "One fixed-step runtime, unified packet stream, atomic client, and packet log"
+version = "0.7.0"
+description = "Fixed-step runtime with world state and Display Node command publication"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = []
+
+[dependency-groups]
+dev = ["pytest>=8.3"]
 
 [tool.setuptools]
 package-dir = {"" = "src"}

@@ -1,0 +1,696 @@
+{
+  "checkpoint": {
+    "node_count": 500,
+    "packet_bytes": 123430
+  },
+  "git": {
+    "head": "c9cca47ffe182f144a9e53e757dc6375cc6fda9d",
+    "status_porcelain": "M AGENTS.md\n M README.md\n M docs/architecture.md\n M docs/client.md\n M docs/cutover-report.md\n M docs/evidence/README.md\n D docs/evidence/client-500-before.json\n D docs/evidence/client-500-comparison.json\n D docs/evidence/client-500.json\n D docs/evidence/python-static-dynamic-500.json\n D docs/evidence/render-runtime-v2/source-identity.md\n D docs/evidence/render-runtime-v2/untracked-source.sha256\n D docs/evidence/scene-engine-500-before.json\n D docs/evidence/scene-engine-500.json\n D docs/python-static-dynamic-cutover-report.md\n M docs/recording-replay.md\n M docs/render-runtime.md\n M docs/runtime.md\n M docs/transform.md\n M docs/wire.md\n D fixtures/scene-v1/bootstrap.bin\n D fixtures/scene-v1/frame-0.bin\n D fixtures/scene-v1/frame-1.bin\n D fixtures/wire-v1/ack.bin\n D fixtures/wire-v1/checkpoint.bin\n D fixtures/wire-v1/commit-input.bin\n D fixtures/wire-v1/commit-tick.bin\n D fixtures/wire-v1/input-result.bin\n D fixtures/wire-v1/input.bin\n D fixtures/wire-v1/malformed-manifest.json\n D fixtures/wire-v1/nonfinite.bin\n D fixtures/wire-v1/trailing.bin\n D fixtures/wire-v1/truncated.bin\n D fixtures/wire-v1/unsafe-integer.bin\n D fixtures/wire-v1/wrong-magic.bin\n M js/packages/client/fixtures/packet-log/index.json\n M js/packages/client/fixtures/packet-log/malformed/index.json\n M js/packages/client/fixtures/packet-log/malformed/manifest.json\n M js/packages/client/fixtures/packet-log/malformed/packets.bin\n M js/packages/client/fixtures/packet-log/manifest.json\n M js/packages/client/fixtures/packet-log/packets.bin\n M js/packages/client/package.json\n M js/packages/client/scripts/benchmark-500.mjs\n M js/packages/client/src/index.js\n M js/packages/client/src/packet-log.js\n D js/packages/client/src/scene.js\n D js/packages/client/src/tree.js\n M js/packages/client/src/wire.js\n M js/packages/client/test/client.test.mjs\n M js/packages/client/test/packet-log.test.mjs\n D js/packages/client/test/tree-cache.test.mjs\n M js/packages/renderer-three/package.json\n M js/packages/renderer-three/src/constants.js\n D js/packages/renderer-three/src/contracts.js\n M js/packages/renderer-three/src/errors.js\n M js/packages/renderer-three/src/index.js\n M js/packages/renderer-three/src/resource-manager.js\n D js/packages/renderer-three/src/runtime.js\n D js/packages/renderer-three/src/testing.js\n D js/packages/renderer-three/src/three-adapter.js\n D js/packages/renderer-three/test/acceptance-v2.test.mjs\n D js/packages/renderer-three/test/contracts-v2.test.mjs\n D js/packages/renderer-three/test/renderer-three.test.mjs\n D js/packages/renderer-three/test/runtime-v2-regressions.test.mjs\n D js/packages/renderer-three/test/three-adapter-batching.test.mjs\n D js/packages/renderer-three/test/three-adapter-v2.test.mjs\n M package-lock.json\n M package.json\n M pyproject.toml\n M scripts/benchmark_scene_500.py\n M scripts/generate_fixtures.py\n M scripts/verify_cutover.py\n M src/scene_engine/__init__.py\n M src/scene_engine/errors.py\n M src/scene_engine/json_tree.py\n M src/scene_engine/recording.py\n M src/scene_engine/runtime.py\n D src/scene_engine/scene.py\n M src/scene_engine/session.py\n M src/scene_engine/wire.py\n M tests/test_import_surface.py\n D tests/test_recording_v1.py\n M tests/test_runtime.py\n D tests/test_scene_benchmark.py\n D tests/test_scene_v1.py\n D tests/test_wire_v1.py\n M uv.lock\n?? .DS_Store\n?? docs/display.md\n?? docs/evidence/display-node-cutover/\n?? docs/evidence/display-resource-leak-matrix.json\n?? docs/evidence/scene-engine-display-500.json\n?? fixtures/display-v2/\n?? fixtures/wire-v2/\n?? js/packages/client/fixtures/wire-v2/\n?? js/packages/client/scripts/generate-fixtures.mjs\n?? js/packages/client/src/display.js\n?? js/packages/client/test/support.mjs\n?? js/packages/display/\n?? js/packages/renderer-three/src/backend.js\n?? js/packages/renderer-three/src/resources.js\n?? js/packages/renderer-three/src/validation.js\n?? js/packages/renderer-three/test/acceptance.test.mjs\n?? js/packages/renderer-three/test/backend.test.mjs\n?? js/packages/renderer-three/test/display-integration.test.mjs\n?? js/packages/renderer-three/test/public.test.mjs\n?? js/packages/renderer-three/test/resource-lifecycle.test.mjs\n?? js/packages/renderer-three/test/support.mjs\n?? scripts/benchmark_display_runtime_500.mjs\n?? scripts/verify_display_leaks.mjs\n?? src/scene_engine/display.py\n?? tests/test_display.py\n?? tests/test_display_benchmark.py\n?? tests/test_recording_v2.py\n?? tests/test_wire_v2.py"
+  },
+  "hardware": {
+    "logical_cpu_count": 10,
+    "machine": "arm64",
+    "platform": "macOS-26.5-arm64-arm-64bit",
+    "processor": "arm"
+  },
+  "measured_path": "Engine assigns stream-global command_seq to independent Node commands and encodes one wire@2 commit seal",
+  "memory": {
+    "process_maximum_rss_after_bytes": 30687232,
+    "process_maximum_rss_before_bytes": 30687232,
+    "process_maximum_rss_delta_bytes": 0,
+    "samples": 60,
+    "traced_peak_delta_bytes": 1781846,
+    "traced_retained_delta_bytes": 296072
+  },
+  "parameters": {
+    "benchmark_mode": "formal",
+    "churn_nodes": 25,
+    "churn_ratio": 0.05,
+    "memory_probe_samples": 60,
+    "node_count": 500,
+    "rounds": 5,
+    "samples_per_round": 600,
+    "scenario_order": [
+      "transform-500",
+      "state-500",
+      "churn-25"
+    ],
+    "warmup_per_round": 60
+  },
+  "performance_gates": {
+    "mode": "formal",
+    "overall_passed": true,
+    "scenarios": {
+      "churn-25": {
+        "checks": {
+          "command_stream_encode_p95": {
+            "actual_ms": 0.359017,
+            "maximum_ms": 8.0,
+            "passed": true
+          },
+          "command_stream_encode_p99": {
+            "actual_ms": 0.497944,
+            "maximum_ms": 12.0,
+            "passed": true
+          },
+          "publication_total_p95": {
+            "actual_ms": 0.641138,
+            "maximum_ms": 16.0,
+            "passed": true
+          }
+        },
+        "observed_passed": true
+      },
+      "state-500": {
+        "checks": {
+          "command_stream_encode_p95": {
+            "actual_ms": 1.878123,
+            "maximum_ms": 8.0,
+            "passed": true
+          },
+          "command_stream_encode_p99": {
+            "actual_ms": 2.583013,
+            "maximum_ms": 12.0,
+            "passed": true
+          },
+          "publication_total_p95": {
+            "actual_ms": 3.01416,
+            "maximum_ms": 16.0,
+            "passed": true
+          }
+        },
+        "observed_passed": true
+      },
+      "transform-500": {
+        "checks": {
+          "command_stream_encode_p95": {
+            "actual_ms": 4.775985,
+            "maximum_ms": 8.0,
+            "passed": true
+          },
+          "command_stream_encode_p99": {
+            "actual_ms": 6.614757,
+            "maximum_ms": 12.0,
+            "passed": true
+          },
+          "publication_total_p95": {
+            "actual_ms": 7.050131,
+            "maximum_ms": 16.0,
+            "passed": true
+          }
+        },
+        "observed_passed": true
+      }
+    },
+    "structural_gates_enforced": true,
+    "structural_gates_passed": true,
+    "time_gates_enforced": true,
+    "time_gates_observed_passed": true
+  },
+  "repository": "/Users/standlee/projects/missile-war/scene-engine",
+  "runtime": {
+    "display_codec": "scene-engine-display-node@2",
+    "executable": "/Users/standlee/projects/missile-war/scene-engine/.venv/bin/python3",
+    "python": "3.12.14 (main, Aug 14 2026, 15:24:41) [Clang 22.1.3 ]",
+    "python_implementation": "CPython",
+    "scene_engine_version": "0.7.0",
+    "timer": "time.perf_counter_ns",
+    "wire_schema": "scene-engine-wire@2"
+  },
+  "scenarios": {
+    "churn-25": {
+      "aggregate": {
+        "command_stream_encode_ms": {
+          "maximum": 1.129292,
+          "mean": 0.226183,
+          "p50": 0.208167,
+          "p95": 0.359017,
+          "p99": 0.497944,
+          "samples": 3000
+        },
+        "publication_total_ms": {
+          "maximum": 1.651125,
+          "mean": 0.394988,
+          "p50": 0.367,
+          "p95": 0.641138,
+          "p99": 0.88421,
+          "samples": 3000
+        },
+        "wire_commit_encode_ms": {
+          "maximum": 1.212,
+          "mean": 0.168805,
+          "p50": 0.151,
+          "p95": 0.293325,
+          "p99": 0.415018,
+          "samples": 3000
+        }
+      },
+      "command_count": {
+        "maximum": 50.0,
+        "mean": 50.0,
+        "p50": 50.0,
+        "p95": 50.0,
+        "p99": 50.0,
+        "samples": 3000
+      },
+      "packet_bytes": {
+        "maximum": 12208.0,
+        "mean": 12174.348333,
+        "p50": 12208.0,
+        "p95": 12208.0,
+        "p99": 12208.0,
+        "samples": 3000
+      },
+      "rounds": [
+        {
+          "command_stream_encode_ms": {
+            "maximum": 0.590167,
+            "mean": 0.212887,
+            "p50": 0.197833,
+            "p95": 0.295105,
+            "p99": 0.473406,
+            "samples": 600
+          },
+          "publication_total_ms": {
+            "maximum": 1.166334,
+            "mean": 0.372035,
+            "p50": 0.339041,
+            "p95": 0.531519,
+            "p99": 0.876947,
+            "samples": 600
+          },
+          "round": 1,
+          "wire_commit_encode_ms": {
+            "maximum": 0.932042,
+            "mean": 0.159148,
+            "p50": 0.141104,
+            "p95": 0.245756,
+            "p99": 0.380575,
+            "samples": 600
+          }
+        },
+        {
+          "command_stream_encode_ms": {
+            "maximum": 0.676792,
+            "mean": 0.214981,
+            "p50": 0.196875,
+            "p95": 0.329338,
+            "p99": 0.433978,
+            "samples": 600
+          },
+          "publication_total_ms": {
+            "maximum": 1.076417,
+            "mean": 0.375697,
+            "p50": 0.338666,
+            "p95": 0.589294,
+            "p99": 0.769122,
+            "samples": 600
+          },
+          "round": 2,
+          "wire_commit_encode_ms": {
+            "maximum": 0.459708,
+            "mean": 0.160716,
+            "p50": 0.141625,
+            "p95": 0.268217,
+            "p99": 0.383738,
+            "samples": 600
+          }
+        },
+        {
+          "command_stream_encode_ms": {
+            "maximum": 0.75425,
+            "mean": 0.214402,
+            "p50": 0.198229,
+            "p95": 0.302931,
+            "p99": 0.433737,
+            "samples": 600
+          },
+          "publication_total_ms": {
+            "maximum": 1.259166,
+            "mean": 0.372376,
+            "p50": 0.34,
+            "p95": 0.554312,
+            "p99": 0.794598,
+            "samples": 600
+          },
+          "round": 3,
+          "wire_commit_encode_ms": {
+            "maximum": 0.569958,
+            "mean": 0.157974,
+            "p50": 0.141792,
+            "p95": 0.250896,
+            "p99": 0.379139,
+            "samples": 600
+          }
+        },
+        {
+          "command_stream_encode_ms": {
+            "maximum": 1.129292,
+            "mean": 0.245965,
+            "p50": 0.223146,
+            "p95": 0.384465,
+            "p99": 0.529889,
+            "samples": 600
+          },
+          "publication_total_ms": {
+            "maximum": 1.466292,
+            "mean": 0.426047,
+            "p50": 0.38225,
+            "p95": 0.654225,
+            "p99": 0.931438,
+            "samples": 600
+          },
+          "round": 4,
+          "wire_commit_encode_ms": {
+            "maximum": 0.661,
+            "mean": 0.180082,
+            "p50": 0.15925,
+            "p95": 0.284921,
+            "p99": 0.439818,
+            "samples": 600
+          }
+        },
+        {
+          "command_stream_encode_ms": {
+            "maximum": 0.76475,
+            "mean": 0.242682,
+            "p50": 0.221875,
+            "p95": 0.4228,
+            "p99": 0.541542,
+            "samples": 600
+          },
+          "publication_total_ms": {
+            "maximum": 1.651125,
+            "mean": 0.428785,
+            "p50": 0.380312,
+            "p95": 0.758494,
+            "p99": 0.92883,
+            "samples": 600
+          },
+          "round": 5,
+          "wire_commit_encode_ms": {
+            "maximum": 1.212,
+            "mean": 0.186103,
+            "p50": 0.15775,
+            "p95": 0.351382,
+            "p99": 0.452532,
+            "samples": 600
+          }
+        }
+      ],
+      "stream_bytes": {
+        "maximum": 11843.0,
+        "mean": 11810.253333,
+        "p50": 11843.0,
+        "p95": 11843.0,
+        "p99": 11843.0,
+        "samples": 3000
+      }
+    },
+    "state-500": {
+      "aggregate": {
+        "command_stream_encode_ms": {
+          "maximum": 8.026042,
+          "mean": 1.231552,
+          "p50": 1.144104,
+          "p95": 1.878123,
+          "p99": 2.583013,
+          "samples": 3000
+        },
+        "publication_total_ms": {
+          "maximum": 10.196,
+          "mean": 2.097065,
+          "p50": 1.946958,
+          "p95": 3.01416,
+          "p99": 4.234364,
+          "samples": 3000
+        },
+        "wire_commit_encode_ms": {
+          "maximum": 7.679042,
+          "mean": 0.865513,
+          "p50": 0.794646,
+          "p95": 1.294779,
+          "p99": 1.838462,
+          "samples": 3000
+        }
+      },
+      "command_count": {
+        "maximum": 500.0,
+        "mean": 500.0,
+        "p50": 500.0,
+        "p95": 500.0,
+        "p99": 500.0,
+        "samples": 3000
+      },
+      "packet_bytes": {
+        "maximum": 82871.0,
+        "mean": 82504.181667,
+        "p50": 82871.0,
+        "p95": 82871.0,
+        "p99": 82871.0,
+        "samples": 3000
+      },
+      "rounds": [
+        {
+          "command_stream_encode_ms": {
+            "maximum": 8.026042,
+            "mean": 1.467977,
+            "p50": 1.305583,
+            "p95": 2.42981,
+            "p99": 3.593116,
+            "samples": 600
+          },
+          "publication_total_ms": {
+            "maximum": 10.196,
+            "mean": 2.511526,
+            "p50": 2.242812,
+            "p95": 4.054868,
+            "p99": 7.198701,
+            "samples": 600
+          },
+          "round": 1,
+          "wire_commit_encode_ms": {
+            "maximum": 7.679042,
+            "mean": 1.043549,
+            "p50": 0.917542,
+            "p95": 1.711284,
+            "p99": 2.440322,
+            "samples": 600
+          }
+        },
+        {
+          "command_stream_encode_ms": {
+            "maximum": 2.303333,
+            "mean": 1.180991,
+            "p50": 1.119667,
+            "p95": 1.811106,
+            "p99": 1.99497,
+            "samples": 600
+          },
+          "publication_total_ms": {
+            "maximum": 3.44375,
+            "mean": 2.009153,
+            "p50": 1.925604,
+            "p95": 2.753028,
+            "p99": 3.02645,
+            "samples": 600
+          },
+          "round": 2,
+          "wire_commit_encode_ms": {
+            "maximum": 2.006541,
+            "mean": 0.828161,
+            "p50": 0.783917,
+            "p95": 1.148181,
+            "p99": 1.484927,
+            "samples": 600
+          }
+        },
+        {
+          "command_stream_encode_ms": {
+            "maximum": 2.056417,
+            "mean": 1.119939,
+            "p50": 1.040833,
+            "p95": 1.610899,
+            "p99": 1.82134,
+            "samples": 600
+          },
+          "publication_total_ms": {
+            "maximum": 3.239083,
+            "mean": 1.915601,
+            "p50": 1.804479,
+            "p95": 2.587903,
+            "p99": 2.841672,
+            "samples": 600
+          },
+          "round": 3,
+          "wire_commit_encode_ms": {
+            "maximum": 1.948666,
+            "mean": 0.795661,
+            "p50": 0.752479,
+            "p95": 1.123984,
+            "p99": 1.341494,
+            "samples": 600
+          }
+        },
+        {
+          "command_stream_encode_ms": {
+            "maximum": 2.603833,
+            "mean": 1.220145,
+            "p50": 1.151292,
+            "p95": 1.855256,
+            "p99": 2.361529,
+            "samples": 600
+          },
+          "publication_total_ms": {
+            "maximum": 4.936166,
+            "mean": 2.067134,
+            "p50": 1.954958,
+            "p95": 2.918335,
+            "p99": 3.748662,
+            "samples": 600
+          },
+          "round": 4,
+          "wire_commit_encode_ms": {
+            "maximum": 2.533291,
+            "mean": 0.846989,
+            "p50": 0.795438,
+            "p95": 1.203533,
+            "p99": 1.612672,
+            "samples": 600
+          }
+        },
+        {
+          "command_stream_encode_ms": {
+            "maximum": 3.788709,
+            "mean": 1.168709,
+            "p50": 1.077126,
+            "p95": 1.730283,
+            "p99": 2.181742,
+            "samples": 600
+          },
+          "publication_total_ms": {
+            "maximum": 5.722959,
+            "mean": 1.981913,
+            "p50": 1.862834,
+            "p95": 2.732765,
+            "p99": 3.384254,
+            "samples": 600
+          },
+          "round": 5,
+          "wire_commit_encode_ms": {
+            "maximum": 1.943666,
+            "mean": 0.813204,
+            "p50": 0.769459,
+            "p95": 1.111919,
+            "p99": 1.570069,
+            "samples": 600
+          }
+        }
+      ],
+      "stream_bytes": {
+        "maximum": 82505.0,
+        "mean": 82139.086667,
+        "p50": 82505.0,
+        "p95": 82505.0,
+        "p99": 82505.0,
+        "samples": 3000
+      }
+    },
+    "transform-500": {
+      "aggregate": {
+        "command_stream_encode_ms": {
+          "maximum": 31.016417,
+          "mean": 3.141218,
+          "p50": 2.87875,
+          "p95": 4.775985,
+          "p99": 6.614757,
+          "samples": 3000
+        },
+        "publication_total_ms": {
+          "maximum": 38.872458,
+          "mean": 4.834377,
+          "p50": 4.517459,
+          "p95": 7.050131,
+          "p99": 9.767949,
+          "samples": 3000
+        },
+        "wire_commit_encode_ms": {
+          "maximum": 17.068792,
+          "mean": 1.693159,
+          "p50": 1.534938,
+          "p95": 2.53869,
+          "p99": 3.59548,
+          "samples": 3000
+        }
+      },
+      "command_count": {
+        "maximum": 500.0,
+        "mean": 500.0,
+        "p50": 500.0,
+        "p95": 500.0,
+        "p99": 500.0,
+        "samples": 3000
+      },
+      "packet_bytes": {
+        "maximum": 114563.0,
+        "mean": 114045.343333,
+        "p50": 114371.0,
+        "p95": 114397.0,
+        "p99": 114467.0,
+        "samples": 3000
+      },
+      "rounds": [
+        {
+          "command_stream_encode_ms": {
+            "maximum": 31.016417,
+            "mean": 3.66591,
+            "p50": 3.188187,
+            "p95": 6.056052,
+            "p99": 8.507554,
+            "samples": 600
+          },
+          "publication_total_ms": {
+            "maximum": 38.872458,
+            "mean": 5.630126,
+            "p50": 4.946167,
+            "p95": 9.307961,
+            "p99": 12.130736,
+            "samples": 600
+          },
+          "round": 1,
+          "wire_commit_encode_ms": {
+            "maximum": 17.068792,
+            "mean": 1.964216,
+            "p50": 1.666292,
+            "p95": 3.251115,
+            "p99": 5.80387,
+            "samples": 600
+          }
+        },
+        {
+          "command_stream_encode_ms": {
+            "maximum": 5.971459,
+            "mean": 2.935954,
+            "p50": 2.833312,
+            "p95": 3.797656,
+            "p99": 4.674811,
+            "samples": 600
+          },
+          "publication_total_ms": {
+            "maximum": 9.14925,
+            "mean": 4.551328,
+            "p50": 4.441209,
+            "p95": 5.636995,
+            "p99": 7.077945,
+            "samples": 600
+          },
+          "round": 2,
+          "wire_commit_encode_ms": {
+            "maximum": 4.545291,
+            "mean": 1.615374,
+            "p50": 1.511729,
+            "p95": 2.346768,
+            "p99": 2.833277,
+            "samples": 600
+          }
+        },
+        {
+          "command_stream_encode_ms": {
+            "maximum": 4.939917,
+            "mean": 2.803405,
+            "p50": 2.63175,
+            "p95": 3.609354,
+            "p99": 3.941979,
+            "samples": 600
+          },
+          "publication_total_ms": {
+            "maximum": 7.51875,
+            "mean": 4.331831,
+            "p50": 4.107938,
+            "p95": 5.298623,
+            "p99": 5.742458,
+            "samples": 600
+          },
+          "round": 3,
+          "wire_commit_encode_ms": {
+            "maximum": 3.696375,
+            "mean": 1.528427,
+            "p50": 1.436688,
+            "p95": 2.165167,
+            "p99": 2.472429,
+            "samples": 600
+          }
+        },
+        {
+          "command_stream_encode_ms": {
+            "maximum": 7.188375,
+            "mean": 3.216475,
+            "p50": 3.000625,
+            "p95": 4.469967,
+            "p99": 5.08028,
+            "samples": 600
+          },
+          "publication_total_ms": {
+            "maximum": 9.416042,
+            "mean": 4.921123,
+            "p50": 4.692875,
+            "p95": 6.492696,
+            "p99": 7.643662,
+            "samples": 600
+          },
+          "round": 4,
+          "wire_commit_encode_ms": {
+            "maximum": 4.288125,
+            "mean": 1.704648,
+            "p50": 1.606583,
+            "p95": 2.361784,
+            "p99": 2.974652,
+            "samples": 600
+          }
+        },
+        {
+          "command_stream_encode_ms": {
+            "maximum": 8.228792,
+            "mean": 3.084347,
+            "p50": 2.888937,
+            "p95": 4.29244,
+            "p99": 6.615266,
+            "samples": 600
+          },
+          "publication_total_ms": {
+            "maximum": 11.13225,
+            "mean": 4.737479,
+            "p50": 4.514792,
+            "p95": 6.405757,
+            "p99": 9.005267,
+            "samples": 600
+          },
+          "round": 5,
+          "wire_commit_encode_ms": {
+            "maximum": 4.639,
+            "mean": 1.653132,
+            "p50": 1.522542,
+            "p95": 2.332656,
+            "p99": 3.518013,
+            "samples": 600
+          }
+        }
+      ],
+      "stream_bytes": {
+        "maximum": 114197.0,
+        "mean": 113680.248333,
+        "p50": 114005.0,
+        "p95": 114031.0,
+        "p99": 114101.0,
+        "samples": 3000
+      }
+    }
+  },
+  "schema": "scene-engine-display-perf-500@2",
+  "structural_counts": {
+    "authority_roots": 500,
+    "bulk_nodes_fields": 0,
+    "checkpoint_nodes": 500,
+    "maximum_commands": 500
+  }
+}

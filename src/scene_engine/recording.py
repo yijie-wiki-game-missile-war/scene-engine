@@ -21,7 +21,7 @@ from .wire import (
 )
 
 
-PACKET_LOG_SCHEMA = "scene-engine-packet-log@1"
+PACKET_LOG_SCHEMA = "scene-engine-packet-log@2"
 PACKET_LOG_MANIFEST = "manifest.json"
 PACKET_LOG_PACKETS = "packets.bin"
 PACKET_LOG_INDEX = "index.json"
@@ -35,6 +35,7 @@ class PacketLogEntry:
     commit_seq: int
     source_tick: int
     world_revision: int
+    last_command_seq: int
     offset: int
     packet_length: int
     checkpoint: bool
@@ -46,6 +47,7 @@ class PacketLogEntry:
             "commit_seq",
             "source_tick",
             "world_revision",
+            "last_command_seq",
             "offset",
             "packet_length",
         ):
@@ -59,6 +61,7 @@ class PacketLogEntry:
             "commit_seq": self.commit_seq,
             "source_tick": self.source_tick,
             "world_revision": self.world_revision,
+            "last_command_seq": self.last_command_seq,
             "offset": self.offset,
             "packet_length": self.packet_length,
             "checkpoint": self.checkpoint,
@@ -119,6 +122,7 @@ class PacketLogWriter:
         self._last_commit_seq: int | None = None
         self._last_tick: int | None = None
         self._last_revision: int | None = None
+        self._last_command_seq: int | None = None
         self._sealed = False
         self._closed = False
         try:
@@ -141,6 +145,7 @@ class PacketLogWriter:
         sequence = header["commit_seq"]
         tick = header["source_tick"]
         revision = header["world_revision"]
+        command_sequence = header["last_command_seq"]
         if not self._entries:
             if not checkpoint:
                 raise RecordingError("packet log must begin with a checkpoint")
@@ -151,11 +156,13 @@ class PacketLogWriter:
             assert self._last_commit_seq is not None
             assert self._last_tick is not None
             assert self._last_revision is not None
+            assert self._last_command_seq is not None
             if checkpoint:
                 if (
                     sequence != self._last_commit_seq
                     or tick != self._last_tick
                     or revision != self._last_revision
+                    or command_sequence != self._last_command_seq
                 ):
                     raise RecordingError("periodic checkpoint cursor does not match log")
             elif (
@@ -163,6 +170,9 @@ class PacketLogWriter:
                 or revision != self._last_revision + 1
                 or tick < self._last_tick
                 or tick > self._last_tick + 1
+                or command_sequence < self._last_command_seq
+                or packet.attachments[1].value["base_command_seq"]
+                != self._last_command_seq
             ):
                 raise RecordingError("packet log commit progression is invalid")
             elif not _cause_matches_tick(packet.header["cause"], tick - self._last_tick):
@@ -183,6 +193,7 @@ class PacketLogWriter:
             sequence,
             tick,
             revision,
+            command_sequence,
             prefix_offset + _LENGTH.size,
             len(raw),
             checkpoint,
@@ -193,6 +204,7 @@ class PacketLogWriter:
         self._last_commit_seq = sequence
         self._last_tick = tick
         self._last_revision = revision
+        self._last_command_seq = command_sequence
         return entry
 
     def seal(self) -> dict[str, Any]:
@@ -225,6 +237,8 @@ class PacketLogWriter:
                 "last_commit_seq": last.commit_seq,
                 "first_source_tick": first.source_tick,
                 "last_source_tick": last.source_tick,
+                "first_command_seq": first.last_command_seq,
+                "last_command_seq": last.last_command_seq,
             }
             _atomic_write(
                 self._paths[PACKET_LOG_MANIFEST],
@@ -300,6 +314,8 @@ def read_packet_log(
         or manifest["last_commit_seq"] != last.commit_seq
         or manifest["first_source_tick"] != first.source_tick
         or manifest["last_source_tick"] != last.source_tick
+        or manifest["first_command_seq"] != first.last_command_seq
+        or manifest["last_command_seq"] != last.last_command_seq
     ):
         raise RecordingError("packet log manifest cursor fields mismatch")
     return PacketLog(manifest, declared, packets)
@@ -331,6 +347,7 @@ def rebuild_packet_index(
                 header["commit_seq"],
                 header["source_tick"],
                 header["world_revision"],
+                header["last_command_seq"],
                 packet_offset,
                 packet_length,
                 packet.kind is PacketKind.CHECKPOINT,
@@ -358,6 +375,8 @@ def _validate_manifest(value: dict[str, Any]) -> None:
         "last_commit_seq",
         "first_source_tick",
         "last_source_tick",
+        "first_command_seq",
+        "last_command_seq",
     }
     if set(value) != fields:
         raise RecordingError("packet log manifest fields are invalid")
@@ -397,6 +416,7 @@ def _entry_from_dict(value: Any) -> PacketLogEntry:
         "commit_seq",
         "source_tick",
         "world_revision",
+        "last_command_seq",
         "offset",
         "packet_length",
         "checkpoint",
@@ -421,13 +441,21 @@ def _validate_packet_progression(previous, packet) -> None:
     if packet.kind is PacketKind.CHECKPOINT:
         if any(
             current[field] != before[field]
-            for field in ("commit_seq", "source_tick", "world_revision")
+            for field in (
+                "commit_seq",
+                "source_tick",
+                "world_revision",
+                "last_command_seq",
+            )
         ):
             raise RecordingError("periodic checkpoint cursor does not match log")
         return
     if (
         current["commit_seq"] != before["commit_seq"] + 1
         or current["world_revision"] != before["world_revision"] + 1
+        or current["last_command_seq"] < before["last_command_seq"]
+        or packet.attachments[1].value["base_command_seq"]
+        != before["last_command_seq"]
     ):
         raise RecordingError("packet log commit progression has a gap")
     delta = current["source_tick"] - before["source_tick"]

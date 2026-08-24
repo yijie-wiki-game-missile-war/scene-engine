@@ -1,4 +1,4 @@
-"""Scene Engine 0.6: structured product scene publication on one packet stream."""
+"""Scene Engine 0.7: fixed-step world and Display command publication."""
 
 from .clock import ManualClock, SystemMonotonicClock
 from .errors import (
@@ -8,11 +8,16 @@ from .errors import (
     RuntimeBusyError,
     RuntimeFatalError,
     RuntimeStateError,
-    SceneCodecError,
     SceneEngineError,
     SessionBackpressureError,
     SessionError,
     WireError,
+)
+from .display import (
+    DisplayCatalogIdentity,
+    DisplayCommand,
+    DisplayNode,
+    DisplayTransform,
 )
 from .runtime import (
     CheckpointContext,
@@ -35,12 +40,16 @@ from .runtime import (
 )
 
 
-__version__ = "0.6.1"
+__version__ = "0.7.0"
 
 __all__ = [
     "CheckpointContext",
     "CommitContext",
     "ConfigurationError",
+    "DisplayCatalogIdentity",
+    "DisplayCommand",
+    "DisplayNode",
+    "DisplayTransform",
     "EngineCommit",
     "EngineInput",
     "EngineProgram",
@@ -59,7 +68,6 @@ __all__ = [
     "RuntimeFatalError",
     "RuntimeHealth",
     "RuntimeStateError",
-    "SceneCodecError",
     "SceneEngineError",
     "SceneEngineRuntime",
     "SessionBackpressureError",

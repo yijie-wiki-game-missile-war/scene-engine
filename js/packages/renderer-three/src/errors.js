@@ -1,11 +1,11 @@
-export class ThreeRenderRuntimeError extends Error {
+export class ThreeRenderBackendError extends Error {
   constructor(code, message = code, options = undefined) {
     super(message, options);
-    this.name = 'ThreeRenderRuntimeError';
+    this.name = 'ThreeRenderBackendError';
     this.code = code;
   }
 }
 
 export function fail(code, message = code, options = undefined) {
-  throw new ThreeRenderRuntimeError(code, message, options);
+  throw new ThreeRenderBackendError(code, message, options);
 }

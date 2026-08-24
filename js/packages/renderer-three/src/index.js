@@ -1,11 +1,3 @@
-export {
-  RENDER_BATCH_SCHEMA,
-  RENDER_COMPOSITION_SCHEMA,
-  RENDER_SNAPSHOT_SCHEMA,
-  THREE_RENDER_RUNTIME_SCHEMA,
-} from './constants.js';
-export { ThreeRenderRuntimeError } from './errors.js';
-export {
-  ThreeRenderRuntime,
-  createThreeRenderRuntime,
-} from './runtime.js';
+export { THREE_RENDER_BACKEND_SCHEMA } from './constants.js';
+export { ThreeRenderBackendError } from './errors.js';
+export { createThreeRenderBackend } from './backend.js';

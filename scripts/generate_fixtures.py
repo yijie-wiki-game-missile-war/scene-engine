@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regenerate the frozen cross-language Scene Engine 0.6 fixtures."""
+"""Regenerate the frozen cross-language Scene Engine wire/display @2 fixtures."""
 
 from __future__ import annotations
 
@@ -14,24 +14,25 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from scene_engine.recording import PacketLogWriter  # noqa: E402
-from scene_engine.scene import (  # noqa: E402
-    SceneEvent,
-    SceneNode,
-    VisualType,
-    encode_scene_bootstrap,
-    encode_scene_frame,
+from scene_engine.display import (  # noqa: E402
+    DisplayCatalogIdentity,
+    DisplayCommand,
+    DisplayNode,
+    DisplayTransform,
+    encode_display_checkpoint,
+    encode_display_command_stream,
 )
+from scene_engine.recording import PacketLogWriter  # noqa: E402
 from scene_engine.wire import (  # noqa: E402
     AttachmentEncoding,
     AttachmentKind,
     PacketKind,
     WIRE_MAGIC,
     WIRE_MAJOR_VERSION,
+    WIRE_SCHEMA,
     encode_ack,
     encode_checkpoint,
     encode_commit,
-    encode_engine_packet,
     encode_input,
     encode_input_result,
 )
@@ -39,6 +40,7 @@ from scene_engine.wire import (  # noqa: E402
 
 STREAM = "00000000-0000-4000-8000-000000000001"
 WORLD_CODEC = "example-world@1"
+CATALOG = DisplayCatalogIdentity("a" * 64, "b" * 64, "c" * 64)
 
 
 def canonical(value) -> bytes:
@@ -60,6 +62,34 @@ def reset(path: Path) -> None:
     path.mkdir(parents=True)
 
 
+def transform(x: float) -> DisplayTransform:
+    return DisplayTransform(
+        position=(x, 0.0, 0.0),
+        rotation_xyzw=(0.0, 0.0, 0.0, 1.0),
+        scale=(1.0, 1.0, 1.0),
+    )
+
+
+def node(
+    name: str,
+    *,
+    x: float = 0.0,
+    parent_name: str | None = None,
+    prefab_type: str = "flight.aircraft",
+    visible: bool = True,
+    state: dict | None = None,
+) -> DisplayNode:
+    return DisplayNode(
+        name=name,
+        parent_name=parent_name,
+        prefab_type=prefab_type,
+        transform_mode="live",
+        transform=transform(x),
+        visible=visible,
+        state=state or {"animation": "idle"},
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -68,27 +98,50 @@ def main() -> None:
         help="leave the packaged JavaScript packet-log fixture untouched",
     )
     args = parser.parse_args()
-    wire_root = ROOT / "fixtures" / "wire-v1"
-    scene_root = ROOT / "fixtures" / "scene-v1"
+    wire_root = ROOT / "fixtures" / "wire-v2"
+    display_root = ROOT / "fixtures" / "display-v2"
     tree_root = ROOT / "fixtures" / "json-tree-v1"
     package_log = ROOT / "js" / "packages" / "client" / "fixtures" / "packet-log"
-    targets = [wire_root, scene_root, tree_root]
+    targets = [wire_root, display_root, tree_root]
     if not args.python_only:
         targets.append(package_log)
     for target in targets:
         reset(target)
 
-    bootstrap = encode_scene_bootstrap(
-        maximum_dynamic_nodes=128,
-        maximum_frame_bytes=1024 * 1024,
-        visual_types=(VisualType(1),),
+    initial_nodes = (
+        node("py/root", prefab_type="world.anchor"),
+        node("py/aircraft", parent_name="py/root"),
     )
-    frame0 = encode_scene_frame(source_tick=0, nodes=(node(0.0),))
-    frame1 = encode_scene_frame(
+    display_checkpoint = encode_display_checkpoint(
+        scene_name="main",
+        catalog=CATALOG,
+        last_command_seq=0,
+        nodes=initial_nodes,
+    )
+    commands = (
+        DisplayCommand.create(
+            node("py/transient", parent_name="py/root", prefab_type="effects.marker")
+        ),
+        DisplayCommand.set_transform("py/aircraft", transform(1.5)),
+        DisplayCommand.set_parent("py/aircraft", "py/root"),
+        DisplayCommand.set_visible("py/aircraft", False),
+        DisplayCommand.set_state("py/aircraft", {"animation": "moving"}),
+        DisplayCommand.replace_prefab(
+            "py/aircraft", "flight.aircraft-damaged", {"animation": "damaged"}
+        ),
+        DisplayCommand.remove("py/transient"),
+    )
+    display_tick, command_cursor = encode_display_command_stream(
+        base_command_seq=0,
         source_tick=1,
-        nodes=(node(1.5),),
-        events=(SceneEvent(1, 1, 0, 1, 0, 1, b"tick"),),
+        commands=commands,
     )
+    display_input, final_cursor = encode_display_command_stream(
+        base_command_seq=command_cursor,
+        source_tick=1,
+        commands=(),
+    )
+
     snapshot = {
         "meta": {
             "float": 1.5,
@@ -122,32 +175,51 @@ def main() -> None:
         commit_seq=0,
         source_tick=0,
         world_revision=0,
+        last_command_seq=0,
         world_codec=WORLD_CODEC,
         world_snapshot=snapshot,
-        scene_bootstrap=bootstrap,
-        scene_frame=frame0,
+        display_checkpoint=display_checkpoint,
     )
     commit_tick = encode_commit(
         stream_id=STREAM,
         commit_seq=1,
         source_tick=1,
         world_revision=1,
+        last_command_seq=command_cursor,
         cause="tick",
         causation_id=None,
         world_codec=WORLD_CODEC,
         world_patch=tick_patch,
-        scene_frame=frame1,
+        display_commands=display_tick,
     )
     commit_input = encode_commit(
         stream_id=STREAM,
         commit_seq=2,
         source_tick=1,
         world_revision=2,
+        last_command_seq=final_cursor,
         cause="input",
         causation_id="client-a:1",
         world_codec=WORLD_CODEC,
         world_patch=input_patch,
-        scene_frame=None,
+        display_commands=display_input,
+    )
+    final_nodes = (
+        node("py/root", prefab_type="world.anchor"),
+        node(
+            "py/aircraft",
+            x=1.5,
+            parent_name="py/root",
+            prefab_type="flight.aircraft-damaged",
+            visible=False,
+            state={"animation": "damaged"},
+        ),
+    )
+    final_display_checkpoint = encode_display_checkpoint(
+        scene_name="main",
+        catalog=CATALOG,
+        last_command_seq=final_cursor,
+        nodes=final_nodes,
     )
     final_snapshot = {
         "meta": {
@@ -166,38 +238,43 @@ def main() -> None:
         commit_seq=2,
         source_tick=1,
         world_revision=2,
+        last_command_seq=final_cursor,
         world_codec=WORLD_CODEC,
         world_snapshot=final_snapshot,
-        scene_bootstrap=bootstrap,
-        scene_frame=frame1,
-    )
-    input_packet = encode_input(
-        input_id="client-a:2",
-        observed_stream_id=STREAM,
-        observed_commit_seq=2,
-        command="example.set",
-        args={"large": 1e20, "negative_zero": -0.0, "small": 1e-7, "value": 1.5},
-    )
-    ack = encode_ack(stream_id=STREAM, commit_seq=2)
-    input_result = encode_input_result(
-        input_id="client-a:2",
-        status="no-op",
-        reason_code="unchanged",
-        result={"value": 1.0},
+        display_checkpoint=final_display_checkpoint,
     )
     packets = {
         "checkpoint.bin": checkpoint,
         "commit-tick.bin": commit_tick,
         "commit-input.bin": commit_input,
-        "input.bin": input_packet,
-        "ack.bin": ack,
-        "input-result.bin": input_result,
+        "input.bin": encode_input(
+            input_id="client-a:2",
+            observed_stream_id=STREAM,
+            observed_commit_seq=2,
+            command="example.set",
+            args={"large": 1e20, "negative_zero": -0.0, "value": 1.5},
+        ),
+        "ack.bin": encode_ack(
+            stream_id=STREAM,
+            commit_seq=2,
+            last_command_seq=final_cursor,
+        ),
+        "input-result.bin": encode_input_result(
+            input_id="client-a:2",
+            status="no-op",
+            reason_code="unchanged",
+            result={"value": 1.0},
+        ),
     }
     for name, data in packets.items():
         (wire_root / name).write_bytes(data)
-    (scene_root / "bootstrap.bin").write_bytes(bootstrap)
-    (scene_root / "frame-0.bin").write_bytes(frame0)
-    (scene_root / "frame-1.bin").write_bytes(frame1)
+    for name, data in {
+        "checkpoint.json": display_checkpoint,
+        "command-tick.json": display_tick,
+        "command-input-empty.json": display_input,
+        "periodic-checkpoint.json": final_display_checkpoint,
+    }.items():
+        (display_root / name).write_bytes(canonical(data))
     (tree_root / "snapshot.json").write_bytes(canonical(snapshot))
     (tree_root / "commit-tick.json").write_bytes(canonical(tick_patch))
     (tree_root / "commit-input.json").write_bytes(canonical(input_patch))
@@ -212,8 +289,26 @@ def main() -> None:
     for name, data in malformed.items():
         (wire_root / name).write_bytes(data)
     (wire_root / "malformed-manifest.json").write_bytes(
-        canonical({"schema": "scene-engine-malformed-corpus@1", "files": sorted(malformed)})
+        canonical({"schema": "scene-engine-malformed-corpus@2", "files": sorted(malformed)})
     )
+    malformed_display = {
+        "command-sequence-gap.json": {
+            **display_tick,
+            "commands": [
+                {**display_tick["commands"][0], "command_seq": 2},
+                *display_tick["commands"][1:],
+            ],
+        },
+        "command-source-tick.json": {
+            **display_tick,
+            "commands": [
+                {**display_tick["commands"][0], "source_tick": 2},
+                *display_tick["commands"][1:],
+            ],
+        },
+    }
+    for name, data in malformed_display.items():
+        (display_root / name).write_bytes(canonical(data))
 
     if not args.python_only:
         writer = PacketLogWriter(package_log, fsync=False)
@@ -231,22 +326,10 @@ def main() -> None:
         )
 
 
-def node(x: float) -> SceneNode:
-    return SceneNode(
-        display_id=1,
-        parent_display_id=0,
-        visual_type_id=1,
-        flags=1,
-        local_position=(x, 0.0, 0.0),
-        local_rotation_xyzw=(0.0, 0.0, 0.0, 1.0),
-        local_scale=(1.0, 1.0, 1.0),
-    )
-
-
 def raw_input_json(payload: bytes) -> bytes:
     header = canonical(
         {
-            "schema": "scene-engine-wire@1",
+            "schema": WIRE_SCHEMA,
             "type": "engine.input",
             "input_id": "malformed:1",
             "observed_stream_id": STREAM,
@@ -255,12 +338,21 @@ def raw_input_json(payload: bytes) -> bytes:
         }
     ).rstrip(b"\n")
     fixed = struct.pack(
-        "<4sBBHIHH", WIRE_MAGIC, WIRE_MAJOR_VERSION, int(PacketKind.INPUT), 0,
-        len(header), 1, 0,
+        "<4sBBHIHH",
+        WIRE_MAGIC,
+        WIRE_MAJOR_VERSION,
+        int(PacketKind.INPUT),
+        0,
+        len(header),
+        1,
+        0,
     )
     attachment = struct.pack(
-        "<BBHI", int(AttachmentKind.INPUT_PAYLOAD), int(AttachmentEncoding.JSON),
-        0, len(payload),
+        "<BBHI",
+        int(AttachmentKind.INPUT_PAYLOAD),
+        int(AttachmentEncoding.JSON),
+        0,
+        len(payload),
     )
     return fixed + header + attachment + payload
 

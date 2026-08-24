@@ -5,6 +5,18 @@ import { fileURLToPath } from 'node:url';
 
 import * as publicApi from '../src/index.js';
 import { applyJsonPatch } from '../src/json-tree.js';
+import { encodePacket } from '../src/wire.js';
+import {
+  HASH_A,
+  STREAM_ID,
+  WORLD_CODEC,
+  baselineNode,
+  checkpointPacket,
+  command,
+  commitPacket,
+  createMockDisplayFactory,
+  transform,
+} from './support.mjs';
 
 const {
   DEFAULT_ENGINE_LIMITS,
@@ -12,15 +24,10 @@ const {
   encodeEngineInput,
   readEnginePacket,
 } = publicApi;
-const ROOT = fileURLToPath(new URL('../../../../', import.meta.url));
+const FIXTURES = fileURLToPath(new URL('../fixtures/wire-v2/', import.meta.url));
+const PYTHON_FIXTURES = fileURLToPath(new URL('../../../../fixtures/wire-v2/', import.meta.url));
 
-test('default wire budget covers one 500-node checkpoint attachment', () => {
-  assert.equal(DEFAULT_ENGINE_LIMITS.maximumPacketBytes, 64 * 1024 * 1024);
-  assert.equal(DEFAULT_ENGINE_LIMITS.maximumAttachmentBytes, 48 * 1024 * 1024);
-  assert.equal(DEFAULT_ENGINE_LIMITS.maximumSessionPendingBytes, 64 * 1024 * 1024);
-});
-
-test('root export surface is the frozen 0.6 allowlist', () => {
+test('root export surface is the breaking 0.7 allowlist', () => {
   assert.deepEqual(Object.keys(publicApi).sort(), [
     'DEFAULT_ENGINE_LIMITS',
     'SceneEngineClient',
@@ -30,188 +37,302 @@ test('root export surface is the frozen 0.6 allowlist', () => {
     'readEnginePacket',
     'readPacketLog',
   ]);
+  assert.equal('maximumDisplayCommands' in DEFAULT_ENGINE_LIMITS, false);
+  assert.equal('maximumNodeStateBytes' in DEFAULT_ENGINE_LIMITS, false);
 });
 
-test('decodes Python packets including finite float lexical boundaries', async () => {
-  const packet = readEnginePacket(await fixture('checkpoint.bin'));
-  const world = packet.attachments[0].value;
-  assert.equal(packet.kind, 'engine.checkpoint');
-  assert.equal(world.meta.one, 1);
-  assert.equal(world.meta.small, 1e-7);
-  assert.equal(world.meta.large, 1e20);
-  assert.equal(Object.is(world.meta.negative_zero, -0), true);
-  for (const name of [
-    'wrong-magic.bin', 'truncated.bin', 'trailing.bin', 'unsafe-integer.bin', 'nonfinite.bin',
-  ]) {
-    assert.throws(() => readEnginePacket(awaitFixtureSyncError(name)));
-  }
-});
-
-test('checkpoint and commits install world, sole tree, and cursor atomically', async () => {
-  const observations = [];
-  const client = new SceneEngineClient({ onCommit(value) { observations.push(value); } });
-  const first = client.applyPacket(await fixture('checkpoint.bin'));
-  assert.deepEqual(first.commit, {
-    kind: 'checkpoint',
-    streamId: '00000000-0000-4000-8000-000000000001',
-    commitSeq: 0,
-    sourceTick: 0,
-    worldRevision: 0,
-    cause: null,
-    causationId: null,
-  });
-  assert.equal(readEnginePacket(first.ackPacket).kind, 'engine.ack');
-  assert.equal(first.inputResult, null);
-  const checkpointWorld = client.currentWorldState();
-  const stable = checkpointWorld.state.stable;
-  const view0 = client.currentView();
-  assert.equal(view0.visualTypeCount, 1);
-  assert.equal(view0.visualTypeAt(0).visualTypeId, 1);
-  assert.equal(view0.getNode(1n).localPosition[0], 0);
-
-  const tick = client.applyPacket(await fixture('commit-tick.bin'));
-  assert.equal(tick.commit.kind, 'commit');
-  assert.equal(tick.commit.cause, 'tick');
-  assert.strictEqual(client.currentWorldState().state.stable, stable);
-  const items = client.currentWorldState().state.items;
-  assert.equal(client.currentView().getNode(1n).localPosition[0], 1.5);
-
-  const input = client.applyPacket(await fixture('commit-input.bin'));
-  assert.equal(input.commit.sourceTick, 1);
-  assert.equal(input.commit.causationId, 'client-a:1');
-  assert.strictEqual(client.currentWorldState().state.items, items);
-  assert.notStrictEqual(client.currentWorldState().state.stable, stable);
-  assert.equal(Object.isFrozen(client.currentWorldState().state.stable), true);
-  await Promise.resolve();
-  assert.deepEqual(observations.map(({ kind, commit, plan }) => [
-    kind, commit.kind, plan?.kind ?? null,
-  ]), [
-    ['checkpoint', 'checkpoint', 'bootstrap'],
-    ['commit', 'commit', 'frame'],
-    ['commit', 'commit', null],
+test('wire v2 fixture has JSON display checkpoint and ACK command cursor', async () => {
+  const { factory, sessions } = createMockDisplayFactory();
+  const client = new SceneEngineClient({ createDisplaySession: factory });
+  const raw = new Uint8Array(await readFile(`${FIXTURES}/checkpoint.bin`));
+  const decoded = readEnginePacket(raw);
+  assert.equal(decoded.header.schema, 'scene-engine-wire@2');
+  assert.equal(decoded.header.display_codec, 'scene-engine-display-node@2');
+  assert.deepEqual(decoded.attachments.map(({ kind, encoding }) => [kind, encoding]), [
+    ['world_snapshot', 'json'],
+    ['display_checkpoint', 'json'],
   ]);
-  assert.deepEqual(observations[0].events, []);
-  assert.equal(observations[1].events[0].eventId, 1n);
-  assert.deepEqual(observations[2].events, []);
-  for (const observation of observations) {
-    assert.equal(Object.isFrozen(observation.events), true);
-    assert.equal('product' in observation.events, false);
-    assert.equal('scene' in observation.events, false);
-  }
+
+  const result = client.applyPacket(raw);
+  const ack = readEnginePacket(result.ackPacket);
+  assert.equal(ack.header.last_command_seq, 0);
+  assert.deepEqual(client.currentDisplayView(), { sessionId: 1 });
+  assert.equal(sessions[0].metadata.sceneCatalogHash, HASH_A);
+  assert.deepEqual(sessions[0].log.map(([kind]) => kind), [
+    'installScene', 'createNode', 'activate', 'start',
+  ]);
+  assert.deepEqual(sessions[0].log[0][1], { sceneName: 'main' });
+  assert.deepEqual(sessions[0].log[2][1], {
+    commitSeq: 0, sourceTick: 0, lastCommandSeq: 0,
+  });
+  assert.deepEqual(Object.keys(sessions[0].log[1][1]), [
+    'name', 'parentName', 'prefabType', 'transformMode', 'transform', 'visible', 'state',
+  ]);
+  assert.equal('currentView' in client, false);
+  assert.equal('getNode' in client, false);
+  assert.equal('getWorldPose' in client, false);
 });
 
-test('removed attachment kind 5 fails closed without a compatibility decoder', async () => {
-  const raw = (await fixture('commit-input.bin')).slice();
-  const view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
-  const headerLength = view.getUint32(8, true);
-  raw[16 + headerLength] = 5;
-  assert.throws(
-    () => readEnginePacket(raw),
-    (error) => error.code === 'attachment-kind-or-encoding-unknown',
-  );
+test('applies canonical Python wire@2 fixtures through exact Authority payloads', async () => {
+  const { factory, sessions } = createMockDisplayFactory();
+  const client = new SceneEngineClient({ createDisplaySession: factory });
+  const checkpoint = client.applyPacket(new Uint8Array(
+    await readFile(`${PYTHON_FIXTURES}/checkpoint.bin`),
+  ));
+  const tick = client.applyPacket(new Uint8Array(
+    await readFile(`${PYTHON_FIXTURES}/commit-tick.bin`),
+  ));
+  const input = client.applyPacket(new Uint8Array(
+    await readFile(`${PYTHON_FIXTURES}/commit-input.bin`),
+  ));
+  assert.deepEqual([
+    checkpoint.commit.lastCommandSeq,
+    tick.commit.lastCommandSeq,
+    input.commit.lastCommandSeq,
+  ], [0, 7, 7]);
+  assert.deepEqual(sessions[0].log.map(([kind]) => kind), [
+    'installScene', 'createNode', 'createNode', 'activate', 'start',
+    'begin', 'createNode', 'setNodeTransform', 'setNodeParent', 'setNodeVisible',
+    'setNodeState', 'replaceNodePrefab', 'removeNode', 'seal',
+    'begin', 'seal',
+  ]);
+  assert.equal(client.currentWorldState().state.stable.value, 8);
 });
 
-test('a gap fails closed without changing any installed pointer', async () => {
-  const client = new SceneEngineClient();
-  client.applyPacket(await fixture('checkpoint.bin'));
+test('checkpoint fresh session swaps only after complete synchronous activation', () => {
+  const { factory, sessions } = createMockDisplayFactory();
+  const client = new SceneEngineClient({ createDisplaySession: factory });
+  client.applyPacket(checkpointPacket());
+  const firstView = client.currentDisplayView();
+
+  client.applyPacket(checkpointPacket({
+    commitSeq: 3,
+    sourceTick: 3,
+    worldRevision: 3,
+    lastCommandSeq: 2,
+    worldSnapshot: { tick: 3, world_revision: 3, value: 9 },
+  }));
+
+  assert.notStrictEqual(client.currentDisplayView(), firstView);
+  assert.deepEqual(client.currentDisplayView(), { sessionId: 2 });
+  assert.equal(sessions[0].log.at(-1)[0], 'dispose');
+  assert.equal(sessions[1].log.some(([kind]) => kind === 'dispose'), false);
+  assert.equal(client.currentCommit().lastCommandSeq, 2);
+});
+
+test('commit validates all commands then applies one Authority call per target before seal', () => {
+  const { factory, sessions } = createMockDisplayFactory();
+  const observations = [];
+  const client = new SceneEngineClient({
+    createDisplaySession: factory,
+    onCommit: (value) => observations.push(value),
+  });
+  client.applyPacket(checkpointPacket());
+  const commands = [
+    command('node-create', 1, 1, {
+      name: 'py/unit-2',
+      parent_name: null,
+      prefab_type: 'unit.example',
+      transform_mode: 'live',
+      transform: transform(2),
+      visible: true,
+      state: { mode: 'new' },
+    }),
+    command('node-set-transform', 2, 1, { transform: transform(3) }),
+    command('node-set-parent', 3, 1, { parent_name: 'py/unit-2' }),
+    command('node-set-visible', 4, 1, { visible: false }),
+    command('node-set-state', 5, 1, { state: { mode: 'active' } }),
+    command('node-replace-prefab', 6, 1, {
+      prefab_type: 'unit.variant', state: { variant: 2 },
+    }),
+    command('node-remove', 7, 1),
+  ];
+  const result = client.applyPacket(commitPacket({ commands }));
+  const ack = readEnginePacket(result.ackPacket);
+  assert.equal(ack.header.last_command_seq, 7);
+  assert.equal(client.currentCommit().lastCommandSeq, 7);
+  assert.deepEqual(sessions[0].log.slice(4).map(([kind]) => kind), [
+    'begin', 'createNode', 'setNodeTransform', 'setNodeParent', 'setNodeVisible',
+    'setNodeState', 'replaceNodePrefab', 'removeNode', 'seal',
+  ]);
+  const transformRecord = sessions[0].log.find(([kind]) => kind === 'setNodeTransform')[1];
+  assert.deepEqual(transformRecord.transform.rotationXyzw, [0, 0, 0, 1]);
+  assert.deepEqual(Object.keys(transformRecord), ['name', 'transform']);
+  assert.equal(Object.isFrozen(transformRecord), true);
+});
+
+test('empty command stream still seals and ACKs while preserving command cursor', () => {
+  const { factory, sessions } = createMockDisplayFactory();
+  const client = new SceneEngineClient({ createDisplaySession: factory });
+  client.applyPacket(checkpointPacket({ lastCommandSeq: 4 }));
+  const result = client.applyPacket(commitPacket({
+    baseCommandSeq: 4,
+    commands: [],
+  }));
+  assert.equal(readEnginePacket(result.ackPacket).header.last_command_seq, 4);
+  assert.deepEqual(sessions[0].log.slice(4).map(([kind]) => kind), ['begin', 'seal']);
+  assert.equal(client.currentWorldState().tick, 1);
+});
+
+test('invalid sequence fails before draw gate and leaves installed pointers unchanged', () => {
+  const { factory, sessions } = createMockDisplayFactory();
+  const client = new SceneEngineClient({ createDisplaySession: factory });
+  client.applyPacket(checkpointPacket());
   const before = client.capture();
+  const raw = commitPacket({
+    commands: [command('node-set-visible', 2, 1, { visible: false })],
+  });
   assert.throws(
-    () => client.applyPacket(awaitFixtureSyncError('commit-input.bin')),
-    (error) => error.code === 'commit-sequence-gap',
+    () => client.applyPacket(raw),
+    (error) => error.code === 'display-command-sequence-invalid',
   );
   const after = client.capture();
-  assert.strictEqual(after.worldState, before.worldState);
-  assert.strictEqual(after.view, before.view);
   assert.strictEqual(after.commit, before.commit);
-  assert.throws(() => client.applyPacket(awaitFixtureSyncError('commit-tick.bin')),
-    (error) => error.code === 'client-failed');
+  assert.strictEqual(after.worldState, before.worldState);
+  assert.equal(sessions[0].log.slice(4).length, 0);
+  assert.throws(() => client.applyPacket(raw), (error) => error.code === 'client-failed');
 });
 
-test('input encoding observes the installed cursor and normalizes JS negative zero', async () => {
-  const client = new SceneEngineClient();
-  client.applyPacket(await fixture('checkpoint.bin'));
-  const raw = client.encodeInput({
-    inputId: 'browser:1',
-    command: 'example.set',
-    args: { finite: 1.5, large: 1e20, negativeZero: -0, small: 1e-7 },
+test('validates the entire command stream before the first Authority mutation', () => {
+  const { factory, sessions } = createMockDisplayFactory();
+  const client = new SceneEngineClient({ createDisplaySession: factory });
+  client.applyPacket(checkpointPacket());
+  const raw = commitPacket({
+    commands: [
+      command('node-set-visible', 1, 1, { visible: false }),
+      command('node-set-state', 2, 2, { state: { mode: 'wrong-tick' } }),
+    ],
   });
-  const packet = readEnginePacket(raw);
-  assert.equal(packet.header.observed_commit_seq, 0);
-  assert.equal(packet.header.observed_stream_id, client.currentCommit().streamId);
-  assert.equal(packet.attachments[0].value.large, 1e20);
-  assert.equal(Object.is(packet.attachments[0].value.negativeZero, -0), false);
-  for (const value of [NaN, Infinity, -Infinity]) {
-    assert.throws(() => encodeEngineInput({
-      inputId: 'browser:bad',
-      observedStreamId: client.currentCommit().streamId,
-      observedCommitSeq: 0,
-      command: 'bad',
-      args: { value },
-    }));
-  }
-});
-
-test('input_result has no commit side effect and observer failures are isolated', async () => {
-  const client = new SceneEngineClient({ onCommit() { throw new Error('renderer failed'); } });
-  client.applyPacket(await fixture('checkpoint.bin'));
-  const before = client.currentCommit();
-  const result = client.applyPacket(await fixture('input-result.bin'));
-  assert.equal(result.kind, 'input_result');
-  assert.equal(result.ackPacket, null);
-  assert.strictEqual(result.commit, before);
-  assert.deepEqual(result.inputResult, {
-    inputId: 'client-a:2', status: 'no-op', reasonCode: 'unchanged', result: { value: 1 },
-  });
-  await Promise.resolve();
-  assert.strictEqual(client.currentCommit(), before);
-});
-
-test('the first server state packet must be a checkpoint', () => {
-  const client = new SceneEngineClient();
   assert.throws(
-    () => client.applyPacket(awaitFixtureSyncError('input-result.bin')),
-    (error) => error.code === 'checkpoint-required',
+    () => client.applyPacket(raw),
+    (error) => error.code === 'display-command-source-tick-mismatch',
+  );
+  assert.equal(sessions[0].log.length, 4);
+});
+
+test('Authority failure calls gate.fail, emits no ACK, and makes client terminal', () => {
+  const { factory, sessions } = createMockDisplayFactory({ failMethod: 'setNodeState' });
+  const client = new SceneEngineClient({ createDisplaySession: factory });
+  client.applyPacket(checkpointPacket());
+  const before = client.capture();
+  let thrown;
+  try {
+    client.applyPacket(commitPacket({
+      commands: [command('node-set-state', 1, 1, { state: { mode: 'bad' } })],
+    }));
+  } catch (error) {
+    thrown = error;
+  }
+  assert.equal(thrown.code, 'packet-apply-failed');
+  assert.deepEqual(sessions[0].log.slice(4).map(([kind]) => kind), [
+    'begin', 'setNodeState', 'fail',
+  ]);
+  assert.equal(sessions[0].log.at(-1)[1].message, 'failed:setNodeState');
+  assert.strictEqual(client.currentCommit(), before.commit);
+  assert.strictEqual(client.currentWorldState(), before.worldState);
+  assert.throws(
+    () => client.applyPacket(commitPacket()),
+    (error) => error.code === 'client-failed',
   );
 });
 
-test('array sibling changes use simultaneous original indices', () => {
+test('Promise-returning Authority operation is a synchronous barrier failure', () => {
+  const { factory, sessions } = createMockDisplayFactory({ asyncMethod: 'setNodeVisible' });
+  const client = new SceneEngineClient({ createDisplaySession: factory });
+  client.applyPacket(checkpointPacket());
+  assert.throws(
+    () => client.applyPacket(commitPacket({
+      commands: [command('node-set-visible', 1, 1, { visible: false })],
+    })),
+    (error) => error.code === 'authority-operation-async',
+  );
+  assert.equal(sessions[0].log.at(-1)[0], 'fail');
+});
+
+test('failed replacement checkpoint disposes only candidate and does not swap old display', () => {
+  const first = createMockDisplayFactory();
+  const failing = createMockDisplayFactory({ failMethod: 'createNode' });
+  let calls = 0;
+  const client = new SceneEngineClient({
+    createDisplaySession(metadata) {
+      calls += 1;
+      return calls === 1 ? first.factory(metadata) : failing.factory(metadata);
+    },
+  });
+  client.applyPacket(checkpointPacket());
+  const oldView = client.currentDisplayView();
+  assert.throws(() => client.applyPacket(checkpointPacket({
+    commitSeq: 2, sourceTick: 2, worldRevision: 2,
+  })));
+  assert.strictEqual(client.currentDisplayView(), oldView);
+  assert.equal(first.sessions[0].log.some(([kind]) => kind === 'dispose'), false);
+  assert.equal(failing.sessions[0].log.at(-1)[0], 'dispose');
+});
+
+test('input observes commit cursor and input_result has no state side effect', () => {
+  const { factory } = createMockDisplayFactory();
+  const client = new SceneEngineClient({ createDisplaySession: factory });
+  client.applyPacket(checkpointPacket());
+  const raw = client.encodeInput({
+    inputId: 'browser:1', command: 'example.set', args: { negativeZero: -0 },
+  });
+  const input = readEnginePacket(raw);
+  assert.equal(input.header.observed_commit_seq, 0);
+  assert.equal(input.header.observed_stream_id, STREAM_ID);
+  assert.equal(Object.is(input.attachments[0].value.negativeZero, -0), false);
+
+  const before = client.currentCommit();
+  const resultPacket = encodePacket('engine.input_result', {
+    schema: 'scene-engine-wire@2',
+    type: 'engine.input_result',
+    input_id: 'browser:1',
+    status: 'no-op',
+    reason_code: 'unchanged',
+  }, [{ kind: 'result_payload', encoding: 'json', value: { value: 1 } }]);
+  const result = client.applyPacket(resultPacket);
+  assert.equal(result.ackPacket, null);
+  assert.strictEqual(client.currentCommit(), before);
+  assert.deepEqual(result.inputResult, {
+    inputId: 'browser:1', status: 'no-op', reasonCode: 'unchanged', result: { value: 1 },
+  });
+});
+
+test('v1 packet fails closed without a compatibility decoder', async () => {
+  const v2 = new Uint8Array(await readFile(`${FIXTURES}/checkpoint.bin`));
+  const v1 = v2.slice();
+  v1[4] = 1;
+  assert.throws(
+    () => readEnginePacket(v1),
+    (error) => error.code === 'packet-version-invalid',
+  );
+});
+
+test('array sibling changes retain simultaneous original-index semantics', () => {
   const limits = {
     maximumJsonDepth: 256,
     maximumJsonPathSegments: 32,
     maximumWorldPatchChanges: 4096,
   };
   const root = Object.freeze({ items: Object.freeze([0, 1, 2, 3]) });
-  const removed = applyJsonPatch(root, {
+  const result = applyJsonPatch(root, {
     schema: 'scene-engine-json-tree@1',
     changes: [
       { op: 'unset', path: ['items', 0] },
       { op: 'unset', path: ['items', 2] },
     ],
   }, limits);
-  assert.deepEqual(removed.items, [1, 3]);
-  const mixed = applyJsonPatch(root, {
-    schema: 'scene-engine-json-tree@1',
-    changes: [
-      { op: 'set', path: ['items', 0], value: 9 },
-      { op: 'unset', path: ['items', 2] },
-    ],
-  }, limits);
-  assert.deepEqual(mixed.items, [9, 1, 3]);
+  assert.deepEqual(result.items, [1, 3]);
 });
 
-async function fixture(name) {
-  return new Uint8Array(await readFile(`${ROOT}/fixtures/wire-v1/${name}`));
-}
-
-function awaitFixtureSyncError(name) {
-  // Tests calling a synchronous API need already-owned bytes; all fixtures are
-  // small and loaded with Node's sync path only inside this helper.
-  return globalFixture(name);
-}
-
-function globalFixture(name) {
-  const path = `${ROOT}/fixtures/wire-v1/${name}`;
-  return new Uint8Array(requireRead(path));
-}
-
-import { readFileSync as requireRead } from 'node:fs';
+test('constructor rejects missing display session factory', () => {
+  assert.throws(
+    () => new SceneEngineClient(),
+    (error) => error.code === 'client-display-session-factory-invalid',
+  );
+  assert.throws(() => encodeEngineInput({
+    inputId: 'bad', observedStreamId: STREAM_ID, observedCommitSeq: 0,
+    command: 'bad', args: { value: NaN },
+  }));
+  assert.equal(WORLD_CODEC, 'example-world@2');
+  assert.equal(baselineNode().name, 'py/unit-1');
+});

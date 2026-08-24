@@ -1,9 +1,9 @@
 const MAGIC = 'SENG';
-const VERSION = 1;
+const VERSION = 2;
 const FIXED_HEADER_BYTES = 16;
 const ATTACHMENT_HEADER_BYTES = 8;
-const WIRE_SCHEMA = 'scene-engine-wire@1';
-export const SCENE_CODEC = 'scene-engine-scene@1';
+const WIRE_SCHEMA = 'scene-engine-wire@2';
+export const DISPLAY_CODEC = 'scene-engine-display-node@2';
 const MAX_SAFE = Number.MAX_SAFE_INTEGER;
 
 const PACKET_KIND = Object.freeze({
@@ -20,8 +20,8 @@ const TYPE_BY_KIND = Object.freeze(Object.fromEntries(
 const ATTACHMENT_KIND = Object.freeze({
   world_snapshot: 1,
   world_patch: 2,
-  scene_bootstrap: 3,
-  scene_frame: 4,
+  display_checkpoint: 3,
+  display_command_stream: 4,
   input_payload: 6,
   result_payload: 7,
 });
@@ -31,16 +31,18 @@ const ATTACHMENT_NAME = Object.freeze(Object.fromEntries(
 const HEADER_FIELDS = Object.freeze({
   'engine.checkpoint': Object.freeze([
     'schema', 'type', 'stream_id', 'commit_seq', 'source_tick', 'world_revision',
-    'world_codec', 'scene_codec',
+    'last_command_seq', 'world_codec', 'display_codec',
   ]),
   'engine.commit': Object.freeze([
     'schema', 'type', 'stream_id', 'commit_seq', 'source_tick', 'world_revision',
-    'cause', 'causation_id', 'world_codec', 'scene_codec',
+    'last_command_seq', 'cause', 'causation_id', 'world_codec', 'display_codec',
   ]),
   'engine.input': Object.freeze([
     'schema', 'type', 'input_id', 'observed_stream_id', 'observed_commit_seq', 'command',
   ]),
-  'engine.ack': Object.freeze(['schema', 'type', 'stream_id', 'commit_seq']),
+  'engine.ack': Object.freeze([
+    'schema', 'type', 'stream_id', 'commit_seq', 'last_command_seq',
+  ]),
   'engine.input_result': Object.freeze([
     'schema', 'type', 'input_id', 'status', 'reason_code',
   ]),
@@ -157,12 +159,17 @@ export function encodeEngineInput({
   }, [{ kind: 'input_payload', encoding: 'json', value: args }], limits);
 }
 
-export function encodeEngineAck({ streamId, commitSeq } = {}, limits = DEFAULT_ENGINE_LIMITS) {
+export function encodeEngineAck({
+  streamId,
+  commitSeq,
+  lastCommandSeq,
+} = {}, limits = DEFAULT_ENGINE_LIMITS) {
   return encodePacket('engine.ack', {
     schema: WIRE_SCHEMA,
     type: 'engine.ack',
     stream_id: streamId,
     commit_seq: commitSeq,
+    last_command_seq: lastCommandSeq,
   }, [], limits);
 }
 
@@ -236,8 +243,9 @@ function validateHeader(kind, value) {
     safeInteger(result.commit_seq, 'commit-seq-invalid');
     safeInteger(result.source_tick, 'source-tick-invalid');
     safeInteger(result.world_revision, 'world-revision-invalid');
+    safeInteger(result.last_command_seq, 'last-command-seq-invalid');
     identity(result.world_codec, 'world-codec-invalid');
-    if (result.scene_codec !== SCENE_CODEC) fail('scene-codec-unsupported');
+    if (result.display_codec !== DISPLAY_CODEC) fail('display-codec-unsupported');
   }
   if (kind === 'engine.commit') {
     if (!['tick', 'input', 'system'].includes(result.cause)) fail('commit-cause-invalid');
@@ -251,6 +259,7 @@ function validateHeader(kind, value) {
   } else if (kind === 'engine.ack') {
     text(result.stream_id, 'stream-id-invalid');
     safeInteger(result.commit_seq, 'commit-seq-invalid');
+    safeInteger(result.last_command_seq, 'last-command-seq-invalid');
   } else if (kind === 'engine.input_result') {
     text(result.input_id, 'input-id-invalid');
     if (!['rejected', 'no-op'].includes(result.status)) fail('input-result-status-invalid');
@@ -267,12 +276,9 @@ function validateAttachmentLayout(kind, attachments, limits) {
   const actual = attachments.map((item) => `${item.kind}:${item.encoding}`).join(',');
   let valid = false;
   if (kind === 'engine.checkpoint') {
-    valid = actual === 'world_snapshot:json,scene_bootstrap:raw,scene_frame:raw';
+    valid = actual === 'world_snapshot:json,display_checkpoint:json';
   } else if (kind === 'engine.commit') {
-    valid = [
-      'world_patch:json',
-      'world_patch:json,scene_frame:raw',
-    ].includes(actual);
+    valid = actual === 'world_patch:json,display_command_stream:json';
     if (valid) {
       const changes = attachments[0].value?.changes;
       if (Array.isArray(changes) && changes.length > limits.maximumWorldPatchChanges) {
