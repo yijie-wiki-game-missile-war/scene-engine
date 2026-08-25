@@ -29,9 +29,9 @@ test('validates packet-log@2 command cursor and replays through sole Authority p
   assert.equal(client.currentCommit().lastCommandSeq, 2);
   assert.equal(client.currentWorldState().state.value, 8);
   assert.deepEqual(sessions[0].log.map(([kind]) => kind), [
-    'installScene', 'createNode', 'activate', 'start',
-    'begin', 'setNodeTransform', 'setNodeState', 'seal',
-    'begin', 'seal',
+    'installScene', 'createNode', 'activate', 'start', 'summary',
+    'begin', 'setNodeTransform', 'setNodeState', 'seal', 'summary',
+    'begin', 'seal', 'summary',
   ]);
   assert.deepEqual(log.packetAt(0), log.records[0].rawBytes);
 });

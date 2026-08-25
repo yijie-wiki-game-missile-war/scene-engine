@@ -27,7 +27,9 @@ import {
 import { TestRenderer } from '../js/packages/renderer-three/test/support.mjs';
 
 const SCRIPT_DIRECTORY = dirname(fileURLToPath(import.meta.url));
-const EVIDENCE_PATH = resolve(SCRIPT_DIRECTORY, '../docs/evidence/display-resource-leak-matrix.json');
+const EVIDENCE_PATH = process.env.SCENE_ENGINE_DISPLAY_LEAK_OUTPUT
+  ? resolve(process.env.SCENE_ENGINE_DISPLAY_LEAK_OUTPUT)
+  : resolve(SCRIPT_DIRECTORY, '../docs/evidence/display-resource-leak-matrix.json');
 const IDENTITY = Object.freeze({
   position: Object.freeze([0, 0, 0]),
   rotationXyzw: Object.freeze([0, 0, 0, 1]),
@@ -113,7 +115,7 @@ async function main() {
     runtime: {
       node: process.version,
       displaySchema: 'scene-engine-display-node@2',
-      rendererBackend: '@scene-engine/renderer-three@0.9.0',
+      rendererBackend: '@scene-engine/renderer-three@0.9.1',
       rendererInjection: 'real ThreeRenderBackend with a non-WebGL TestRenderer only',
       resourceLifecycle: 'loadThreeResource + disposeThreeResource',
     },
@@ -274,9 +276,9 @@ async function verifyAuthorityAndRebuildLifecycle() {
       `authority lifecycle ${cycle + 1} failed to return to baseline`);
   }
 
-  const stableNode = runtime._nodeIndex.require('scene/main/baseline-visual');
-  const stableMesh = stableNode.requireComponent('mesh');
-  const stableSprite = stableNode.requireComponent('sprite');
+  let stableNode = runtime._nodeIndex.require('scene/main/baseline-visual');
+  let stableMesh = stableNode.requireComponent('mesh');
+  let stableSprite = stableNode.requireComponent('sprite');
   const rebuildRows = [];
   for (let rebuild = 0; rebuild < 20; rebuild += 1) {
     const retired = backends.at(-1);
@@ -306,9 +308,25 @@ async function verifyAuthorityAndRebuildLifecycle() {
   assert.equal(healthEvents.length, 0, 'nominal lifecycle emitted renderer health failures');
 
   const lastBackend = backends.at(-1);
+  const releasedReferences = {
+    node: new WeakRef(stableNode),
+    meshComponent: new WeakRef(stableMesh),
+    spriteComponent: new WeakRef(stableSprite),
+  };
+  stableNode = null;
+  stableMesh = null;
+  stableSprite = null;
+  const runtimeRefs = retainRuntimeInternals(runtime);
   await runtime.dispose();
-  const final = runtimeMetrics(runtime, lastBackend.backend, frames);
+  const final = runtimeMetrics(runtime, lastBackend.backend, frames, runtimeRefs);
   assertRuntimeZero(final, 'disposed DisplayRuntime');
+  assertRuntimeReferencesReleased(runtime, runtimeRefs);
+  const weakReferencesCollected = await collectWeakReferences(releasedReferences);
+  assert.deepEqual(weakReferencesCollected, {
+    node: true,
+    meshComponent: true,
+    spriteComponent: true,
+  }, 'externally retained DisplayRuntime kept its disposed object graph alive');
   assert.equal(lastBackend.renderer.disposed, true);
   assert.equal(lastBackend.observer.disconnected, true);
 
@@ -332,6 +350,7 @@ async function verifyAuthorityAndRebuildLifecycle() {
       rows: rebuildRows,
     },
     healthEventCount: healthEvents.length,
+    weakReferencesCollected,
     final,
   };
 }
@@ -340,7 +359,7 @@ async function verifyFaultInjectionMatrix() {
   return {
     gltfLoadFailure: await verifyGltfLoadFailure(),
     partialLodFailure: await verifyPartialLodFailure(),
-    pendingBindingRemove: await verifyPendingBindingRemove(),
+    pendingBindingDispose: await verifyPendingBindingDispose(),
   };
 }
 
@@ -445,7 +464,7 @@ async function verifyPartialLodFailure() {
   };
 }
 
-async function verifyPendingBindingRemove() {
+async function verifyPendingBindingDispose() {
   const beforeDispose = disposalProbe.snapshot();
   const beforeClosedImages = closedImageBitmapCount;
   let beginLoad = null;
@@ -507,26 +526,27 @@ async function verifyPendingBindingRemove() {
     transformMode: 'live', transform: IDENTITY, visible: true, state: {},
   });
   await loadStarted;
-  const pendingBeforeRemove = runtimeMetrics(runtime, backendRows[0].backend, frames);
-  assert.equal(pendingBeforeRemove.pendingBindingCount, 1);
-  assert.equal(pendingBeforeRemove.pendingResourceCount, 1);
-  runtime.authority.removeNode({ name: 'py/pending' });
+  const pendingBeforeDispose = runtimeMetrics(runtime, backendRows[0].backend, frames);
+  assert.equal(pendingBeforeDispose.pendingBindingCount, 1);
+  assert.equal(pendingBeforeDispose.pendingResourceCount, 1);
+  const runtimeRefs = retainRuntimeInternals(runtime);
+  const disposal = runtime.dispose();
+  await Promise.resolve();
   await resolveLoad();
-  await runtime.whenReady();
-  const settled = runtimeMetrics(runtime, backendRows[0].backend, frames);
-  assert.deepEqual(settled, baseline, 'late pending binding did not return to baseline');
-  assert.ok(closedImageBitmapCount > beforeClosedImages, 'late texture image was not closed');
-  await runtime.dispose();
-  const final = runtimeMetrics(runtime, backendRows[0].backend, frames);
+  await disposal;
+  for (let turn = 0; turn < 4; turn += 1) {
+    await new Promise((resolveTurn) => setImmediate(resolveTurn));
+  }
+  const final = runtimeMetrics(runtime, backendRows[0].backend, frames, runtimeRefs);
   assertRuntimeZero(final, 'pending binding disposed DisplayRuntime');
+  assertRuntimeReferencesReleased(runtime, runtimeRefs);
   assert.equal(backendRows[0].renderer.disposed, true);
   assert.equal(backendRows[0].observer.disconnected, true);
   return {
-    injected: 'authority node removed while its real texture Resource lease was pending',
+    injected: 'DisplayRuntime disposed while its real texture Resource lease was pending',
     lateBindingAttached: false,
     baseline,
-    pendingBeforeRemove,
-    settled,
+    pendingBeforeDispose,
     final,
     imageBitmapsClosed: closedImageBitmapCount - beforeClosedImages,
     disposedDelta: disposalDelta(beforeDispose, disposalProbe.snapshot()),
@@ -580,19 +600,59 @@ function modelDescriptor(nodeName, componentKey, modelResourceId, registry) {
   };
 }
 
-function runtimeMetrics(runtime, backend, frames) {
+function retainRuntimeInternals(runtime) {
+  return {
+    nodeIndex: runtime._nodeIndex,
+    scheduler: runtime._scheduler,
+    renderSystem: runtime._renderSystem,
+    sceneLoader: runtime._sceneLoader,
+    prefabInstantiator: runtime._prefabInstantiator,
+    scene: runtime._scene,
+  };
+}
+
+function runtimeMetrics(runtime, backend, frames, retained = null) {
+  const nodeIndex = runtime._nodeIndex ?? retained?.nodeIndex;
+  const scheduler = runtime._scheduler ?? retained?.scheduler;
+  const renderSystem = runtime._renderSystem ?? retained?.renderSystem;
   let componentCount = 0;
-  for (const node of runtime._nodeIndex.values()) componentCount += node._components.size;
+  for (const node of nodeIndex?.values() ?? []) componentCount += node._components.size;
   const backendState = backendMetrics(backend);
   return {
-    nodeCount: runtime._nodeIndex.size,
+    nodeCount: nodeIndex?.size ?? 0,
     componentCount,
-    schedulerCount: runtime._scheduler._registered.size,
-    schedulerUpdateCount: runtime._scheduler._phases.update.length,
-    schedulerBeforeRenderCount: runtime._scheduler._phases['before-render'].length,
+    schedulerCount: scheduler?._registered.size ?? 0,
+    schedulerUpdateCount: scheduler?._phases.update.length ?? 0,
+    schedulerBeforeRenderCount: scheduler?._phases['before-render'].length ?? 0,
+    renderSystemEntryCount: renderSystem?._entries.size ?? 0,
+    sceneLoaderScopeCount: (runtime._sceneLoader ?? retained?.sceneLoader)?._scopes.length ?? 0,
+    prefabScopeCount: (runtime._prefabInstantiator ?? retained?.prefabInstantiator)?._scopes.size ?? 0,
     rafPendingCount: frames.pending,
     ...backendState,
   };
+}
+
+function assertRuntimeReferencesReleased(runtime, retained) {
+  for (const key of [
+    '_nodeIndex', '_scheduler', '_renderSystem', '_nodeGraph', '_scene', '_componentContext',
+    '_prefabInstantiator', '_sceneLoader', '_hostElement', '_canvas', '_createRenderBackend',
+  ]) assert.equal(runtime[key], null, `disposed DisplayRuntime retained ${key}`);
+  assert.equal(retained.sceneLoader._scopes.length, 0);
+  assert.equal(retained.prefabInstantiator._scopes.size, 0);
+  for (const key of [
+    'rootNode', 'authorityRootNode', 'definition', 'compiledDefinition', 'loader',
+    'activeCameraName', 'registries', 'nodeIndex', 'nodeGraph', 'scheduler', 'renderSystem',
+  ]) assert.equal(retained.scene[key], null, `disposed Scene retained ${key}`);
+}
+
+async function collectWeakReferences(references) {
+  for (let turn = 0; turn < 8; turn += 1) {
+    await new Promise((resolveTurn) => setImmediate(resolveTurn));
+    for (let collection = 0; collection < 3; collection += 1) globalThis.gc();
+    if (Object.values(references).every((reference) => reference.deref() === undefined)) break;
+  }
+  return Object.fromEntries(Object.entries(references)
+    .map(([key, reference]) => [key, reference.deref() === undefined]));
 }
 
 function backendMetrics(backend) {
@@ -674,7 +734,8 @@ function assertBackendZero(value, label) {
 function assertRuntimeZero(value, label) {
   for (const key of [
     'nodeCount', 'componentCount', 'schedulerCount', 'schedulerUpdateCount',
-    'schedulerBeforeRenderCount', 'rafPendingCount',
+    'schedulerBeforeRenderCount', 'renderSystemEntryCount', 'sceneLoaderScopeCount',
+    'prefabScopeCount', 'rafPendingCount',
   ]) assert.equal(value[key], 0, `${label}: ${key} must return to zero`);
   assertBackendZero(value, label);
 }

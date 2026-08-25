@@ -27,6 +27,7 @@ import {
 } from '../js/packages/renderer-three/src/resources.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const DEFAULT_FORMAL_OUTPUT = 'docs/evidence/display-node-cutover/js-display-runtime-500-formal.json';
 const AUTHORITY_ROOTS = 500;
 const INITIAL_ROOTS = 250;
 const PREFAB_LOCAL_NODES_PER_ROOT = 2;
@@ -640,6 +641,7 @@ async function run({ quick }) {
     measuredPath: false,
     directLookups: 0,
     fullTreeScans: 0,
+    summaryCalls: 0,
   };
   const frames = new FrameAdapter();
   const renderers = [];
@@ -728,6 +730,14 @@ async function run({ quick }) {
     runtime.commitGate.begin(cursor);
     for (const command of commands) applyCommand(runtime.authority, command);
     runtime.commitGate.seal(cursor);
+    const displaySummary = runtime.summary();
+    current.summaryCalls += 1;
+    if (displaySummary.nodeCount !== 1_503
+        || displaySummary.cursor.commitSeq !== cursor.commitSeq
+        || displaySummary.cursor.sourceTick !== cursor.sourceTick
+        || displaySummary.cursor.lastCommandSeq !== cursor.lastCommandSeq) {
+      throw new Error(`Display summary drift at tick ${tick}`);
+    }
     metrics.commandApplyUs[ordinal] = microseconds(commandStarted);
     current.frameStarted = process.hrtime.bigint();
     const callbacks = frames.step();
@@ -784,6 +794,7 @@ async function run({ quick }) {
     exactRafOwner: frames.pendingCount === 0 && finalView.snapshot().cursor.sourceTick === totalTicks,
     commandStreamAt60Hz: lastCommandSeq === totalTicks * COMMANDS_PER_TICK,
     directNodeIndexOnly: current.directLookups > 0 && current.fullTreeScans === 0,
+    summaryIsConstantPath: current.summaryCalls === totalTicks && current.fullTreeScans === 0,
     correctnessHash: runtimeHash === expectedHash,
     behaviourTicks: behaviourTicks === totalTicks * BEHAVIOUR_ROOTS,
     renderPrepareP95Under8Ms: summary(metrics.renderPrepareUs.subarray(...soakRange)).p95Ms
@@ -842,6 +853,7 @@ async function run({ quick }) {
     lookupDiagnostics: {
       directNodeIndexLookupsInMeasuredPath: current.directLookups,
       fullNodeIndexTraversalsInMeasuredPath: current.fullTreeScans,
+      displaySummaryCallsInMeasuredPath: current.summaryCalls,
     },
     correctness: {
       algorithm: 'sha256 canonical JSON',
@@ -859,14 +871,23 @@ async function run({ quick }) {
     },
     gates,
   };
+  const disposalRefs = {
+    nodeIndex: runtime._nodeIndex,
+    scheduler: runtime._scheduler,
+    renderSystem: runtime._renderSystem,
+    sceneLoader: runtime._sceneLoader,
+    prefabInstantiator: runtime._prefabInstantiator,
+  };
   await runtime.dispose();
   const disposedDiagnostics = backend.diagnostics();
   report.disposalBaseline = {
-    nodeIndexCount: runtime._nodeIndex.size,
-    componentCount: [...runtime._nodeIndex.values()]
+    nodeIndexCount: disposalRefs.nodeIndex.size,
+    componentCount: [...disposalRefs.nodeIndex.values()]
       .reduce((count, node) => count + node.components.length, 0),
-    schedulerHandlerCount: runtime._scheduler._registered.size,
-    renderSystemEntryCount: runtime._renderSystem._entries.size,
+    schedulerHandlerCount: disposalRefs.scheduler._registered.size,
+    renderSystemEntryCount: disposalRefs.renderSystem._entries.size,
+    sceneLoaderScopeCount: disposalRefs.sceneLoader._scopes.length,
+    prefabScopeCount: disposalRefs.prefabInstantiator._scopes.size,
     renderBindingCount: disposedDiagnostics.bindingCount,
     backendNodeBindingCount: disposedDiagnostics.nodeBindingCount,
     resourceCount: disposedDiagnostics.resourceCount,
@@ -897,11 +918,19 @@ function parseArguments(argv) {
       index += 1;
     } else throw new Error(`unknown benchmark option: ${argument}`);
   }
-  if (!quick && output === null) throw new Error('formal benchmark runs require --output');
+  if (!quick && output === null) output = DEFAULT_FORMAL_OUTPUT;
   return { quick, output };
 }
 
 try {
+  if (typeof globalThis.gc !== 'function') {
+    execFileSync(process.execPath, [
+      '--expose-gc',
+      fileURLToPath(import.meta.url),
+      ...process.argv.slice(2),
+    ], { cwd: process.cwd(), stdio: 'inherit' });
+    process.exit(0);
+  }
   const options = parseArguments(process.argv.slice(2));
   const report = await run(options);
   if (options.output !== null) {

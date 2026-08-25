@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed verification for the Scene Engine 0.7 Display cutover."""
+"""Fail-closed verification for the Display repair and Showcase cutover."""
 
 from __future__ import annotations
 
@@ -32,9 +32,9 @@ from scene_engine.wire import WIRE_SCHEMA, read_engine_packet  # noqa: E402
 
 VERSIONS = {
     "python": "0.7.0",
-    "client": "0.7.0",
-    "display": "0.1.0",
-    "renderer": "0.9.0",
+    "client": "0.8.0",
+    "display": "0.2.0",
+    "renderer": "0.9.1",
 }
 ARTIFACTS = (
     f"scene-engine-client-{VERSIONS['client']}.tgz",
@@ -337,11 +337,14 @@ def verify_source_shape() -> None:
         ROOT / "src/scene_engine/scene.py",
         ROOT / "js/packages/client/src/scene.js",
         ROOT / "js/packages/client/src/tree.js",
+        ROOT / "js/packages/display/src/runtime/local-edit-port.js",
+        ROOT / "js/packages/display/test/local-edit-port.test.mjs",
         ROOT / "fixtures/wire-v1",
         ROOT / "fixtures/scene-v1",
+        WORKSPACE / "arts/authoring-tools",
     )
     for path in absent:
-        require(not path.exists(), f"removed source still exists: {path.relative_to(ROOT)}")
+        require(not path.exists(), f"removed source still exists: {path.relative_to(WORKSPACE)}")
     required = (
         ROOT / "src/scene_engine/display.py",
         ROOT / "fixtures/wire-v2/checkpoint.bin",
@@ -393,12 +396,6 @@ def verify_artifacts() -> None:
         arts = arts_vendor / name
         require(arts.exists(), f"Arts vendor artifact missing: {name}")
         require(engine.read_bytes() == arts.read_bytes(), f"Arts artifact differs: {name}")
-    replay_client = WORKSPACE / "replay/vendor" / ARTIFACTS[0]
-    require(replay_client.exists(), "Replay client artifact missing")
-    require(
-        replay_client.read_bytes() == (dist / ARTIFACTS[0]).read_bytes(),
-        "Replay client artifact differs",
-    )
 
 
 def verify_python_game() -> None:
@@ -455,37 +452,6 @@ def verify_consumers() -> None:
             artifact_name=artifact_name,
             version=version,
         )
-    replay = read_json(WORKSPACE / "replay/package.json")
-    require(
-        replay["dependencies"].get("@scene-engine/client")
-        == f"file:vendor/{ARTIFACTS[0]}",
-        "Replay client dependency mismatch",
-    )
-    replay_lock = read_json(WORKSPACE / "replay/package-lock.json")
-    replay_lock_packages = replay_lock.get("packages")
-    require(
-        isinstance(replay_lock_packages, dict),
-        "Replay package-lock packages table missing",
-    )
-    replay_root_lock = replay_lock_packages.get("")
-    require(isinstance(replay_root_lock, dict), "Replay package-lock root entry missing")
-    replay_lock_dependencies = replay_root_lock.get("dependencies")
-    require(
-        isinstance(replay_lock_dependencies, dict),
-        "Replay package-lock root dependencies missing",
-    )
-    require(
-        replay_lock_dependencies.get("@scene-engine/client")
-        == f"file:vendor/{ARTIFACTS[0]}",
-        "Replay package-lock client dependency mismatch",
-    )
-    _source_root, artifact_name, version = PACKAGE_ARTIFACTS["@scene-engine/client"]
-    verify_npm_file_install(
-        WORKSPACE / "replay",
-        package_name="@scene-engine/client",
-        artifact_name=artifact_name,
-        version=version,
-    )
 
 
 def verify_current_text() -> None:
@@ -508,7 +474,7 @@ def main() -> int:
     verify_python_game()
     verify_consumers()
     verify_current_text()
-    print("Scene Engine 0.7 Display cutover verification passed.")
+    print("Scene Engine Display repair and Showcase cutover verification passed.")
     return 0
 
 

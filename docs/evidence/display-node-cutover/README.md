@@ -1,12 +1,16 @@
 # JavaScript DisplayRuntime formal acceptance evidence
 
-`js-display-runtime-500-formal.json` is generated, not hand-authored. Reproduce it from the
-Scene Engine repository with:
+`js-display-runtime-500-formal.json` and `js-client-ack-500-formal.json` are generated,
+not hand-authored. Reproduce both from the Scene Engine repository with the cutover
+runbook commands:
 
 ```bash
-node --expose-gc scripts/benchmark_display_runtime_500.mjs \
-  --output docs/evidence/display-node-cutover/js-display-runtime-500-formal.json
+node scripts/benchmark_display_runtime_500.mjs
+node scripts/benchmark_client_ack_500.mjs
 ```
+
+Both scripts restart themselves with explicit GC when necessary and write their formal
+evidence files at the paths above.
 
 The formal run commits 600 validation ticks followed by a 36,000-tick logical soak. Every
 tick is committed individually at the 60 Hz authority cursor and contains 40 real

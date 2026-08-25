@@ -17,7 +17,7 @@ test('0.9 root is the exact ThreeRenderBackend public surface', async () => {
   ]);
   assert.equal(api.THREE_RENDER_BACKEND_SCHEMA, 'scene-engine-three-render-backend@1');
   const packageJson = JSON.parse(await fs.readFile(path.join(ROOT, 'package.json'), 'utf8'));
-  assert.equal(packageJson.version, '0.9.0');
+  assert.equal(packageJson.version, '0.9.1');
   assert.deepEqual((await fs.readdir(path.join(ROOT, 'src'))).sort(), [
     'backend.js', 'constants.js', 'errors.js', 'index.js', 'resource-manager.js',
     'resources.js', 'validation.js',

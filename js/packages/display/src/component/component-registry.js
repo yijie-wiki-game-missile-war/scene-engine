@@ -1,10 +1,16 @@
-import { cloneAndFreeze, exactKeys, nonemptyString, objectHasOwnMethod } from '../internal.js';
+import {
+  cloneAndFreeze,
+  exactKeys,
+  nonemptyString,
+  objectHasOwnMethod,
+  plainRecord,
+} from '../internal.js';
 import { fail } from '../runtime/health.js';
 import { BillboardComponent, BILLBOARD_COMPONENT_DESCRIPTOR } from '../behaviours/billboard.js';
 import { LookAtComponent, LOOK_AT_COMPONENT_DESCRIPTOR } from '../behaviours/look-at.js';
 import { AuthorityComponent } from './authority-component.js';
 import { BehaviourComponent } from './behaviour-component.js';
-import { Component } from './component.js';
+import { Component, replaceComponentProperties } from './component.js';
 import { RenderComponent } from '../render/render-component.js';
 import { RENDER_COMPONENT_DESCRIPTORS } from '../render/components.js';
 
@@ -13,6 +19,7 @@ const FORBIDDEN_TRANSFORM_FIELDS = new Set([
   'position', 'rotation', 'rotationXyzw', 'scale', 'transform', 'matrix', 'worldMatrix',
   'localTransform',
 ]);
+const PREPARED_PROPERTY_PATCHES = new WeakMap();
 
 function assertNoComponentTransform(properties) {
   for (const key of Object.keys(properties)) {
@@ -34,6 +41,45 @@ function validateReference(resourceRegistry, reference) {
   if (!record.kinds.includes(resource.describe().kind)) {
     fail('display-resource-reference-kind-invalid');
   }
+}
+
+function requireResourceRegistry(resourceRegistry) {
+  if (!resourceRegistry || typeof resourceRegistry.require !== 'function') {
+    fail('display-component-resource-registry-invalid');
+  }
+  return resourceRegistry;
+}
+
+function componentType(component) {
+  if (!component || component.disposed) fail('display-component-invalid');
+  return nonemptyString(component.constructor?.typeId, 'display-component-type-invalid');
+}
+
+/**
+ * Package-private transaction preflight used by PrefabDefinition.  The returned object is
+ * normalized and resource-validated, and its identity carries a one-shot proof consumed by
+ * ComponentRegistry.patchComponentProperties().  It is deliberately not re-exported by the
+ * package entry point.
+ */
+export function prepareComponentPropertiesPatch(registry, {
+  typeId,
+  currentProperties,
+  patch,
+  resourceRegistry,
+}) {
+  if (!(registry instanceof ComponentRegistry)) fail('display-component-registry-invalid');
+  const resources = requireResourceRegistry(resourceRegistry);
+  const current = plainRecord(currentProperties, 'display-component-properties-invalid');
+  const delta = plainRecord(patch, 'display-component-properties-invalid');
+  const properties = registry.normalizeProperties(typeId, { ...current, ...delta });
+  registry.validateResourceReferences(typeId, properties, resources);
+  PREPARED_PROPERTY_PATCHES.set(properties, Object.freeze({
+    registry,
+    typeId,
+    currentProperties,
+    resourceRegistry: resources,
+  }));
+  return properties;
 }
 
 export class ComponentRegistry {
@@ -96,21 +142,48 @@ export class ComponentRegistry {
       enabled: compiled.enabled,
       properties: compiled.properties,
     });
-    component._setNormalizer((value) => this.normalizeProperties(compiled.type, value));
+    // Component constructors defensively clone arbitrary caller data.  Registry-created
+    // instances can safely adopt the already compiled, deeply frozen identity; this also lets
+    // a transaction preflight be consumed without normalizing the same patch twice.
+    replaceComponentProperties(component, compiled.properties);
     return component;
   }
 
-  validatePatch(component, patch) {
-    if (!component || component.disposed) fail('display-component-invalid');
-    return this.normalizeProperties(component.constructor.typeId,
-      { ...component.properties, ...patch });
+  patchComponentProperties(value) {
+    const record = exactKeys(value, ['component', 'patch', 'resourceRegistry'], [],
+      'display-component-property-patch-invalid');
+    const typeId = componentType(record.component);
+    const descriptor = this.require(typeId);
+    if (!(record.component instanceof descriptor.ComponentClass)) fail('display-component-invalid');
+    const resources = requireResourceRegistry(record.resourceRegistry);
+    const patch = plainRecord(record.patch, 'display-component-properties-invalid');
+    const prepared = PREPARED_PROPERTY_PATCHES.get(patch);
+    let properties;
+    if (prepared?.registry === this && prepared.typeId === typeId
+        && prepared.currentProperties === record.component.properties
+        && prepared.resourceRegistry === resources) {
+      PREPARED_PROPERTY_PATCHES.delete(patch);
+      properties = patch;
+    } else {
+      properties = prepareComponentPropertiesPatch(this, {
+        typeId,
+        currentProperties: record.component.properties,
+        patch,
+        resourceRegistry: resources,
+      });
+      PREPARED_PROPERTY_PATCHES.delete(properties);
+    }
+    return replaceComponentProperties(record.component, properties);
   }
 
   normalizeProperties(typeId, value) {
     const descriptor = this.require(typeId);
-    const properties = descriptor.normalizeProperties(value);
+    const properties = cloneAndFreeze(
+      descriptor.normalizeProperties(value),
+      'display-component-properties-invalid',
+    );
     assertNoComponentTransform(properties);
-    return cloneAndFreeze(properties);
+    return properties;
   }
 
   validateResourceReferences(typeId, properties, resourceRegistry) {

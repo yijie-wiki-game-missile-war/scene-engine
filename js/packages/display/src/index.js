@@ -1,4 +1,9 @@
-export { DISPLAY_RUNTIME_SCHEMA, DisplayRuntime, createDisplayRuntime } from './runtime/display-runtime.js';
+export {
+  DISPLAY_RUNTIME_SCHEMA,
+  DISPLAY_SUMMARY_SCHEMA,
+  DisplayRuntime,
+  createDisplayRuntime,
+} from './runtime/display-runtime.js';
 export { DisplayRuntimeError } from './runtime/health.js';
 
 export { Component } from './component/component.js';

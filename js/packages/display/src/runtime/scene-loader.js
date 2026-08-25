@@ -87,23 +87,41 @@ export class SceneLoader {
   }
 
   unload(reason = 'scene-disposed') {
-    if (!this._scene.beginDispose()) return Object.freeze([]);
+    if (this._scene === null || !this._scene.beginDispose()) return Object.freeze([]);
     const errors = [];
-    if (this._scene.rootNode) {
-      for (const node of this._scene.nodeGraph.childBeforeParent(this._scene.rootNode)) {
-        for (const component of [...node._components.values()].reverse()) {
-          errors.push(...component.dispose(reason));
-          node._components.delete(component.key);
+    try {
+      if (this._scene.rootNode) {
+        for (const node of this._scene.nodeGraph.childBeforeParent(this._scene.rootNode)) {
+          for (const component of [...node._components.values()].reverse()) {
+            errors.push(...component.dispose(reason));
+            node._components.delete(component.key);
+          }
+        }
+        for (const node of this._scene.nodeGraph.childBeforeParent(this._scene.rootNode)) {
+          try {
+            this._scene.nodeGraph.detach(node);
+            this._scene.nodeIndex.unregister(node);
+            node._markDisposed();
+          } catch (error) { errors.push(error); }
         }
       }
-      for (const node of this._scene.nodeGraph.childBeforeParent(this._scene.rootNode)) {
-        this._scene.nodeGraph.detach(node);
-        this._scene.nodeIndex.unregister(node);
-        node._markDisposed();
-      }
+      try { this._scene.renderSystem.setActiveCamera(null); } catch (error) { errors.push(error); }
+      this._scene.activeCameraName = null;
+      this._scene.finishDispose();
+    } finally {
+      this._directComponents.length = 0;
+      this._scopes.length = 0;
     }
-    this._scene.finishDispose();
     return Object.freeze(errors);
+  }
+
+  release() {
+    this._directComponents.length = 0;
+    this._scopes.length = 0;
+    this._scene = null;
+    this._componentContext = null;
+    this._prefabInstantiator = null;
+    this._onCleanupErrors = null;
   }
 
   _attachPreorder(node) {

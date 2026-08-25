@@ -37,6 +37,12 @@ export class ComponentScheduler {
 
   halt() { this._halted = true; }
   reset() { this._halted = false; }
+  clear() {
+    this._halted = true;
+    this._registered.clear();
+    this._phases.update.length = 0;
+    this._phases['before-render'].length = 0;
+  }
 
   _run(phase, frame) {
     if (this._halted) fail('display-component-scheduler-halted');

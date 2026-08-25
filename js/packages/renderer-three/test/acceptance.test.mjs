@@ -70,18 +70,30 @@ test('500 flat real-Three bindings batch, sample, rebuild cleanly, and leak zero
   assert.equal(diagnostics.resourceCount, 4);
   assert.equal(diagnostics.resourceLeaseCount, 800);
   assert.equal(diagnostics.renderTargetCount, 0);
+  for (const row of rows.slice(0, 450)) {
+    const record = first.backend._records.get(row.binding);
+    assert.equal(record.batched, true);
+    assert.equal(record.handle.object.visible, false,
+      'a batched logical binding has no simultaneously drawable ordinary object');
+  }
   const batchVersions = first.backend._batches.map((batch) => batch.object.instanceMatrix.version);
   for (let index = 0; index < 50; index += 1) {
     const row = rows[index];
     first.backend.updateBinding(row.binding, patch(row.nodeName, row.key, row.properties,
       new THREE.Matrix4().makeTranslation(index, 0, 0)));
+    assert.equal(first.backend._records.get(row.binding).handle.object.visible, false,
+      'transform updates must not reveal batched ordinary objects');
   }
   first.backend.prepareFrame(frame(camera, 61, 1.016));
   assert.deepEqual(first.backend._batches.map((batch, index) =>
     batch.object.instanceMatrix.version > batchVersions[index]), [true, true]);
+  for (const row of rows.slice(0, 450)) {
+    assert.equal(first.backend._records.get(row.binding).handle.object.visible, false);
+  }
   for (const row of rows) first.backend.destroyBinding(row.binding);
   first.backend.destroyBinding(camera);
   assert.equal(first.backend.diagnostics().bindingCount, 0);
+  assert.equal(first.backend.diagnostics().batchCount, 0);
   assert.equal(first.backend.diagnostics().resourceLeaseCount, 0);
   assert.equal(first.backend.diagnostics().resourceCount, 0);
   first.backend.dispose();

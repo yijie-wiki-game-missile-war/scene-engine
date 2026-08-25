@@ -113,6 +113,7 @@ export class ThreeRenderBackend {
       handle: null,
       nodeRoot: null,
       visible: true,
+      batched: false,
       worldMatrix: Object.freeze([1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 1]),
       controller: new AbortController(),
       pendingController: null,
@@ -149,8 +150,7 @@ export class ThreeRenderBackend {
       record.nodeRoot.matrix.fromArray(patch.worldMatrix);
       record.nodeRoot.matrixWorldNeedsUpdate = true;
     }
-    if (record.handle.object) record.handle.object.visible = patch.visible;
-    record.handle.applyVisibility?.(patch.visible);
+    this._applyRecordVisibility(record);
     const nextResourceIds = resourceIdsForComponent(record.componentType, patch.properties);
     if (stableData(nextResourceIds) !== stableData(record.resourceIds)) {
       this._scheduleReplacement(record, patch.properties, nextResourceIds);
@@ -165,7 +165,7 @@ export class ThreeRenderBackend {
       try {
         record.handle.update(patch.properties);
         record.properties = patch.properties;
-        record.handle.applyVisibility?.(record.visible);
+        this._applyRecordVisibility(record);
       } catch (error) {
         const wrapped = wrapError('three-binding-update-failed', error); this._failure = wrapped;
         this._emitHealth({ phase: 'binding-update', record, errorCode: wrapped.code,
@@ -249,14 +249,17 @@ export class ThreeRenderBackend {
     raycaster.setFromCamera(pointer, camera);
     for (const hit of raycaster.intersectObjects(candidates, true)) {
       let record = null;
+      let activeRepresentation = false;
       if (hit.object?.userData?.threeBatchRecords && Number.isInteger(hit.instanceId)) {
         record = hit.object.userData.threeBatchRecords[hit.instanceId] ?? null;
+        activeRepresentation = record?.batched === true;
       } else {
         let cursor = hit.object;
         while (cursor && !cursor.userData?.threeBindingToken) cursor = cursor.parent;
         if (cursor?.userData?.threeBindingToken) record = this._records.get(cursor.userData.threeBindingToken);
+        activeRepresentation = record?.batched === false;
       }
-      if (record && !record.destroyed) return Object.freeze({
+      if (record && activeRepresentation && record.visible && !record.destroyed) return Object.freeze({
         nodeName: record.identity.nodeName,
         componentKey: record.identity.componentKey,
         point: Object.freeze([hit.point.x, hit.point.y, hit.point.z]),
@@ -317,6 +320,8 @@ export class ThreeRenderBackend {
       dataUrl,
       drawCount: this._drawCount,
       bindingCount: this._bindings.size,
+      batchCount: this._batches.length,
+      instanceCount: this._batches.reduce((count, batch) => count + batch.records.length, 0),
     });
   }
 
@@ -396,6 +401,7 @@ export class ThreeRenderBackend {
       record.nodeRoot.add(handle.object);
       handle.object.userData.threeBindingToken = record.token;
     }
+    this._applyRecordVisibility(record);
     this._records.set(record.token, record);
     this._bindings.set(record.key, record);
     this._reservations.delete(record.key);
@@ -429,12 +435,11 @@ export class ThreeRenderBackend {
         if (handle.object) {
           record.nodeRoot ??= this._acquireNodeRoot(record.identity.nodeName);
           record.nodeRoot.add(handle.object); handle.object.userData.threeBindingToken = record.token;
-          handle.object.visible = record.visible;
         } else if (record.nodeRoot) {
           this._releaseNodeRoot(record.identity.nodeName); record.nodeRoot = null;
         }
         previousHandle.dispose(); for (const lease of previousLeases) lease.release();
-        handle.applyVisibility?.(record.visible);
+        this._applyRecordVisibility(record);
         this._batchDirty = true;
       } catch (error) {
         for (const lease of leases) lease.release();
@@ -452,8 +457,8 @@ export class ThreeRenderBackend {
 
   _destroyRecord(record, disposing = false) {
     if (record.destroyed) return;
-    record.destroyed = true; record.generation += 1;
     this._disposeBatches();
+    record.destroyed = true; record.generation += 1;
     record.pendingController?.abort('binding-destroyed');
     record.unlinkSignal?.();
     this._bindings.delete(record.key); this._reservations.delete(record.key);
@@ -509,7 +514,10 @@ export class ThreeRenderBackend {
           pickable: records[0].handle.pickable, localMatrix: new THREE.Matrix4().fromArray(created.localMatrix) };
         created.object.userData.threeBatchRecords = records;
         this._batchRoot.add(created.object); this._batches.push(batch);
-        for (const record of records) { record.batched = true; record.handle.object.visible = false; }
+        for (const record of records) {
+          record.batched = true;
+          this._applyRecordVisibility(record);
+        }
       }
       this._batchSignature = signature; this._batchDirty = false;
     }
@@ -529,11 +537,16 @@ export class ThreeRenderBackend {
     for (const batch of this._batches) {
       for (const record of batch.records) {
         record.batched = false;
-        if (record.handle?.object) record.handle.object.visible = record.visible;
+        this._applyRecordVisibility(record);
       }
       batch.dispose();
     }
     this._batches.length = 0; this._batchSignature = null; this._batchDirty = true;
+  }
+
+  _applyRecordVisibility(record) {
+    record.handle?.applyVisibility?.(record.visible);
+    if (record.handle?.object) record.handle.object.visible = record.visible && !record.batched;
   }
 
   _requireRecord(binding) {

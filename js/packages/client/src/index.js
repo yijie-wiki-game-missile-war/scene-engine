@@ -113,8 +113,9 @@ export class SceneEngineClient {
     );
     const commit = commitView('checkpoint', header);
     const cursor = displayCursor(commit);
-    const candidate = createSession(
-      callSynchronous(
+    let candidate = null;
+    try {
+      candidate = callSynchronous(
         this.#createDisplaySession,
         undefined,
         [Object.freeze({
@@ -125,9 +126,8 @@ export class SceneEngineClient {
           commit,
         })],
         'display-session-factory-async',
-      ),
-    );
-    try {
+      );
+      candidate = createSession(candidate);
       callSynchronous(
         candidate.runtime.installScene,
         candidate.runtime,
@@ -143,13 +143,13 @@ export class SceneEngineClient {
         [cursor],
         'display-activate-async',
       );
-      const displayView = provideDisplayView(candidate);
       callSynchronous(
         candidate.runtime.start,
         candidate.runtime,
         [],
         'display-start-async',
       );
+      const displaySummary = provideDisplaySummary(candidate);
       const ackPacket = encodeEngineAck({
         streamId: commit.streamId,
         commitSeq: commit.commitSeq,
@@ -162,7 +162,7 @@ export class SceneEngineClient {
       this.#commit = commit;
       this.#lastCommandSeq = checkpoint.lastCommandSeq;
       safeDispose(previous);
-      this.#schedule('checkpoint', commit, world, displayView);
+      this.#schedule('checkpoint', commit, world, displaySummary);
       return outcome('checkpoint', commit, ackPacket, null);
     } catch (error) {
       safeDispose(candidate);
@@ -211,16 +211,16 @@ export class SceneEngineClient {
         [cursor],
         'display-gate-seal-async',
       );
-      const displayView = provideDisplayView(session);
       this.#worldState = world;
       this.#commit = commit;
       this.#lastCommandSeq = stream.lastCommandSeq;
+      const displaySummary = provideDisplaySummary(session);
       const ackPacket = encodeEngineAck({
         streamId: commit.streamId,
         commitSeq: commit.commitSeq,
         lastCommandSeq: commit.lastCommandSeq,
       }, this.#limits);
-      this.#schedule('commit', commit, world, displayView);
+      this.#schedule('commit', commit, world, displaySummary);
       return outcome('commit', commit, ackPacket, null);
     } catch (error) {
       if (gateBegun) safeGateFail(session, error);
@@ -246,7 +246,7 @@ export class SceneEngineClient {
   currentCommit() { this.#requireOpen(); return this.#commit; }
   currentDisplayView() {
     this.#requireOpen();
-    return this.#displaySession === null ? null : provideDisplayView(this.#displaySession);
+    return this.#displaySession === null ? null : provideCurrentDisplayView(this.#displaySession);
   }
 
   encodeInput({ inputId, command, args = {} } = {}) {
@@ -283,13 +283,15 @@ export class SceneEngineClient {
     this.#onCommit = null;
   }
 
-  #schedule(kind, commit, worldState, displayView) {
+  #schedule(kind, commit, worldState, displaySummary) {
     if (this.#onCommit === null) return;
-    const payload = Object.freeze({ kind, commit, worldState, displayView });
-    queueMicrotask(() => {
-      if (this.#disposed) return;
-      try { this.#onCommit(payload); } catch { /* observers never roll back a commit */ }
-    });
+    const payload = Object.freeze({ kind, commit, worldState, displaySummary });
+    try {
+      queueMicrotask(() => {
+        if (this.#disposed) return;
+        try { this.#onCommit(payload); } catch { /* observers never roll back a commit */ }
+      });
+    } catch { /* observer scheduling never rolls back a commit or withholds its ACK */ }
   }
 
   #requireOpen() { if (this.#disposed) fail('client-disposed'); }
@@ -336,20 +338,23 @@ function displayCursor(commit) {
 }
 
 function createSession(value) {
-  if (isThenable(value)) fail('display-session-factory-async');
+  requireSynchronousResult(value, 'display-session-factory-async');
   requireRecord(value, 'display-session-invalid');
   const expected = new Set([
-    'runtime', 'authorityPort', 'displayViewProvider', 'commitGate', 'dispose',
+    'runtime', 'authorityPort', 'commitGate', 'dispose',
   ]);
   const keys = Reflect.ownKeys(value);
   if (keys.length !== expected.size
       || keys.some((key) => typeof key !== 'string' || !expected.has(key))) {
     fail('display-session-fields-invalid');
   }
-  requireMethods(value.runtime, ['installScene', 'activate', 'start'], 'display-session-runtime-invalid');
+  requireMethods(
+    value.runtime,
+    ['installScene', 'activate', 'start', 'summary', 'currentView'],
+    'display-session-runtime-invalid',
+  );
   requireMethods(value.authorityPort, Object.values(AUTHORITY_METHOD), 'authority-port-invalid');
   requireMethods(value.commitGate, ['begin', 'seal', 'fail'], 'display-commit-gate-invalid');
-  if (typeof value.displayViewProvider !== 'function') fail('display-view-provider-invalid');
   if (typeof value.dispose !== 'function') fail('display-session-dispose-invalid');
   return value;
 }
@@ -399,20 +404,21 @@ function authorityPayload(command) {
 
 function callSynchronous(method, receiver, args, asyncCode) {
   const result = method.apply(receiver, args);
-  if (isThenable(result)) fail(asyncCode);
-  return result;
+  return requireSynchronousResult(result, asyncCode);
 }
 
-function provideDisplayView(session) {
-  const view = session.displayViewProvider();
-  if (isThenable(view)) fail('display-view-provider-async');
-  return view;
+function provideDisplaySummary(session) {
+  return requireSynchronousResult(session.runtime.summary(), 'display-summary-async');
+}
+
+function provideCurrentDisplayView(session) {
+  return requireSynchronousResult(session.runtime.currentView(), 'display-current-view-async');
 }
 
 function safeGateFail(session, error) {
   try {
     const result = session.commitGate.fail(error);
-    if (isThenable(result)) result.catch?.(() => {});
+    if (isThenable(result)) observeThenable(result);
   } catch { /* the original projection error is authoritative */ }
 }
 
@@ -420,8 +426,18 @@ function safeDispose(session) {
   if (session === null) return;
   try {
     const result = session.dispose();
-    if (isThenable(result)) result.catch?.(() => {});
+    if (isThenable(result)) observeThenable(result);
   } catch { /* replacement/dispose cleanup cannot roll back the new session */ }
+}
+
+function requireSynchronousResult(value, asyncCode) {
+  if (!isThenable(value)) return value;
+  observeThenable(value);
+  fail(asyncCode);
+}
+
+function observeThenable(value) {
+  void Promise.resolve(value).catch(() => {});
 }
 
 function isThenable(value) {

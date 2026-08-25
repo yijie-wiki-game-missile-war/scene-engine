@@ -14,6 +14,8 @@ export class PrefabInstantiator {
     this._scene = scene;
     this._componentContext = componentContext;
     this._scopes = new Map();
+    this._disposed = false;
+    this._disposeErrors = null;
   }
 
   getScope(root) { return this._scopes.get(root) ?? null; }
@@ -108,7 +110,11 @@ export class PrefabInstantiator {
     }
     for (const [path, properties] of Object.entries(patch.components)) {
       const component = scope.componentByPath.get(path);
-      component._replaceNormalizedProperties(properties);
+      scope.compiled.componentRegistry.patchComponentProperties({
+        component,
+        patch: properties,
+        resourceRegistry: scope.compiled.resourceRegistry,
+      });
     }
   }
 
@@ -143,6 +149,20 @@ export class PrefabInstantiator {
     }
     this._scopes.delete(scope.root);
     return Object.freeze(errors);
+  }
+
+  dispose(reason = 'prefab-instantiator-disposed') {
+    if (this._disposeErrors !== null) return this._disposeErrors;
+    this._disposed = true;
+    const errors = [];
+    for (const scope of [...this._scopes.values()].reverse()) {
+      try { errors.push(...this.disposeScope(scope, reason)); } catch (error) { errors.push(error); }
+    }
+    this._scopes.clear();
+    this._scene = null;
+    this._componentContext = null;
+    this._disposeErrors = Object.freeze(errors);
+    return this._disposeErrors;
   }
 
   createShadow({ target, compiled, state, authorityComponent, validatedPatch }) {

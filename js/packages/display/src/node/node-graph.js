@@ -119,6 +119,15 @@ export class NodeGraph {
     return this._subtreeHeight(node);
   }
 
+  release() {
+    this._transformDirtyRoots.clear();
+    this._visibilityDirtyRoots.clear();
+    this._onDirty = null;
+    this._onWorldTransform = null;
+    this._onVisibility = null;
+    this._nodeIndex = null;
+  }
+
   _flushTransformSubtree(node) {
     composeWorldTransform(node.parent?._worldTransform ?? null, node._localTransform, node._worldTransform);
     this._onWorldTransform?.(node);

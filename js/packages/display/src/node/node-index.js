@@ -32,6 +32,7 @@ export class NodeIndex {
   }
 
   values() { return this._nodes.values(); }
+  clear() { this._nodes.clear(); }
 }
 
 export function createNodeIndex() { return new NodeIndex(); }

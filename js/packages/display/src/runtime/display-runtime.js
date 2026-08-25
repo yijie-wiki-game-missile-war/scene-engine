@@ -7,13 +7,23 @@ import { RenderComponent } from '../render/render-component.js';
 import { AuthorityPort } from './authority-port.js';
 import { DisplayView } from './display-view.js';
 import { DisplayRuntimeError, fail, healthEvent } from './health.js';
-import { LocalEditPort } from './local-edit-port.js';
 import { PrefabInstantiator } from './prefab-instantiator.js';
 import { Scene } from './scene.js';
 import { SceneLoader } from './scene-loader.js';
 
 export const DISPLAY_RUNTIME_SCHEMA = 'scene-engine-display-node@2';
+export const DISPLAY_SUMMARY_SCHEMA = 'scene-engine-display-summary@1';
 const ZERO_CURSOR = Object.freeze({ commitSeq: 0, sourceTick: 0, lastCommandSeq: 0 });
+const DISPLAY_OPTION_KEYS = Object.freeze({
+  required: Object.freeze([
+    'sceneRegistry',
+    'prefabRegistry',
+    'resourceRegistry',
+    'componentRegistry',
+    'createRenderBackend',
+  ]),
+  optional: Object.freeze(['hostElement', 'canvas', 'frameAdapter', 'onHealth']),
+});
 
 function normalizeCursor(value) {
   const record = exactKeys(value, ['commitSeq', 'sourceTick', 'lastCommandSeq'], [],
@@ -48,12 +58,27 @@ function validateFrameAdapter(value) {
 }
 
 export class DisplayRuntime {
-  constructor({ hostElement = null, canvas = null, sceneRegistry, prefabRegistry,
-    resourceRegistry, componentRegistry, createRenderBackend, frameAdapter = null,
-    onHealth = null, authoringMode = false }) {
+  constructor(options) {
+    const record = exactKeys(
+      options,
+      DISPLAY_OPTION_KEYS.required,
+      DISPLAY_OPTION_KEYS.optional,
+      'display-options-invalid',
+    );
+    const {
+      sceneRegistry,
+      prefabRegistry,
+      resourceRegistry,
+      componentRegistry,
+      createRenderBackend,
+    } = record;
+    const hostElement = record.hostElement ?? null;
+    const canvas = record.canvas ?? null;
+    const frameAdapter = record.frameAdapter ?? null;
+    const onHealth = record.onHealth ?? null;
     if (!sceneRegistry || !prefabRegistry || !resourceRegistry || !componentRegistry
-        || typeof createRenderBackend !== 'function' || (onHealth !== null && typeof onHealth !== 'function')
-        || typeof authoringMode !== 'boolean') {
+        || typeof createRenderBackend !== 'function'
+        || (onHealth !== null && typeof onHealth !== 'function')) {
       fail('display-options-invalid');
     }
     this._hostElement = hostElement;
@@ -74,6 +99,7 @@ export class DisplayRuntime {
     this._rafId = null;
     this._drawRequested = false;
     this._visualOrigin = null;
+    this._sceneName = null;
     this._lastFrameTime = null;
     this._frameIndex = 0;
     this._rebuildPromise = null;
@@ -145,14 +171,6 @@ export class DisplayRuntime {
       onCleanupErrors: (errors) => this._reportCleanupErrors(errors),
     });
     this._scene.loader = this._sceneLoader;
-    this.localEdit = authoringMode ? Object.seal(new LocalEditPort({
-      scene: this._scene,
-      prefabInstantiator: this._prefabInstantiator,
-      componentContext: this._componentContext,
-      onMutation: () => this._mutated(),
-      onCleanupErrors: (errors) => this._reportCleanupErrors(errors),
-      assertMutable: () => this._assertAuthorityMutable(),
-    })) : null;
     this.commitGate = Object.freeze({
       begin: (cursor) => this._beginCommit(cursor),
       seal: (cursor) => this._sealCommit(cursor),
@@ -175,6 +193,7 @@ export class DisplayRuntime {
     }), 'display-render-backend-factory-async');
     this._renderSystem.setBackend(backend);
     this._sceneLoader.installCompiled(compiled);
+    this._sceneName = compiled.id;
     this._installed = true;
     this._revision += 1;
     return this;
@@ -211,12 +230,27 @@ export class DisplayRuntime {
     this._scheduleFrame();
   }
 
-  async whenReady() { await this._renderSystem.whenIdle(); }
-  currentView() { return new DisplayView(this); }
-  pick(query) { return this._renderSystem.pick(query); }
-  projectWorldPoint(point) { return this._renderSystem.projectWorldPoint(point); }
-  focusWorldPoint(target) { return this._renderSystem.focusWorldPoint(target); }
+  async whenReady() { this._assertNotDisposed(); await this._renderSystem.whenIdle(); }
+  summary() {
+    return Object.freeze({
+      schema: DISPLAY_SUMMARY_SCHEMA,
+      sceneName: this._sceneName,
+      revision: this._revision,
+      cursor: this._cursor,
+      nodeCount: this._nodeIndex?.size ?? 0,
+      health: this._health,
+    });
+  }
+  currentView() { this._assertNotDisposed(); return new DisplayView(this); }
+  pick(query) { this._assertNotDisposed(); return this._renderSystem.pick(query); }
+  projectWorldPoint(point) {
+    this._assertNotDisposed(); return this._renderSystem.projectWorldPoint(point);
+  }
+  focusWorldPoint(target) {
+    this._assertNotDisposed(); return this._renderSystem.focusWorldPoint(target);
+  }
   capture() {
+    this._assertNotDisposed();
     return cloneAndFreeze({
       schema: DISPLAY_RUNTIME_SCHEMA,
       cursor: this._cursor,
@@ -288,15 +322,59 @@ export class DisplayRuntime {
     this._lifecycleAbortController.abort();
     const rebuild = this._rebuildPromise;
     this._disposePromise = Promise.resolve().then(async () => {
-      this.localEdit?.dispose();
-      this._reportCleanupErrors(this._sceneLoader.unload('runtime-disposed'));
-      const renderDisposal = this._renderSystem.dispose();
-      if (rebuild !== null) {
-        try { await rebuild; } catch { /* disposal owns the final teardown */ }
-      }
+      const cleanupErrors = [];
+      const scene = this._scene;
+      const sceneLoader = this._sceneLoader;
+      const prefabInstantiator = this._prefabInstantiator;
+      const renderSystem = this._renderSystem;
+      const scheduler = this._scheduler;
+      const nodeIndex = this._nodeIndex;
+      const nodeGraph = this._nodeGraph;
       try {
-        await renderDisposal;
+        try { cleanupErrors.push(...sceneLoader.unload('runtime-disposed')); } catch (error) {
+          cleanupErrors.push(error);
+        }
+        try { cleanupErrors.push(...prefabInstantiator.dispose('runtime-disposed')); } catch (error) {
+          cleanupErrors.push(error);
+        }
+        let renderDisposal = null;
+        try { renderDisposal = renderSystem.dispose(); } catch (error) { cleanupErrors.push(error); }
+        try { scheduler.clear(); } catch (error) { cleanupErrors.push(error); }
+        if (nodeIndex.size !== 0) {
+          cleanupErrors.push(new DisplayRuntimeError(
+            'display-node-index-not-empty-after-dispose',
+            `Display NodeIndex retained ${nodeIndex.size} nodes after scene unload`,
+          ));
+          nodeIndex.clear();
+        }
+        try { nodeGraph.release(); } catch (error) { cleanupErrors.push(error); }
+        sceneLoader.release();
+        if (rebuild !== null) {
+          try { await rebuild; } catch { /* disposal owns the final teardown */ }
+        }
+        if (renderDisposal !== null) {
+          try { await renderDisposal; } catch (error) { cleanupErrors.push(error); }
+        }
       } finally {
+        try { scene.release(); } catch (error) { cleanupErrors.push(error); }
+        this._reportCleanupErrors(cleanupErrors);
+        this.authority = null;
+        this.commitGate = null;
+        this._hostElement = null;
+        this._canvas = null;
+        this._createRenderBackend = null;
+        this._frameAdapter = null;
+        this._onHealth = null;
+        this._nodeIndex = null;
+        this._scheduler = null;
+        this._renderSystem = null;
+        this._nodeGraph = null;
+        this._scene = null;
+        this._componentContext = null;
+        this._prefabInstantiator = null;
+        this._sceneLoader = null;
+        this._lifecycleAbortController = null;
+        this._rebuildPromise = null;
         this._health = 'disposed';
       }
     });

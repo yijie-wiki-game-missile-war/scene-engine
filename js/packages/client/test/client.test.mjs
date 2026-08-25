@@ -27,7 +27,7 @@ const {
 const FIXTURES = fileURLToPath(new URL('../fixtures/wire-v2/', import.meta.url));
 const PYTHON_FIXTURES = fileURLToPath(new URL('../../../../fixtures/wire-v2/', import.meta.url));
 
-test('root export surface is the breaking 0.7 allowlist', () => {
+test('root export surface remains the exact client allowlist', () => {
   assert.deepEqual(Object.keys(publicApi).sort(), [
     'DEFAULT_ENGINE_LIMITS',
     'SceneEngineClient',
@@ -59,7 +59,7 @@ test('wire v2 fixture has JSON display checkpoint and ACK command cursor', async
   assert.deepEqual(client.currentDisplayView(), { sessionId: 1 });
   assert.equal(sessions[0].metadata.sceneCatalogHash, HASH_A);
   assert.deepEqual(sessions[0].log.map(([kind]) => kind), [
-    'installScene', 'createNode', 'activate', 'start',
+    'installScene', 'createNode', 'activate', 'start', 'summary',
   ]);
   assert.deepEqual(sessions[0].log[0][1], { sceneName: 'main' });
   assert.deepEqual(sessions[0].log[2][1], {
@@ -91,10 +91,10 @@ test('applies canonical Python wire@2 fixtures through exact Authority payloads'
     input.commit.lastCommandSeq,
   ], [0, 7, 7]);
   assert.deepEqual(sessions[0].log.map(([kind]) => kind), [
-    'installScene', 'createNode', 'createNode', 'activate', 'start',
+    'installScene', 'createNode', 'createNode', 'activate', 'start', 'summary',
     'begin', 'createNode', 'setNodeTransform', 'setNodeParent', 'setNodeVisible',
-    'setNodeState', 'replaceNodePrefab', 'removeNode', 'seal',
-    'begin', 'seal',
+    'setNodeState', 'replaceNodePrefab', 'removeNode', 'seal', 'summary',
+    'begin', 'seal', 'summary',
   ]);
   assert.equal(client.currentWorldState().state.stable.value, 8);
 });
@@ -120,13 +120,109 @@ test('checkpoint fresh session swaps only after complete synchronous activation'
   assert.equal(client.currentCommit().lastCommandSeq, 2);
 });
 
-test('commit validates all commands then applies one Authority call per target before seal', () => {
+test('checkpoint and commit observers receive only immutable summary payloads after ACK', async () => {
   const { factory, sessions } = createMockDisplayFactory();
   const observations = [];
   const client = new SceneEngineClient({
     createDisplaySession: factory,
-    onCommit: (value) => observations.push(value),
+    onCommit: (payload) => observations.push(payload),
   });
+
+  const checkpoint = client.applyPacket(checkpointPacket());
+  const commit = client.applyPacket(commitPacket({
+    commands: [command('node-set-transform', 1, 1, { transform: transform(2) })],
+  }));
+
+  assert.ok(checkpoint.ackPacket instanceof Uint8Array);
+  assert.ok(commit.ackPacket instanceof Uint8Array);
+  assert.equal(observations.length, 0);
+  assert.equal(sessions[0].metrics.currentViewCalls, 0);
+  await Promise.resolve();
+
+  assert.equal(observations.length, 2);
+  for (const payload of observations) {
+    assert.deepEqual(Object.keys(payload), [
+      'kind', 'commit', 'worldState', 'displaySummary',
+    ]);
+    assert.equal(Object.isFrozen(payload), true);
+    assert.equal('displayView' in payload, false);
+    assert.equal(['get', 'Display', 'View'].join('') in payload, false);
+  }
+  assert.equal(observations[0].kind, 'checkpoint');
+  assert.equal(observations[0].worldState.tick, 0);
+  assert.equal(observations[0].displaySummary.cursor.commitSeq, 0);
+  assert.equal(observations[1].kind, 'commit');
+  assert.equal(observations[1].worldState.tick, 1);
+  assert.equal(observations[1].displaySummary.cursor.commitSeq, 1);
+  assert.equal(sessions[0].metrics.summaryCalls, 2);
+  assert.equal(sessions[0].metrics.currentViewCalls, 0);
+});
+
+test('currentDisplayView and capture explicitly materialize a full runtime view', () => {
+  const { factory, sessions } = createMockDisplayFactory();
+  const client = new SceneEngineClient({ createDisplaySession: factory });
+  client.applyPacket(checkpointPacket());
+  assert.equal(sessions[0].metrics.currentViewCalls, 0);
+
+  assert.strictEqual(client.currentDisplayView(), sessions[0].view);
+  assert.equal(sessions[0].metrics.currentViewCalls, 1);
+  const capture = client.capture();
+  assert.strictEqual(capture.displayView, sessions[0].view);
+  assert.equal(sessions[0].metrics.currentViewCalls, 2);
+  assert.equal(sessions[0].metrics.summaryCalls, 1);
+});
+
+test('10,000 commits take summaries without materializing DisplayView', () => {
+  const { factory, sessions } = createMockDisplayFactory();
+  const client = new SceneEngineClient({ createDisplaySession: factory });
+  client.applyPacket(checkpointPacket());
+
+  for (let commitSeq = 1; commitSeq <= 10_000; commitSeq += 1) {
+    client.applyPacket(commitPacket({
+      commitSeq,
+      sourceTick: commitSeq,
+      worldRevision: commitSeq,
+      baseCommandSeq: commitSeq - 1,
+      commands: [command('node-set-transform', commitSeq, commitSeq, {
+        transform: transform(commitSeq),
+      })],
+    }));
+  }
+
+  assert.equal(client.currentCommit().commitSeq, 10_000);
+  assert.equal(sessions[0].metrics.summaryCalls, 10_001);
+  assert.equal(sessions[0].metrics.currentViewCalls, 0);
+});
+
+test('observer exceptions do not withhold ACK or make the client fail', async () => {
+  const { factory } = createMockDisplayFactory();
+  let calls = 0;
+  const client = new SceneEngineClient({
+    createDisplaySession: factory,
+    onCommit() {
+      calls += 1;
+      throw new Error('observer-failed');
+    },
+  });
+
+  const checkpoint = client.applyPacket(checkpointPacket());
+  const firstCommit = client.applyPacket(commitPacket());
+  assert.ok(checkpoint.ackPacket instanceof Uint8Array);
+  assert.ok(firstCommit.ackPacket instanceof Uint8Array);
+  await Promise.resolve();
+  assert.equal(calls, 2);
+
+  const secondCommit = client.applyPacket(commitPacket({
+    commitSeq: 2, sourceTick: 2, worldRevision: 2,
+  }));
+  assert.ok(secondCommit.ackPacket instanceof Uint8Array);
+  assert.equal(client.currentCommit().commitSeq, 2);
+  client.dispose();
+});
+
+test('commit validates all commands then applies one Authority call per target before seal', () => {
+  const { factory, sessions } = createMockDisplayFactory();
+  const client = new SceneEngineClient({ createDisplaySession: factory });
   client.applyPacket(checkpointPacket());
   const commands = [
     command('node-create', 1, 1, {
@@ -151,9 +247,9 @@ test('commit validates all commands then applies one Authority call per target b
   const ack = readEnginePacket(result.ackPacket);
   assert.equal(ack.header.last_command_seq, 7);
   assert.equal(client.currentCommit().lastCommandSeq, 7);
-  assert.deepEqual(sessions[0].log.slice(4).map(([kind]) => kind), [
+  assert.deepEqual(sessions[0].log.slice(5).map(([kind]) => kind), [
     'begin', 'createNode', 'setNodeTransform', 'setNodeParent', 'setNodeVisible',
-    'setNodeState', 'replaceNodePrefab', 'removeNode', 'seal',
+    'setNodeState', 'replaceNodePrefab', 'removeNode', 'seal', 'summary',
   ]);
   const transformRecord = sessions[0].log.find(([kind]) => kind === 'setNodeTransform')[1];
   assert.deepEqual(transformRecord.transform.rotationXyzw, [0, 0, 0, 1]);
@@ -170,7 +266,9 @@ test('empty command stream still seals and ACKs while preserving command cursor'
     commands: [],
   }));
   assert.equal(readEnginePacket(result.ackPacket).header.last_command_seq, 4);
-  assert.deepEqual(sessions[0].log.slice(4).map(([kind]) => kind), ['begin', 'seal']);
+  assert.deepEqual(sessions[0].log.slice(5).map(([kind]) => kind), [
+    'begin', 'seal', 'summary',
+  ]);
   assert.equal(client.currentWorldState().tick, 1);
 });
 
@@ -189,7 +287,7 @@ test('invalid sequence fails before draw gate and leaves installed pointers unch
   const after = client.capture();
   assert.strictEqual(after.commit, before.commit);
   assert.strictEqual(after.worldState, before.worldState);
-  assert.equal(sessions[0].log.slice(4).length, 0);
+  assert.equal(sessions[0].log.slice(5).length, 0);
   assert.throws(() => client.applyPacket(raw), (error) => error.code === 'client-failed');
 });
 
@@ -207,7 +305,7 @@ test('validates the entire command stream before the first Authority mutation', 
     () => client.applyPacket(raw),
     (error) => error.code === 'display-command-source-tick-mismatch',
   );
-  assert.equal(sessions[0].log.length, 4);
+  assert.equal(sessions[0].log.length, 5);
 });
 
 test('Authority failure calls gate.fail, emits no ACK, and makes client terminal', () => {
@@ -224,7 +322,7 @@ test('Authority failure calls gate.fail, emits no ACK, and makes client terminal
     thrown = error;
   }
   assert.equal(thrown.code, 'packet-apply-failed');
-  assert.deepEqual(sessions[0].log.slice(4).map(([kind]) => kind), [
+  assert.deepEqual(sessions[0].log.slice(5).map(([kind]) => kind), [
     'begin', 'setNodeState', 'fail',
   ]);
   assert.equal(sessions[0].log.at(-1)[1].message, 'failed:setNodeState');
@@ -249,9 +347,77 @@ test('Promise-returning Authority operation is a synchronous barrier failure', (
   assert.equal(sessions[0].log.at(-1)[0], 'fail');
 });
 
+test('Promise-returning checkpoint summary fails closed and disposes the candidate', () => {
+  const { factory, sessions } = createMockDisplayFactory({ asyncMethod: 'summary' });
+  const client = new SceneEngineClient({ createDisplaySession: factory });
+  assert.throws(
+    () => client.applyPacket(checkpointPacket()),
+    (error) => error.code === 'display-summary-async',
+  );
+  assert.deepEqual(sessions[0].log.map(([kind]) => kind), [
+    'installScene', 'createNode', 'activate', 'start', 'summary', 'dispose',
+  ]);
+  assert.equal(client.currentDisplayView(), null);
+  assert.throws(
+    () => client.applyPacket(checkpointPacket()),
+    (error) => error.code === 'client-failed',
+  );
+});
+
+test('Promise-returning commit summary fails the gate and publishes no ACK', () => {
+  const { factory, sessions } = createMockDisplayFactory();
+  const client = new SceneEngineClient({ createDisplaySession: factory });
+  client.applyPacket(checkpointPacket());
+  sessions[0].session.runtime.summary = () => Promise.resolve();
+
+  assert.throws(
+    () => client.applyPacket(commitPacket()),
+    (error) => error.code === 'display-summary-async',
+  );
+  assert.deepEqual(sessions[0].log.slice(5).map(([kind]) => kind), [
+    'begin', 'seal', 'fail',
+  ]);
+  assert.equal(client.currentCommit().commitSeq, 1);
+  assert.throws(
+    () => client.applyPacket(commitPacket({
+      commitSeq: 2, sourceTick: 2, worldRevision: 2,
+    })),
+    (error) => error.code === 'client-failed',
+  );
+});
+
+test('display session contract rejects the legacy full-view field and requires summary/currentView', () => {
+  const extra = createMockDisplayFactory();
+  const extraClient = new SceneEngineClient({
+    createDisplaySession(metadata) {
+      const session = extra.factory(metadata);
+      return { ...session, [['display', 'View', 'Provider'].join('')]: () => {} };
+    },
+  });
+  assert.throws(
+    () => extraClient.applyPacket(checkpointPacket()),
+    (error) => error.code === 'display-session-fields-invalid',
+  );
+  assert.equal(extra.sessions[0].log.at(-1)[0], 'dispose');
+
+  const missing = createMockDisplayFactory();
+  const missingClient = new SceneEngineClient({
+    createDisplaySession(metadata) {
+      const session = missing.factory(metadata);
+      delete session.runtime.summary;
+      return session;
+    },
+  });
+  assert.throws(
+    () => missingClient.applyPacket(checkpointPacket()),
+    (error) => error.code === 'display-session-runtime-invalid',
+  );
+  assert.equal(missing.sessions[0].log.at(-1)[0], 'dispose');
+});
+
 test('failed replacement checkpoint disposes only candidate and does not swap old display', () => {
   const first = createMockDisplayFactory();
-  const failing = createMockDisplayFactory({ failMethod: 'createNode' });
+  const failing = createMockDisplayFactory({ failMethod: 'summary' });
   let calls = 0;
   const client = new SceneEngineClient({
     createDisplaySession(metadata) {

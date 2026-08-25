@@ -1,7 +1,7 @@
 import { nonemptyString } from '../internal.js';
 import { fail } from '../runtime/health.js';
 
-export const NODE_PREFIXES = Object.freeze(['sys', 'scene', 'py', 'prefab', 'editor']);
+export const NODE_PREFIXES = Object.freeze(['sys', 'scene', 'py', 'prefab']);
 const SEGMENT = /^[a-z0-9][a-z0-9._-]*$/;
 const MAX_BYTES = 192;
 

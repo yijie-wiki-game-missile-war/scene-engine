@@ -1,6 +1,6 @@
 # Display Node / Component contract
 
-This document freezes the breaking Scene Engine 0.7 display contract. It is
+This document freezes the breaking Scene Engine JavaScript display contract. It is
 the only current display model; there is no compatibility decoder, adapter,
 alias, feature flag, or dual runtime.
 
@@ -8,9 +8,9 @@ alias, feature flag, or dual runtime.
 
 ```text
 scene-engine Python                 0.7.0
-@scene-engine/client               0.7.0
-@scene-engine/display              0.1.0
-@scene-engine/renderer-three       0.9.0
+@scene-engine/client               0.8.0
+@scene-engine/display              0.2.0
+@scene-engine/renderer-three       0.9.1
 wire                               scene-engine-wire@2
 display                            scene-engine-display-node@2
 packet log                         scene-engine-packet-log@2
@@ -46,7 +46,7 @@ Canonical Node names are at most 192 UTF-8 bytes and use lowercase segments
 matching `[a-z0-9][a-z0-9._-]*` under exactly one of these prefixes:
 
 ```text
-sys/ scene/ py/ prefab/ editor/
+sys/ scene/ py/ prefab/
 ```
 
 Names are immutable. Python supplies complete `py/` names and never refers to
@@ -101,9 +101,13 @@ parent-before-child authority Node baseline
 ```
 
 The Client creates a fresh Display session through its configured session
-factory, installs the SceneDefinition, creates each authority Node, activates
-the Scene, and only then swaps its current session pointer. Failure disposes the
-candidate and leaves the previous active session untouched.
+factory. A session contains exactly `runtime`, `authorityPort`, `commitGate`
+and `dispose`. The candidate installs the SceneDefinition, creates each
+authority Node parent-first, activates and starts the Scene, returns an O(1)
+summary, and constructs the checkpoint ACK bytes before it replaces the current
+session pointer. The ACK is returned only after that swap. Failure disposes the
+candidate and leaves the previous active session untouched. A successful
+replacement disposes the previous session.
 
 A commit contains a strictly ordered `scene-engine-node-command@2` stream. The
 Engine, not the product, assigns one stream-global `command_seq` to each record
@@ -116,7 +120,9 @@ One complete Engine commit packet is also the display seal:
 3. close the DisplayRuntime draw gate;
 4. synchronously apply each command through the AuthorityPort;
 5. seal the gate with the packet cursor and source tick;
-6. publish WorldState, display view, commit cursor, observer result, and ACK.
+6. publish the WorldState and commit/command cursors;
+7. read `runtime.summary()` in O(1) and encode the cumulative ACK;
+8. queue the summary observer as a microtask and return the ACK bytes.
 
 JavaScript run-to-completion plus the closed draw gate prevents RAF from
 observing a partial commit. The seal does not create cross-command rollback.
@@ -124,8 +130,43 @@ If any command fails, the runtime becomes projection-invalid, scheduler/draw
 stop, no ACK is emitted, and recovery requires a fresh checkpoint/session.
 
 ACK remains cumulative and means WorldState, display commands, and cursor have
-completed this synchronous barrier. It never waits for resource loading,
-Component ticks, observer callbacks, or draw.
+completed this synchronous barrier. It never waits for a full DisplayView,
+resource loading, Component ticks, HUD, observer callbacks, RAF, or draw.
+Observer scheduling and execution cannot roll back the installed state or
+withhold its ACK.
+
+## Summary and explicit snapshots
+
+`DisplayRuntime.summary()` returns a new shallow-frozen record using this
+schema:
+
+```js
+{
+  schema: 'scene-engine-display-summary@1',
+  sceneName: 'main',
+  revision: 123,
+  cursor: {
+    commitSeq: 123,
+    sourceTick: 121,
+    lastCommandSeq: 992,
+  },
+  nodeCount: 1503,
+  health: 'ready',
+}
+```
+
+`DISPLAY_SUMMARY_SCHEMA` is exported by `@scene-engine/display@0.2.0`.
+`nodeCount` reads `NodeIndex.size`; the other fields read the active Scene id,
+runtime revision, cursor and health. Summary creation never iterates Nodes or
+Components, captures the RenderSystem, clones resources, or invokes
+`currentView()`. Its time and allocation size are independent of tree size.
+
+`DisplayRuntime.currentView()` is the explicit immutable full-tree snapshot.
+The Client exposes it through explicit `currentDisplayView()` and includes a
+full view only when `capture()` is explicitly requested. It is suitable for
+production picking/focus resolution, diagnostics and tests, but is never
+materialized automatically for an `onCommit` observer. That observer receives
+only `{kind, commit, worldState, displaySummary}`.
 
 ## Component lifecycle and scheduling
 
@@ -160,6 +201,39 @@ readiness, batching, active camera, and backend rebuild. One backend binding is
 identified by `(nodeName, componentKey)`; a Node may therefore have multiple
 RenderComponents without an aggregate binding ambiguity.
 
+## Component property mutation
+
+A Component exposes read-only `properties`, `enabled` and `node` state; it has
+no public property mutation operation. The sole property update boundary is:
+
+```js
+componentRegistry.patchComponentProperties({
+  component,
+  patch,
+  resourceRegistry,
+})
+```
+
+The registry identifies the registered descriptor, merges the current value
+and patch, normalizes the complete candidate, derives all resource references,
+and requires every Resource id and kind from ResourceRegistry. Only a fully
+valid candidate crosses the package-private mutation boundary and notifies the
+Component context. Failure is atomic: the old properties identity, render
+dirty state, resource leases and draw request remain unchanged. Prefab state,
+authority state and replacement paths all use this same registry boundary.
+
+## Disposal
+
+Runtime disposal stops its RAF, closes the commit gate, aborts lifecycle work,
+unloads every Scene and Prefab scope, disposes RenderSystem resources, clears
+the Component scheduler and empties NodeIndex before releasing the Scene.
+SceneLoader's scope array is empty and its active Camera is cleared;
+PrefabInstantiator's scope map is empty and its Scene/context references are
+disconnected; Scene clears its roots, definition, compiled definition, loader
+and active Camera references. Pending resource work cannot mount late. Cleanup
+continues while collecting errors, and repeated `dispose()` calls return the
+same operation.
+
 ## Three backend
 
 `ThreeRenderBackend` owns Three/WebGL objects, loaders, GPU resources, draw,
@@ -167,22 +241,39 @@ pick, project, capture, resize, and disposal. It does not own the application
 NodeGraph, business Components, or an application RAF; it does not mirror
 non-rendering Nodes and never returns raw Three values.
 
+Logical visibility and representation are separate for every binding:
+
+```text
+ordinary object drawable = visible && !batched
+batch instance drawable  = visible && batched
+```
+
+Building a batch hides the retained ordinary object. Transform, visibility,
+property and resource-replacement updates preserve that hidden state. A hidden
+batch member uses a zero matrix; leaving or disposing the batch restores the
+ordinary object according to logical visibility. Picking excludes the ordinary
+object while batched and returns at most one hit for a logical binding. Batch
+state is private to the Three backend and never appears in Display Core.
+
 Renderer visual time is either `source_tick / 60` or an explicitly visual-only
 clock. Simulation animations, Replay, seek, pause, and capture never derive
 rule or simulation state from wall time.
 
-## Product and Authoring parity
+## Browser product surfaces
 
-Live, Replay, acceptance scenes, Scene Editor, and Prefab Editor use the same
-SceneDefinition, PrefabDefinition, registries, DisplayRuntime, RenderSystem,
-and Three backend. Only their command source differs. Authoring helpers use
-`editor/` Nodes, and saved definitions contain no `editor/` content.
+The browser has two current surfaces: production Live/Replay and a read-only
+Arts Showcase. Production receives Python checkpoint/commands through the
+Client and retains explicit business picking and focus. Focus updates the
+Camera Node's single local Transform, including both position and look-at
+quaternion; it never mutates a raw Three Camera as a second authority.
 
-`createDisplayRuntime({authoringMode:true})` exposes a restricted `localEdit`
-port. It can edit `scene/`, non-authority `prefab/`, and owned `editor/` Nodes
-through final Node/Component methods, and can instantiate formal Prefabs under
-an `editor/` root. It rejects `sys/`, every `py/` Node, and every Prefab child
-owned by Python. Production does not enable this port.
+Showcase creates a fresh DisplayRuntime and Three backend over the same formal
+Scene, Prefab, Resource and Component registries. It does not create a Client,
+WebSocket, WorldState, ACK flow or authority-node fixture. Fixed catalog
+entries, Camera presets and UI kits provide orbit, pan, zoom, reset, fullscreen
+and capture without Node picking, selection, mutation, save or export. Arts
+owns the Showcase catalog and UI details; Display Core has no separate mode or
+runtime API for it.
 
 No previous tree cache, numeric display identity, aggregate composition,
 alternate runtime, shared Arts engine package, or review fallback is part of

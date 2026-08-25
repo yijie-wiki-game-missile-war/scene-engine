@@ -63,7 +63,8 @@ export function emptyPrefab({ id = 'target.test.item', logicalType = 'test.item'
 
 export async function createHarness({ prefabEntries = null, resources = [], sceneNodes = [],
   prefabInstances = [], backendFactory = null, onHealth = null, configureComponents = null,
-  authoringMode = false } = {}) {
+  runtimeOptions = {},
+} = {}) {
   const componentRegistry = createComponentRegistry();
   configureComponents?.(componentRegistry);
   const resourceRegistry = createResourceRegistry(resources);
@@ -103,7 +104,7 @@ export async function createHarness({ prefabEntries = null, resources = [], scen
     createRenderBackend: createBackend,
     frameAdapter: frames,
     onHealth,
-    authoringMode,
+    ...runtimeOptions,
   });
   const installReturn = runtime.installScene({ sceneName: 'main' });
   runtime.activate();

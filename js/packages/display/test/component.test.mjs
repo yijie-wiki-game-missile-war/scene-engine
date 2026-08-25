@@ -6,6 +6,7 @@ import { ComponentScheduler } from '../src/component/component-scheduler.js';
 import { ComponentRegistry } from '../src/component/component-registry.js';
 import { Node } from '../src/node/node.js';
 import { RenderComponent } from '../src/render/render-component.js';
+import { createResourceRegistry } from '../src/resource/resource-registry.js';
 import { IDENTITY } from './helpers.mjs';
 
 class ProbeBehaviour extends BehaviourComponent {
@@ -95,4 +96,65 @@ test('one Node rejects two transform-driving components', () => {
   node.addComponent(new Driver({ key: 'a', properties: {} }));
   assert.throws(() => node.addComponent(new Driver({ key: 'b', properties: {} })),
     { code: 'display-transform-driver-conflict' });
+});
+
+test('Component properties have one resource-validated atomic Registry mutation path', () => {
+  class ResourceBehaviour extends BehaviourComponent { static typeId = 'test.resource@1'; }
+  const registry = new ComponentRegistry();
+  registry.register({
+    ComponentClass: ResourceBehaviour,
+    normalizeProperties(value) { return { modelResourceId: value.modelResourceId }; },
+    resourceReferences(properties) {
+      return [{ id: properties.modelResourceId, kinds: ['model'] }];
+    },
+  });
+  const resources = createResourceRegistry([
+    { id: 'model/first', kind: 'model', url: './first.glb' },
+    { id: 'model/second', kind: 'model', url: './second.glb' },
+    { id: 'texture/wrong', kind: 'texture', url: './wrong.png' },
+  ]);
+  const component = registry.create(registry.compile({
+    key: 'resource', type: ResourceBehaviour.typeId,
+    properties: { modelResourceId: 'model/first' },
+  }, resources));
+  const node = new Node({ name: 'scene/main/node', sceneToken: {}, transform: IDENTITY });
+  node.addComponent(component);
+  let changed = 0;
+  component.attach(node, { componentPropertiesChanged() { changed += 1; } });
+
+  assert.equal(component.patchProperties, undefined);
+  assert.equal(component._replaceNormalizedProperties, undefined);
+  const initial = component.properties;
+  assert.throws(() => registry.patchComponentProperties({
+    component, patch: { modelResourceId: 'model/missing' }, resourceRegistry: resources,
+  }), { code: 'display-resource-missing' });
+  assert.strictEqual(component.properties, initial);
+  assert.equal(changed, 0);
+  assert.throws(() => registry.patchComponentProperties({
+    component, patch: { modelResourceId: 'texture/wrong' }, resourceRegistry: resources,
+  }), { code: 'display-resource-reference-kind-invalid' });
+  assert.strictEqual(component.properties, initial);
+  assert.equal(changed, 0);
+
+  registry.patchComponentProperties({
+    component, patch: { modelResourceId: 'model/second' }, resourceRegistry: resources,
+  });
+  assert.equal(component.properties.modelResourceId, 'model/second');
+  assert.equal(Object.isFrozen(component.properties), true);
+  assert.equal(changed, 1);
+});
+
+test('Component package-private property mutation rejects callers without its token', () => {
+  const component = new ProbeBehaviour({ key: 'probe', properties: { value: 1 } });
+  let prototype = component;
+  let mutation = null;
+  while (prototype !== null && mutation === null) {
+    prototype = Object.getPrototypeOf(prototype);
+    mutation = Object.getOwnPropertySymbols(prototype ?? {}).find((symbol) =>
+      symbol.description === 'scene-engine.component.replace-properties') ?? null;
+  }
+  assert.notEqual(mutation, null);
+  assert.throws(() => component[mutation](null, Object.freeze({ value: 2 })),
+    { code: 'display-component-properties-readonly' });
+  assert.deepEqual(component.properties, { value: 1 });
 });

@@ -123,32 +123,72 @@ export function createMockDisplayFactory({ failMethod = null, asyncMethod = null
     const id = sessions.length + 1;
     const log = [];
     const view = Object.freeze({ sessionId: id });
+    const metrics = { summaryCalls: 0, currentViewCalls: 0 };
+    const nodes = new Set();
+    let cursor = null;
     const invoke = (method, value) => {
       log.push([method, value]);
       if (method === failMethod) throw new Error(`failed:${method}`);
       if (method === asyncMethod) return Promise.resolve();
       return undefined;
     };
-    const authorityPort = Object.fromEntries([
-      'createNode', 'setNodeTransform', 'setNodeParent', 'setNodeVisible',
-      'setNodeState', 'replaceNodePrefab', 'removeNode',
-    ].map((method) => [method, (value) => invoke(method, value)]));
+    const authorityPort = {
+      createNode(value) {
+        const result = invoke('createNode', value);
+        if (result === undefined) nodes.add(value.name);
+        return result;
+      },
+      setNodeTransform: (value) => invoke('setNodeTransform', value),
+      setNodeParent: (value) => invoke('setNodeParent', value),
+      setNodeVisible: (value) => invoke('setNodeVisible', value),
+      setNodeState: (value) => invoke('setNodeState', value),
+      replaceNodePrefab: (value) => invoke('replaceNodePrefab', value),
+      removeNode(value) {
+        const result = invoke('removeNode', value);
+        if (result === undefined) nodes.delete(value.name);
+        return result;
+      },
+    };
     const session = {
       runtime: {
         installScene: (value) => invoke('installScene', value),
-        activate: (cursor) => invoke('activate', cursor),
+        activate(value) {
+          const result = invoke('activate', value);
+          if (result === undefined) cursor = value;
+          return result;
+        },
         start: () => invoke('start'),
+        summary() {
+          metrics.summaryCalls += 1;
+          const result = invoke('summary');
+          if (result !== undefined) return result;
+          return Object.freeze({
+            schema: 'scene-engine-display-summary@1',
+            sceneName: metadata.sceneName,
+            revision: metrics.summaryCalls,
+            cursor,
+            nodeCount: nodes.size,
+            health: 'ready',
+          });
+        },
+        currentView() {
+          metrics.currentViewCalls += 1;
+          return view;
+        },
       },
       authorityPort,
-      displayViewProvider: () => view,
       commitGate: {
         begin: (cursor) => invoke('begin', cursor),
-        seal: (cursor) => invoke('seal', cursor),
+        seal(value) {
+          const result = invoke('seal', value);
+          if (result === undefined) cursor = value;
+          return result;
+        },
         fail: (error) => invoke('fail', error),
       },
       dispose: () => invoke('dispose'),
     };
-    sessions.push({ id, metadata, log, session, view });
+    sessions.push({ id, metadata, log, metrics, session, view });
     return session;
   };
   return { factory, sessions };

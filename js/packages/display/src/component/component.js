@@ -1,7 +1,19 @@
 import { assertSynchronous, cloneAndFreeze, nonemptyString } from '../internal.js';
 import { fail } from '../runtime/health.js';
 
+const COMPONENT_MUTATION_TOKEN = Object.freeze({});
+const REPLACE_PROPERTIES = Symbol('scene-engine.component.replace-properties');
+
+// Package-private: the mutation token and symbol are intentionally not exported.  The
+// ComponentRegistry is the only public object that can reach this operation.
+export function replaceComponentProperties(component, properties) {
+  if (!(component instanceof Component)) fail('display-component-invalid');
+  return component[REPLACE_PROPERTIES](COMPONENT_MUTATION_TOKEN, properties);
+}
+
 export class Component {
+  #properties;
+
   static typeId = null;
   static allowMultiple = false;
   static tickPhase = null;
@@ -11,20 +23,19 @@ export class Component {
     this._key = nonemptyString(key, 'display-component-key-invalid');
     if (typeof enabled !== 'boolean') fail('display-component-enabled-invalid');
     this._enabled = enabled;
-    this._properties = cloneAndFreeze(properties, 'display-component-properties-invalid');
+    this.#properties = cloneAndFreeze(properties, 'display-component-properties-invalid');
     this._node = null;
     this._context = null;
     this._attached = false;
     this._attachAttempted = false;
     this._disposed = false;
-    this._normalizer = null;
   }
 
   get key() { return this._key; }
   get node() { return this._node; }
   get enabled() { return this._enabled; }
   get disposed() { return this._disposed; }
-  get properties() { return this._properties; }
+  get properties() { return this.#properties; }
   get drivesTransform() { return this.constructor.drivesTransform; }
 
   attach(node, context) {
@@ -68,15 +79,6 @@ export class Component {
     if (this._attached) this._context.componentEnabledChanged?.(this);
   }
 
-  patchProperties(patch) {
-    if (this._disposed) fail('display-component-disposed');
-    if (typeof this._normalizer !== 'function') fail('display-component-properties-readonly');
-    const candidate = { ...this._properties, ...patch };
-    const normalized = this._normalizer(candidate);
-    this._properties = cloneAndFreeze(normalized, 'display-component-properties-invalid');
-    if (this._attached) this._context.componentPropertiesChanged?.(this);
-  }
-
   dispose(reason = 'disposed') {
     if (this._disposed) return Object.freeze([]);
     const errors = [];
@@ -96,10 +98,18 @@ export class Component {
     return Object.freeze(errors);
   }
 
-  _setNormalizer(normalizer) { this._normalizer = normalizer; }
-  _replaceNormalizedProperties(properties) {
-    this._properties = properties;
-    if (this._attached) this._context.componentPropertiesChanged?.(this);
+  [REPLACE_PROPERTIES](token, properties) {
+    if (token !== COMPONENT_MUTATION_TOKEN) fail('display-component-properties-readonly');
+    if (this._disposed) fail('display-component-disposed');
+    const previous = this.#properties;
+    this.#properties = properties;
+    try {
+      if (this._attached) this._context.componentPropertiesChanged?.(this);
+    } catch (error) {
+      this.#properties = previous;
+      throw error;
+    }
+    return this.#properties;
   }
   _adoptContext(context) {
     if (!this._attached || this._disposed) fail('display-component-adopt-state-invalid');

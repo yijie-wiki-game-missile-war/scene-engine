@@ -40,4 +40,20 @@ export class Scene {
     return true;
   }
   finishDispose() { this.state = 'disposed'; }
+
+  release() {
+    this.rootNode = null;
+    this.authorityRootNode = null;
+    this.definition = null;
+    this.compiledDefinition = null;
+    this.activeCameraName = null;
+    this.loader = null;
+    this.registries = null;
+    this.nodeIndex = null;
+    this.nodeGraph = null;
+    this.scheduler = null;
+    this.renderSystem = null;
+    this.sceneToken = null;
+    this.state = 'disposed';
+  }
 }

@@ -28,6 +28,7 @@ export class RenderSystem {
     this._activeCameraName = null;
     this._failure = null;
     this._disposed = false;
+    this._disposePromise = null;
     this._requiresContinuousDraw = false;
   }
 
@@ -239,8 +240,8 @@ export class RenderSystem {
     this._onNeedsDraw?.();
   }
 
-  async dispose() {
-    if (this._disposed) return;
+  dispose() {
+    if (this._disposePromise !== null) return this._disposePromise;
     this._disposed = true;
     const backend = this._backend;
     this._generation += 1;
@@ -254,7 +255,21 @@ export class RenderSystem {
     this._identityBarriers.clear();
     this._backend = null;
     this._entries.clear(); this._byNode.clear();
-    if (backend) await this._disposeBackendOnce(backend);
+    this._activeCameraName = null;
+    this._requiresContinuousDraw = false;
+    this._disposePromise = Promise.resolve().then(async () => {
+      try {
+        if (backend) await this._disposeBackendOnce(backend);
+      } finally {
+        this._resourceRegistry = null;
+        this._onHealth = null;
+        this._onNeedsDraw = null;
+        this._failure = null;
+        this._cancelBackendWait = null;
+        this._backendCancellation = null;
+      }
+    });
+    return this._disposePromise;
   }
 
   _mount(entry) {

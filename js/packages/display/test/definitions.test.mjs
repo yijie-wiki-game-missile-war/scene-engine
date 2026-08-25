@@ -11,6 +11,7 @@ import {
   defineScene,
 } from '../src/index.js';
 import { IDENTITY, RENDERER_PROFILE, emptyPrefab } from './helpers.mjs';
+import { assertNodeName } from '../src/node/node-name.js';
 
 test('Scene compile is closed and validates active Camera and resource references', () => {
   const components = createComponentRegistry(); const resources = createResourceRegistry();
@@ -79,4 +80,9 @@ test('built-in RenderComponents reject an existing resource of the wrong kind', 
   assert.throws(() => components.compile({
     key: 'model', type: 'render.model@1', properties: { modelResourceId: 'asset/wrong' },
   }, resources), { code: 'display-resource-reference-kind-invalid' });
+});
+
+test('editor Node prefix is not part of the runtime name grammar', () => {
+  assert.throws(() => assertNodeName(['editor', 'session', 'node'].join('/')),
+    { code: 'display-node-name-invalid' });
 });

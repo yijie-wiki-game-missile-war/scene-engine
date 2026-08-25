@@ -156,12 +156,20 @@ function createBenchmarkSessionFactory(state) {
         installScene() {},
         activate(cursor) { state.cursor = cursor; },
         start() {},
+        summary: () => Object.freeze({
+          schema: 'scene-engine-display-summary@1',
+          sceneName: 'benchmark',
+          revision: state.cursor?.commitSeq ?? 0,
+          nodeCount: state.nodes.size,
+          cursor: state.cursor,
+          health: 'ready',
+        }),
+        currentView: () => Object.freeze({
+          nodeCount: state.nodes.size,
+          cursor: state.cursor,
+        }),
       },
       authorityPort,
-      displayViewProvider: () => Object.freeze({
-        nodeCount: state.nodes.size,
-        cursor: state.cursor,
-      }),
       commitGate: {
         begin(cursor) {
           if (pendingCursor !== null) throw new Error('benchmark gate already closed');

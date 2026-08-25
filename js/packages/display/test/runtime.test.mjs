@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { BehaviourComponent, PREFAB_DEFINITION_SCHEMA, definePrefab } from '../src/index.js';
+import {
+  BehaviourComponent,
+  DISPLAY_SUMMARY_SCHEMA,
+  PREFAB_DEFINITION_SCHEMA,
+  definePrefab,
+} from '../src/index.js';
 import { createFakeRenderBackend } from '../src/testing/fake-render-backend.js';
 import { IDENTITY, createHarness, emptyPrefab } from './helpers.mjs';
 
@@ -112,6 +117,98 @@ test('state resolver validates the whole patch before changing any target', asyn
     name: 'py/stateful', state: { visible: false, modelResourceId: 'texture/wrong' },
   }), { code: 'display-resource-reference-kind-invalid' });
   assert.equal(runtime.currentView().getNode('prefab/py/stateful/body').visibleSelf, true);
+});
+
+test('invalid resource patch leaves RenderSystem dirty, draw, and lease state unchanged', async (t) => {
+  const fake = createFakeRenderBackend();
+  const leases = new Map();
+  let leaseAcquisitions = 0; let leaseReleases = 0;
+  const resourceIds = (componentType, properties) => componentType === 'render.model@1'
+    ? [properties.modelResourceId] : [];
+  const replaceLeases = (binding, nextIds) => {
+    const previousIds = leases.get(binding) ?? [];
+    if (previousIds.length === nextIds.length
+        && previousIds.every((id, index) => id === nextIds[index])) return;
+    leaseReleases += previousIds.length;
+    leaseAcquisitions += nextIds.length;
+    leases.set(binding, Object.freeze([...nextIds]));
+  };
+  const backend = {
+    ...fake.backend,
+    createBinding(descriptor) {
+      const binding = fake.backend.createBinding(descriptor);
+      const ids = resourceIds(descriptor.componentType, descriptor.properties);
+      leases.set(binding, Object.freeze([...ids]));
+      leaseAcquisitions += ids.length;
+      return binding;
+    },
+    updateBinding(binding, patch) {
+      replaceLeases(binding, resourceIds(binding.descriptor.componentType, patch.properties));
+      return fake.backend.updateBinding(binding, patch);
+    },
+    destroyBinding(binding) {
+      const ids = leases.get(binding) ?? [];
+      leaseReleases += ids.length;
+      leases.delete(binding);
+      return fake.backend.destroyBinding(binding);
+    },
+    diagnostics() {
+      return {
+        ...fake.backend.diagnostics(),
+        resourceLeaseCount: [...leases.values()].reduce((count, ids) => count + ids.length, 0),
+        resourceLeaseAcquisitions: leaseAcquisitions,
+        resourceLeaseReleases: leaseReleases,
+      };
+    },
+    dispose() {
+      for (const ids of leases.values()) leaseReleases += ids.length;
+      leases.clear();
+      return fake.backend.dispose();
+    },
+  };
+  const prefab = emptyPrefab({
+    id: 'target.atomic-resource',
+    logicalType: 'test.atomic-resource',
+    childComponents: [{
+      key: 'model', type: 'render.model@1', properties: { modelResourceId: 'model/good' },
+    }],
+    resolveState(state) {
+      return { nodes: {}, components: { 'body/model': { modelResourceId: state.modelResourceId } } };
+    },
+  });
+  const { runtime, frames } = await createHarness({
+    resources: [{ id: 'model/good', kind: 'model', url: './good.glb' }],
+    prefabEntries: [{ sceneProfile: 'test', logicalType: prefab.logicalType, definition: prefab }],
+    backendFactory: () => backend,
+  });
+  t.after(() => runtime.dispose());
+  runtime.authority.createNode({ ...createCommand('py/atomic-resource', prefab.logicalType),
+    state: { modelResourceId: 'model/good' } });
+  runtime.start();
+  frames.step();
+
+  const component = runtime._nodeIndex.require('prefab/py/atomic-resource/body')
+    .requireComponent('model');
+  const renderEntry = runtime._renderSystem._entries.get(component);
+  assert.equal(renderEntry.dirty, false);
+  assert.equal(runtime._drawRequested, false);
+  assert.equal(frames.pending, 0);
+  const propertiesBefore = component.properties;
+  const bindingBefore = renderEntry.binding;
+  const diagnosticsBefore = backend.diagnostics();
+  const backendCallCountBefore = fake.calls.length;
+
+  assert.throws(() => runtime.authority.setNodeState({
+    name: 'py/atomic-resource', state: { modelResourceId: 'model/missing' },
+  }), { code: 'display-resource-missing' });
+
+  assert.strictEqual(component.properties, propertiesBefore);
+  assert.strictEqual(renderEntry.binding, bindingBefore);
+  assert.equal(renderEntry.dirty, false);
+  assert.equal(runtime._drawRequested, false);
+  assert.equal(frames.pending, 0);
+  assert.equal(fake.calls.length, backendCallCountBefore);
+  assert.deepEqual(backend.diagnostics(), diagnosticsBefore);
 });
 
 test('validated state patches install normalized properties exactly once before mutation', async (t) => {
@@ -353,6 +450,54 @@ test('commitGate seal does not materialize a full DisplayView', async (t) => {
   assert.equal(fullIndexTraversals, 1);
 });
 
+test('summary is a fresh frozen O(1) record and never traverses Nodes or Components', async (t) => {
+  const { runtime } = await createHarness(); t.after(() => runtime.dispose());
+  runtime.authority.createNode(createCommand('py/summary'));
+  let nodeTraversals = 0;
+  const values = runtime._nodeIndex.values.bind(runtime._nodeIndex);
+  runtime._nodeIndex.values = (...args) => { nodeTraversals += 1; return values(...args); };
+  for (const node of values()) {
+    Object.defineProperty(node, 'components', {
+      configurable: true,
+      get() { throw new Error('summary traversed Component state'); },
+    });
+  }
+  const first = runtime.summary();
+  const second = runtime.summary();
+  assert.notStrictEqual(first, second);
+  assert.equal(Object.isFrozen(first), true);
+  assert.deepEqual(first, {
+    schema: DISPLAY_SUMMARY_SCHEMA,
+    sceneName: 'main',
+    revision: 2,
+    cursor: { commitSeq: 0, sourceTick: 0, lastCommandSeq: 0 },
+    nodeCount: 5,
+    health: 'ready',
+  });
+  assert.equal(nodeTraversals, 0);
+
+  const installedNodes = runtime._nodeIndex._nodes;
+  runtime._nodeIndex._nodes = new Map(Array.from({ length: 10_000 }, (_, index) => [
+    `synthetic/${index}`,
+    Object.freeze({}),
+  ]));
+  try {
+    assert.equal(runtime.summary().nodeCount, 10_000);
+    assert.equal(nodeTraversals, 0);
+  } finally {
+    runtime._nodeIndex._nodes = installedNodes;
+  }
+});
+
+test('runtime excludes LocalEdit and rejects the removed authoring option', async () => {
+  const { runtime } = await createHarness();
+  assert.equal(['local', 'Edit'].join('') in runtime, false);
+  await runtime.dispose();
+  const removedOption = ['authoring', 'Mode'].join('');
+  await assert.rejects(createHarness({ runtimeOptions: { [removedOption]: true } }),
+    { code: 'display-options-invalid' });
+});
+
 test('a frame waits for its asynchronous active Camera binding', async (t) => {
   const fake = createFakeRenderBackend();
   let resolveCamera;
@@ -428,15 +573,41 @@ test('dispose is one completion barrier and health observers cannot interrupt cl
     sceneNodes: [{ localName: 'noisy', parentLocalName: null, transform: IDENTITY,
       components: [{ key: 'noisy', type: NoisyDispose.typeId, properties: {} }] }],
   });
+  const retained = {
+    scene: runtime._scene,
+    loader: runtime._sceneLoader,
+    instantiator: runtime._prefabInstantiator,
+    nodeIndex: runtime._nodeIndex,
+    scheduler: runtime._scheduler,
+    renderSystem: runtime._renderSystem,
+  };
   const first = runtime.dispose(); const second = runtime.dispose();
   assert.equal(first, second);
   await Promise.resolve();
-  assert.equal(runtime.currentView().health, 'disposing');
+  assert.equal(runtime.summary().health, 'disposing');
   let completed = false; second.then(() => { completed = true; });
   await Promise.resolve(); assert.equal(completed, false);
   releaseBackend(); await second;
   assert.equal(backendDisposals, 1);
-  assert.equal(runtime.currentView().health, 'disposed');
+  assert.equal(runtime.summary().health, 'disposed');
+  assert.equal(runtime.summary().nodeCount, 0);
+  assert.equal(retained.nodeIndex.size, 0);
+  assert.equal(retained.scheduler._registered.size, 0);
+  assert.equal(retained.renderSystem._entries.size, 0);
+  assert.equal(retained.loader._scopes.length, 0);
+  assert.equal(retained.loader._directComponents.length, 0);
+  assert.equal(retained.loader._scene, null);
+  assert.equal(retained.instantiator._scopes.size, 0);
+  assert.equal(retained.instantiator._scene, null);
+  assert.equal(retained.instantiator._componentContext, null);
+  for (const key of [
+    'rootNode', 'authorityRootNode', 'definition', 'compiledDefinition', 'loader',
+    'activeCameraName', 'registries', 'nodeIndex', 'nodeGraph', 'scheduler', 'renderSystem',
+  ]) assert.equal(retained.scene[key], null, `Scene.${key} must be released`);
+  for (const key of [
+    '_nodeIndex', '_scheduler', '_renderSystem', '_nodeGraph', '_scene', '_componentContext',
+    '_prefabInstantiator', '_sceneLoader', '_hostElement', '_canvas', '_createRenderBackend',
+  ]) assert.equal(runtime[key], null, `DisplayRuntime.${key} must be released`);
 });
 
 test('dispose wins an asynchronous rebuild and releases the orphan backend', async () => {
@@ -456,7 +627,7 @@ test('dispose wins an asynchronous rebuild and releases the orphan backend', asy
   await assert.rejects(rebuild, { code: 'display-disposed' });
   await disposal;
   assert.equal(orphanDisposals, 1);
-  assert.equal(runtime.currentView().health, 'disposed');
+  assert.equal(runtime.summary().health, 'disposed');
 });
 
 test('dispose cancels a rebuild after its candidate backend is installed', async () => {
@@ -484,7 +655,7 @@ test('dispose cancels a rebuild after its candidate backend is installed', async
   await disposal;
   assert.equal(candidateSignal.aborted, true);
   assert.equal(candidateDisposals, 1);
-  assert.equal(runtime.currentView().health, 'disposed');
+  assert.equal(runtime.summary().health, 'disposed');
 });
 
 test('runtime construction seals the catalog registries', async (t) => {

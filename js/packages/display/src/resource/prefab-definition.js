@@ -3,6 +3,7 @@ import { IDENTITY_TRANSFORM, isIdentityTransform, normalizeTransform } from '../
 import { assertLocalPath } from '../node/node-name.js';
 import { fail } from '../runtime/health.js';
 import { Resource } from './resource.js';
+import { prepareComponentPropertiesPatch } from '../component/component-registry.js';
 
 export const PREFAB_DEFINITION_SCHEMA = 'scene-engine-prefab-definition@1';
 const EMPTY_PATCH = Object.freeze({ nodes: Object.freeze({}), components: Object.freeze({}) });
@@ -118,15 +119,20 @@ export class PrefabDefinition extends Resource {
       const base = componentByPath.get(path);
       if (!base) fail('display-prefab-patch-target-missing');
       const current = currentProperties?.get(path) ?? base.properties;
-      normalizedComponents[path] = compiled.componentRegistry.normalizeProperties(base.type,
-        { ...current, ...plainRecord(value, 'display-prefab-patch-invalid') });
-      compiled.componentRegistry.validateResourceReferences(
-        base.type,
-        normalizedComponents[path],
-        compiled.resourceRegistry,
-      );
+      normalizedComponents[path] = prepareComponentPropertiesPatch(compiled.componentRegistry, {
+        typeId: base.type,
+        currentProperties: current,
+        patch: plainRecord(value, 'display-prefab-patch-invalid'),
+        resourceRegistry: compiled.resourceRegistry,
+      });
     }
-    return cloneAndFreeze({ nodes: normalizedNodes, components: normalizedComponents });
+    // Do not clone the normalized component values here. Their object identities carry a
+    // package-private, one-shot validation proof into the atomic apply phase.
+    return Object.freeze({
+      nodes: Object.freeze(Object.fromEntries(Object.entries(normalizedNodes)
+        .map(([path, value]) => [path, cloneAndFreeze(value)]))),
+      components: Object.freeze(normalizedComponents),
+    });
   }
 
   instantiate(scope) { return scope.instantiator.instantiateCompiled(scope, this.compile(scope.registries)); }
