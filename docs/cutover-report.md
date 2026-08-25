@@ -16,10 +16,25 @@ packet log                       scene-engine-packet-log@2
 browser products                 production + read-only Showcase
 ```
 
-The implementation source is Scene Engine commit
-`0c9b77f4687a7ed72de53a4ff7fadef7431f0a9f`. The Arts implementation is
-`e1c103a368c329be9a097db7934720dbd195e0d7`, followed by fullscreen lifecycle
-coverage at `57f5f30cc6c3400c027589dc34c9fd272485daf6`.
+## Source identity for the 2026-08-25 closeout
+
+| Identity | Scene Engine | Python Game | Arts |
+| --- | --- | --- | --- |
+| Implementation base | `4b7843f312c70743bb0edc15621cdc9ccbe9b7ac` | `4eb74f5a946abab233da2849642bcf587cdde415` | `30529c999fcd8b92b0988c6ae46984d22ecb99d4` |
+| Final tested commit | `4b7843f312c70743bb0edc15621cdc9ccbe9b7ac` | `4eb74f5a946abab233da2849642bcf587cdde415` | `005ecd7a6b0a5a506b5587aaff3a8db94f46d0a5` |
+| Delivered commit | `$Format:%H$` | delivery manifest | delivery manifest |
+
+The implementation base is the tuple at the start of this closeout. Final
+Engine, gameplay, Arts, clean-install, capture, and browser tests ran against
+the final tested tuple. Scene Engine has no runtime or package change in this
+closeout; its only tracked descendant is this report and its Git archive
+substitution rule. The affected documentation and cutover gates were rerun.
+
+A tracked report cannot contain the hash of the commit that contains itself.
+Git expands the Scene Engine value above to the exact commit in the delivered
+`git archive`; the delivery manifest shipped beside the archive records the
+exact delivered tuple for all three repositories and the outer archive
+SHA-256.
 
 The `main` catalog identity remains frozen to scene
 `dc7e8a975d55636722e54203c54fb3148703d2206e9d26033e0fe0e05baa6673`, Prefab
@@ -61,8 +76,22 @@ Final clean-install verification completed from the locked dependency trees:
   tarballs, Arts vendor bytes, dependency locks, clean installed bytes, removal
   checks, and current-document checks passed.
 - Arts `npm run check` and `npm run build`: passed; Web3D Showcase tests are
-  11/11, including 30 create/dispose cycles and both fullscreen transitions.
+  46/46 in the workspace gate, including 30 create/dispose cycles and both
+  fullscreen transitions. The separate real Chromium capture run is 32/32.
+- Python Game: 250/250 tests.
 - Physical-removal and final forbidden-surface scans are clean.
+
+Fresh package evidence from the final tested tuple is included by filename and
+SHA-256: Python 500-node
+`scene-engine-python-500-quick-20260825.json`
+(`22bcc78c6e17bb3546bd030514bbe6ee49558e22e3fce9f1ef5dcceee289cdd8`),
+client ACK 500-node `scene-engine-client-ack-500-quick-20260825.json`
+(`656f20d36a912c625d825d3743fdc750c3ecd8e56245f587aa8b6a8514288564`),
+display 500-node evidence
+(`1a0d973877889d9def4ec7045e74dbb05965e7907a41482f9b403816291513e3`),
+and the resource leak matrix
+`scene-engine-display-resource-leak-matrix-20260825.json`
+(`0ed98fc24d50a9e2b168f567deafbc813254fb7bb61393d8abf1ea8f246050e2`).
 
 ## Client ACK evidence
 
@@ -128,6 +157,11 @@ recorded cases.
 Browser evidence SHA-256 is
 `192b511e8bb5a38067dafe03c890933da0f6805e5c047c82951463d4b49739a2`.
 
+The closeout also generated package delivery evidence from the final tested
+Arts commit: all 18 Showcase entries, four Camera presets, three UI kits,
+Reset, Fullscreen wiring, and no Canvas selection passed. Its SHA-256 is
+`99d2ab4f5fa993667095317aa5c11de9eb358b7f7d2f91421779bd20bba4a9da`.
+
 The final Web3D build contains 84 files, 77 emitted media files, 13 inline media
 items, and exactly `index.html` plus `showcase.html` as entry pages. Build
 SHA-256 is
@@ -149,4 +183,6 @@ and Arts npm
 `0e209f72614f464248916bc1942c2a41e484bfbdf54978df175dacfd83c87d86`.
 
 All P0 architecture, ACK, correctness, batching, browser, lifecycle, artifact,
-clean-install, build, and removal gates are closed.
+clean-install, build, and removal gates are closed. The 19 asset-specific
+capture scripts, shared legacy helper, unpromoted billboard candidate, obsolete
+coast HTML, and flat agent guide are absent with no compatibility replacement.
