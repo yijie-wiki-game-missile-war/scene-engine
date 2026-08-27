@@ -33,7 +33,7 @@ def node(name: str, *, parent_name: str | None = None) -> DisplayNode:
     return DisplayNode(
         name=name,
         parent_name=parent_name,
-        prefab_type="flight.aircraft",
+        prefab_id="flight.aircraft/prefab@1",
         transform_mode="live",
         transform=transform(),
         visible=True,

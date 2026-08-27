@@ -1,6 +1,6 @@
-# Three RenderBackend 0.9.1
+# Three RenderBackend 0.9.2
 
-`@scene-engine/renderer-three@0.9.1` exports only:
+`@scene-engine/renderer-three@0.9.2` exports only:
 
 ```text
 THREE_RENDER_BACKEND_SCHEMA
@@ -32,6 +32,10 @@ Supported public component types are model, mesh, sprite, surface, particle, cam
 light, point light and spot light. Resource loads honor AbortSignal and generation tokens. Removing a pending binding prevents
 late attachment; destroy/recreate for the same identity is serialized. Source model material semantics are retained unless
 closed component properties explicitly override alpha/depth behavior.
+
+URL textures are decoded as vertically pre-oriented ImageBitmaps and installed with `Texture.flipY = false`, so image-top maps
+to the top of standard Three UV geometry exactly once. The same rule applies to textures used by sprites, atlases, materials,
+surfaces, particles and backgrounds.
 
 `prepareFrame` consumes only dirty bindings and the active camera binding. `render` performs the draw requested by
 DisplayRuntime. Ordinary picking excludes batched records, and batch picking maps its instance back to the same logical

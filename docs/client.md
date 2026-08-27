@@ -1,6 +1,6 @@
-# JavaScript client 0.8
+# JavaScript client 0.9
 
-`@scene-engine/client@0.8.0` exports:
+`@scene-engine/client@0.9.0` exports:
 
 ```text
 SceneEngineClient

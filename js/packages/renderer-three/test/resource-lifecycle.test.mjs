@@ -82,6 +82,42 @@ test('indexed inline meshes tolerate omitted normals and UVs and compute every v
   disposeThreeResource(asset);
 });
 
+test('ImageBitmap textures are decoded in Three UV orientation exactly once',
+  { concurrency: false }, async () => {
+    const originalFetch = globalThis.fetch;
+    const originalCreateImageBitmap = globalThis.createImageBitmap;
+    const bitmap = { width: 2, height: 2, closeCount: 0,
+      close() { this.closeCount += 1; } };
+    let bitmapOptions = null;
+    globalThis.fetch = async () => new Response('texture-bytes', {
+      status: 200,
+      headers: { 'content-type': 'image/png' },
+    });
+    globalThis.createImageBitmap = async (_blob, options) => {
+      bitmapOptions = options;
+      return bitmap;
+    };
+    try {
+      const asset = await loadThreeResource({
+        id: 'texture/oriented', kind: 'texture', url: 'https://example.test/oriented.png',
+        colorSpace: 'srgb', wrap: 'clamp',
+      }, new AbortController().signal, []);
+      assert.deepEqual(bitmapOptions, {
+        imageOrientation: 'flipY',
+        premultiplyAlpha: 'none',
+        colorSpaceConversion: 'none',
+      });
+      assert.strictEqual(asset.texture.image, bitmap);
+      assert.equal(asset.texture.flipY, false);
+      disposeThreeResource(asset);
+      assert.equal(bitmap.closeCount, 1);
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (originalCreateImageBitmap === undefined) delete globalThis.createImageBitmap;
+      else globalThis.createImageBitmap = originalCreateImageBitmap;
+    }
+  });
+
 test('pending create honors AbortSignal and cannot attach a late resource', async () => {
   let resolveLoad; let disposedAsset = 0;
   const asset = { kind: 'model', descriptor: { id: 'model/slow', kind: 'model' },

@@ -47,7 +47,7 @@ test('wire v2 fixture has JSON display checkpoint and ACK command cursor', async
   const raw = new Uint8Array(await readFile(`${FIXTURES}/checkpoint.bin`));
   const decoded = readEnginePacket(raw);
   assert.equal(decoded.header.schema, 'scene-engine-wire@2');
-  assert.equal(decoded.header.display_codec, 'scene-engine-display-node@2');
+  assert.equal(decoded.header.display_codec, 'scene-engine-display-node@3');
   assert.deepEqual(decoded.attachments.map(({ kind, encoding }) => [kind, encoding]), [
     ['world_snapshot', 'json'],
     ['display_checkpoint', 'json'],
@@ -59,14 +59,14 @@ test('wire v2 fixture has JSON display checkpoint and ACK command cursor', async
   assert.deepEqual(client.currentDisplayView(), { sessionId: 1 });
   assert.equal(sessions[0].metadata.sceneCatalogHash, HASH_A);
   assert.deepEqual(sessions[0].log.map(([kind]) => kind), [
-    'installScene', 'createNode', 'activate', 'start', 'summary',
+    'installScene', 'createNode', 'createNode', 'activate', 'start', 'summary',
   ]);
   assert.deepEqual(sessions[0].log[0][1], { sceneName: 'main' });
-  assert.deepEqual(sessions[0].log[2][1], {
+  assert.deepEqual(sessions[0].log.find(([kind]) => kind === 'activate')[1], {
     commitSeq: 0, sourceTick: 0, lastCommandSeq: 0,
   });
-  assert.deepEqual(Object.keys(sessions[0].log[1][1]), [
-    'name', 'parentName', 'prefabType', 'transformMode', 'transform', 'visible', 'state',
+  assert.deepEqual(Object.keys(sessions[0].log.find(([kind]) => kind === 'createNode')[1]), [
+    'name', 'parentName', 'prefabId', 'transformMode', 'transform', 'visible', 'state',
   ]);
   assert.equal('currentView' in client, false);
   assert.equal('getNode' in client, false);
@@ -228,7 +228,7 @@ test('commit validates all commands then applies one Authority call per target b
     command('node-create', 1, 1, {
       name: 'py/unit-2',
       parent_name: null,
-      prefab_type: 'unit.example',
+      prefab_id: 'unit.example',
       transform_mode: 'live',
       transform: transform(2),
       visible: true,
@@ -239,7 +239,7 @@ test('commit validates all commands then applies one Authority call per target b
     command('node-set-visible', 4, 1, { visible: false }),
     command('node-set-state', 5, 1, { state: { mode: 'active' } }),
     command('node-replace-prefab', 6, 1, {
-      prefab_type: 'unit.variant', state: { variant: 2 },
+      prefab_id: 'unit.variant/prefab@1', state: { variant: 2 },
     }),
     command('node-remove', 7, 1),
   ];

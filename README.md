@@ -1,23 +1,23 @@
-# Scene Engine 0.7
+# Scene Engine 0.8
 
 Scene Engine 是 renderer-neutral 的 60 Hz fixed-step runtime。当前只有一条生产发布与显示链：
 
 ```text
 EngineProgram
   -> scene-engine-wire@2
-  -> SceneEngineClient 0.8
-  -> DisplayRuntime 0.2
-  -> ThreeRenderBackend 0.9.1
+  -> SceneEngineClient 0.9
+  -> DisplayRuntime 0.3
+  -> ThreeRenderBackend 0.9.2
 ```
 
 发布 tuple：
 
-- Python `scene-engine==0.7.0`：规则事务、wire、Display authority records、session 与 recording；
-- `@scene-engine/client@0.8.0`：唯一 wire/packet-log decoder、WorldState 指针、同步 ACK barrier 和 Display session bridge；
-- `@scene-engine/display@0.2.0`：唯一 Node、Transform、Component、Scene、Prefab、Resource 和 RAF owner；
-- `@scene-engine/renderer-three@0.9.1`：只实现平面的 RenderBackend port，不拥有业务 Node 树或 RAF。
+- Python `scene-engine==0.8.0`：规则事务、wire、Display authority records、session 与 recording；
+- `@scene-engine/client@0.9.0`：唯一 wire/packet-log decoder、WorldState 指针、同步 ACK barrier 和 Display session bridge；
+- `@scene-engine/display@0.3.0`：唯一 Node、Transform、Component、Scene、Prefab、Resource 和 RAF owner；
+- `@scene-engine/renderer-three@0.9.2`：只实现平面的 RenderBackend port，不拥有业务 Node 树或 RAF。
 
-Wire、Display codec 和 packet-log 仍分别为 `scene-engine-wire@2`、`scene-engine-display-node@2` 和
+Wire、Display codec 和 packet-log 仍分别为 `scene-engine-wire@2`、`scene-engine-display-node@3` 和
 `scene-engine-packet-log@2`。当前 tuple 没有兼容 decoder、别名、双写、旧包重定向或 fallback renderer。
 
 ## 核心约束
@@ -67,6 +67,7 @@ Python 需要 `>=3.10`；Node 需要 `^20.19.0 || >=22.12.0`。
 - [Wire v2](docs/wire.md)
 - [JavaScript client](docs/client.md)
 - [Three backend](docs/render-runtime.md)
+- [Three backend 0.9.2 texture-orientation patch](docs/renderer-three-0.9.2-patch.md)
 - [Recording 与 Replay](docs/recording-replay.md)
 - [Transform](docs/transform.md)
-- [切换报告](docs/cutover-report.md)
+- [0.9.1 历史切换报告](docs/cutover-report.md)

@@ -1,21 +1,21 @@
-export const DISPLAY_CHECKPOINT_SCHEMA = 'scene-engine-display-checkpoint@2';
-export const DISPLAY_COMMAND_STREAM_SCHEMA = 'scene-engine-display-command-stream@2';
-export const NODE_COMMAND_SCHEMA = 'scene-engine-node-command@2';
+export const DISPLAY_CHECKPOINT_SCHEMA = 'scene-engine-display-checkpoint@3';
+export const DISPLAY_COMMAND_STREAM_SCHEMA = 'scene-engine-display-command-stream@3';
+export const NODE_COMMAND_SCHEMA = 'scene-engine-node-command@3';
 
 const AUTHORITY_NAME = /^py\/[a-z0-9][a-z0-9._-]*(?:\/[a-z0-9][a-z0-9._-]*)*$/u;
 const SCENE_NAME = /^[a-z0-9][a-z0-9._-]*$/u;
-const PREFAB_TYPE = /^[a-z0-9][a-z0-9._-]*$/u;
+const PREFAB_ID = /^[a-z0-9][a-z0-9._@-]*(?:\/[a-z0-9][a-z0-9._@-]*)*$/u;
 const SHA256 = /^[0-9a-f]{64}$/u;
 const ENCODER = new TextEncoder();
 
 const BASELINE_FIELDS = new Set([
-  'name', 'parent_name', 'prefab_type', 'transform_mode',
+  'name', 'parent_name', 'prefab_id', 'transform_mode',
   'transform', 'visible', 'state',
 ]);
 const COMMAND_BASE_FIELDS = ['schema', 'command_seq', 'source_tick', 'kind', 'name'];
 const COMMAND_FIELDS = Object.freeze({
   'node-create': new Set([
-    ...COMMAND_BASE_FIELDS, 'parent_name', 'prefab_type', 'transform_mode',
+    ...COMMAND_BASE_FIELDS, 'parent_name', 'prefab_id', 'transform_mode',
     'transform', 'visible', 'state',
   ]),
   'node-set-transform': new Set([...COMMAND_BASE_FIELDS, 'transform']),
@@ -23,7 +23,7 @@ const COMMAND_FIELDS = Object.freeze({
   'node-set-visible': new Set([...COMMAND_BASE_FIELDS, 'visible']),
   'node-set-state': new Set([...COMMAND_BASE_FIELDS, 'state']),
   'node-replace-prefab': new Set([
-    ...COMMAND_BASE_FIELDS, 'prefab_type', 'state',
+    ...COMMAND_BASE_FIELDS, 'prefab_id', 'state',
   ]),
   'node-remove': new Set(COMMAND_BASE_FIELDS),
 });
@@ -121,7 +121,7 @@ function normalizeBaselineNode(value) {
   return Object.freeze({
     name: authorityName(value.name, 'display-node-name-invalid'),
     parentName: nullableAuthorityName(value.parent_name),
-    prefabType: prefabType(value.prefab_type),
+    prefabId: prefabId(value.prefab_id),
     transformMode: transformMode(value.transform_mode),
     transform: normalizeTransform(value.transform),
     visible: boolean(value.visible, 'display-node-visible-invalid'),
@@ -153,7 +153,7 @@ function normalizeCommand(value, expectedSequence, sourceTick) {
       return Object.freeze({
         ...common,
         parentName: nullableAuthorityName(value.parent_name),
-        prefabType: prefabType(value.prefab_type),
+        prefabId: prefabId(value.prefab_id),
         transformMode: transformMode(value.transform_mode),
         transform: normalizeTransform(value.transform),
         visible: boolean(value.visible, 'display-node-visible-invalid'),
@@ -176,7 +176,7 @@ function normalizeCommand(value, expectedSequence, sourceTick) {
     case 'node-replace-prefab':
       return Object.freeze({
         ...common,
-        prefabType: prefabType(value.prefab_type),
+        prefabId: prefabId(value.prefab_id),
         state: normalizeState(value.state),
       });
     case 'node-remove':
@@ -239,9 +239,9 @@ function logicalName(value, code) {
   return value;
 }
 
-function prefabType(value) {
+function prefabId(value) {
   if (typeof value !== 'string' || ENCODER.encode(value).byteLength > 192
-      || !PREFAB_TYPE.test(value)) fail('display-prefab-type-invalid');
+      || !PREFAB_ID.test(value)) fail('display-prefab-id-invalid');
   return value;
 }
 

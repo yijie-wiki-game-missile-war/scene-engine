@@ -1,19 +1,19 @@
 # Current architecture
 
-Scene Engine 0.7 owns one authoritative transaction and synchronization boundary. The JavaScript packages in that boundary
-are Client 0.8, Display 0.2 and Three backend 0.9.1:
+Scene Engine 0.8 owns one authoritative transaction and synchronization boundary. The JavaScript packages in that boundary
+are Client 0.9, Display 0.3 and Three backend 0.9.2:
 
 ```text
 mutable product world (60 Hz integer tick owner)
   -> ProductCheckpoint / ProductCommit
   -> wire@2 exact packet bytes
   -> recorder + sessions
-  -> SceneEngineClient 0.8
+  -> SceneEngineClient 0.9
        -> immutable WorldState + cumulative ACK + O(1) DisplaySummary
-       -> DisplayRuntime 0.2 AuthorityPort
+       -> DisplayRuntime 0.3 AuthorityPort
             -> one NodeIndex / one Transform / Component scheduler
             -> RenderSystem
-                 -> flat ThreeRenderBackend 0.9.1 bindings
+                 -> flat ThreeRenderBackend 0.9.2 bindings
 ```
 
 ## Ownership

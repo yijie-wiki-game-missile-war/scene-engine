@@ -41,12 +41,12 @@ export class FakeFrameAdapter {
   }
 }
 
-export function emptyPrefab({ id = 'target.test.item', logicalType = 'test.item',
+export function emptyPrefab({ id = 'target.test.item', gameplayType = 'test.item',
   childName = 'body', resolveState = undefined, childComponents = [] } = {}) {
   return definePrefab({
     schema: PREFAB_DEFINITION_SCHEMA,
     id,
-    logicalType,
+    gameplayType,
     root: {
       components: [],
       children: childName === null ? [] : [{
@@ -69,8 +69,7 @@ export async function createHarness({ prefabEntries = null, resources = [], scen
   configureComponents?.(componentRegistry);
   const resourceRegistry = createResourceRegistry(resources);
   const defaultPrefab = emptyPrefab();
-  const entries = prefabEntries ?? [{ sceneProfile: 'test', logicalType: defaultPrefab.logicalType,
-    definition: defaultPrefab }];
+  const entries = prefabEntries ?? [defaultPrefab];
   const prefabRegistry = createPrefabRegistry(entries);
   const scene = defineScene({
     schema: SCENE_DEFINITION_SCHEMA,

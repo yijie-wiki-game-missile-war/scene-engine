@@ -45,7 +45,7 @@ def display_node() -> DisplayNode:
     return DisplayNode(
         name="py/aircraft-17",
         parent_name=None,
-        prefab_type="flight.aircraft",
+        prefab_id="flight.aircraft",
         transform_mode="live",
         transform=DisplayTransform.identity(),
         visible=True,

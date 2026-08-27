@@ -63,7 +63,7 @@ def baseline_nodes() -> tuple[DisplayNode, ...]:
         DisplayNode(
             name=f"py/node-{index:04d}",
             parent_name=None,
-            prefab_type="benchmark.node",
+            prefab_id="benchmark.node",
             transform_mode="live",
             transform=transform(float(index)),
             visible=True,
@@ -100,7 +100,7 @@ def commands_for(scenario: str, variant: int) -> tuple[DisplayCommand, ...]:
                 DisplayNode(
                     name=f"py/churn-{variant:04d}-{index:02d}",
                     parent_name=None,
-                    prefab_type="benchmark.node",
+                    prefab_id="benchmark.node",
                     transform_mode="live",
                     transform=transform(float(index)),
                     visible=True,

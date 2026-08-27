@@ -18,18 +18,18 @@ from .errors import ConfigurationError
 from .json_tree import validate_json_value
 
 
-DISPLAY_CODEC = "scene-engine-display-node@2"
-DISPLAY_CHECKPOINT_SCHEMA = "scene-engine-display-checkpoint@2"
-DISPLAY_COMMAND_STREAM_SCHEMA = "scene-engine-display-command-stream@2"
-DISPLAY_COMMAND_SCHEMA = "scene-engine-node-command@2"
+DISPLAY_CODEC = "scene-engine-display-node@3"
+DISPLAY_CHECKPOINT_SCHEMA = "scene-engine-display-checkpoint@3"
+DISPLAY_COMMAND_STREAM_SCHEMA = "scene-engine-display-command-stream@3"
+DISPLAY_COMMAND_SCHEMA = "scene-engine-node-command@3"
 
 MAXIMUM_NODE_NAME_BYTES = 192
-MAXIMUM_PREFAB_TYPE_BYTES = 192
+MAXIMUM_PREFAB_ID_BYTES = 192
 MAXIMUM_SCENE_NAME_BYTES = 96
 MAXIMUM_NODE_DEPTH = 128
 
 _NODE_SEGMENT = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
-_LOGICAL_TYPE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+_PREFAB_ID = re.compile(r"^[a-z0-9][a-z0-9._@-]*(?:/[a-z0-9][a-z0-9._@-]*)*$")
 _HASH = re.compile(r"^[0-9a-f]{64}$")
 _COMMAND_KINDS = frozenset(
     {
@@ -185,7 +185,7 @@ class DisplayNode:
 
     name: str
     parent_name: str | None
-    prefab_type: str
+    prefab_id: str
     transform_mode: str
     transform: DisplayTransform
     visible: bool
@@ -196,7 +196,7 @@ class DisplayNode:
         *,
         name: str,
         parent_name: str | None,
-        prefab_type: str,
+        prefab_id: str,
         transform_mode: str,
         transform: DisplayTransform | Mapping[str, Any],
         visible: bool,
@@ -207,7 +207,7 @@ class DisplayNode:
             _authority_name(parent_name, "parent_name")
             if parent_name == name:
                 raise ConfigurationError("authority Node cannot parent itself")
-        _prefab_type(prefab_type)
+        _prefab_id(prefab_id)
         if transform_mode not in {"initial", "live"}:
             raise ConfigurationError("transform_mode must be initial or live")
         normalized_transform = (
@@ -220,7 +220,7 @@ class DisplayNode:
         normalized_state = _plain_state(state)
         object.__setattr__(self, "name", name)
         object.__setattr__(self, "parent_name", parent_name)
-        object.__setattr__(self, "prefab_type", prefab_type)
+        object.__setattr__(self, "prefab_id", prefab_id)
         object.__setattr__(self, "transform_mode", transform_mode)
         object.__setattr__(self, "transform", normalized_transform)
         object.__setattr__(self, "visible", visible)
@@ -230,7 +230,7 @@ class DisplayNode:
         return {
             "name": self.name,
             "parent_name": self.parent_name,
-            "prefab_type": self.prefab_type,
+            "prefab_id": self.prefab_id,
             "transform_mode": self.transform_mode,
             "transform": self.transform.to_record(),
             "visible": self.visible,
@@ -283,12 +283,12 @@ class DisplayCommand:
 
     @classmethod
     def replace_prefab(
-        cls, name: str, prefab_type: str, state: Mapping[str, Any]
+        cls, name: str, prefab_id: str, state: Mapping[str, Any]
     ) -> "DisplayCommand":
         return cls(
             kind="node-replace-prefab",
             name=name,
-            prefab_type=prefab_type,
+            prefab_id=prefab_id,
             state=state,
         )
 
@@ -414,7 +414,7 @@ def validate_display_checkpoint(
     node_fields = {
         "name",
         "parent_name",
-        "prefab_type",
+        "prefab_id",
         "transform_mode",
         "transform",
         "visible",
@@ -474,7 +474,7 @@ def _command_from_record(value: Any) -> DisplayCommand:
     expected_by_kind = {
         "node-create": {
             "parent_name",
-            "prefab_type",
+            "prefab_id",
             "transform_mode",
             "transform",
             "visible",
@@ -484,7 +484,7 @@ def _command_from_record(value: Any) -> DisplayCommand:
         "node-set-parent": {"parent_name"},
         "node-set-visible": {"visible"},
         "node-set-state": {"state"},
-        "node-replace-prefab": {"prefab_type", "state"},
+        "node-replace-prefab": {"prefab_id", "state"},
         "node-remove": set(),
     }
     if kind not in expected_by_kind or set(value) != common | expected_by_kind[kind]:
@@ -534,7 +534,7 @@ def _normalize_command_fields(
     if kind == "node-create":
         required = {
             "parent_name",
-            "prefab_type",
+            "prefab_id",
             "transform_mode",
             "transform",
             "visible",
@@ -570,11 +570,11 @@ def _normalize_command_fields(
             raise ConfigurationError("node-set-state fields are invalid")
         return {"state": _plain_state(fields["state"])}
     if kind == "node-replace-prefab":
-        if actual != {"prefab_type", "state"}:
+        if actual != {"prefab_id", "state"}:
             raise ConfigurationError("node-replace-prefab fields are invalid")
-        _prefab_type(fields["prefab_type"])
+        _prefab_id(fields["prefab_id"])
         return {
-            "prefab_type": fields["prefab_type"],
+            "prefab_id": fields["prefab_id"],
             "state": _plain_state(fields["state"]),
         }
     if actual:
@@ -606,13 +606,13 @@ def _node_name(value: Any, field: str) -> str:
     return value
 
 
-def _prefab_type(value: Any) -> str:
+def _prefab_id(value: Any) -> str:
     if (
         not isinstance(value, str)
-        or len(value.encode("utf-8")) > MAXIMUM_PREFAB_TYPE_BYTES
-        or _LOGICAL_TYPE.fullmatch(value) is None
+        or len(value.encode("utf-8")) > MAXIMUM_PREFAB_ID_BYTES
+        or _PREFAB_ID.fullmatch(value) is None
     ):
-        raise ConfigurationError("prefab_type is invalid")
+        raise ConfigurationError("prefab_id is invalid")
     return value
 
 

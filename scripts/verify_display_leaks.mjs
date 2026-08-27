@@ -114,8 +114,8 @@ async function main() {
     command: 'node --expose-gc scripts/verify_display_leaks.mjs',
     runtime: {
       node: process.version,
-      displaySchema: 'scene-engine-display-node@2',
-      rendererBackend: '@scene-engine/renderer-three@0.9.1',
+      displaySchema: 'scene-engine-display-node@3',
+      rendererBackend: '@scene-engine/renderer-three@0.9.2',
       rendererInjection: 'real ThreeRenderBackend with a non-WebGL TestRenderer only',
       resourceLifecycle: 'loadThreeResource + disposeThreeResource',
     },
@@ -167,7 +167,7 @@ async function verifyAuthorityAndRebuildLifecycle() {
   const prefab = definePrefab({
     schema: PREFAB_DEFINITION_SCHEMA,
     id: 'leak-matrix.rendered',
-    logicalType: 'leak-matrix.rendered',
+    gameplayType: 'leak-matrix.rendered',
     root: {
       components: [],
       children: [{
@@ -182,9 +182,7 @@ async function verifyAuthorityAndRebuildLifecycle() {
       }],
     },
   });
-  const prefabRegistry = createPrefabRegistry([{
-    sceneProfile: 'leak-matrix', logicalType: prefab.logicalType, definition: prefab,
-  }]);
+  const prefabRegistry = createPrefabRegistry([prefab]);
   const scene = defineScene({
     schema: SCENE_DEFINITION_SCHEMA,
     id: 'main',
@@ -247,7 +245,7 @@ async function verifyAuthorityAndRebuildLifecycle() {
     runtime.authority.createNode({
       name: 'py/leak-cycle',
       parentName: null,
-      prefabType: prefab.logicalType,
+      prefabId: prefab.id,
       transformMode: 'live',
       transform: IDENTITY,
       visible: true,
@@ -483,7 +481,7 @@ async function verifyPendingBindingDispose() {
   const resourceRegistry = createResourceRegistry([RESOURCES[1]]);
   const prefab = definePrefab({
     schema: PREFAB_DEFINITION_SCHEMA,
-    id: 'leak-matrix.pending', logicalType: 'leak-matrix.pending',
+    id: 'leak-matrix.pending', gameplayType: 'leak-matrix.pending',
     root: { components: [], children: [{
       localName: 'visual', transform: IDENTITY, visible: true,
       components: [{ key: 'sprite', type: 'render.sprite@1', properties: SPRITE_PROPERTIES }],
@@ -505,9 +503,7 @@ async function verifyPendingBindingDispose() {
   const runtime = createDisplayRuntime({
     hostElement: host(), canvas: { getContext: () => ({}) },
     sceneRegistry: createSceneRegistry([scene]),
-    prefabRegistry: createPrefabRegistry([{
-      sceneProfile: 'leak-matrix-pending', logicalType: prefab.logicalType, definition: prefab,
-    }]),
+    prefabRegistry: createPrefabRegistry([prefab]),
     resourceRegistry,
     componentRegistry,
     createRenderBackend(options) {
@@ -522,7 +518,7 @@ async function verifyPendingBindingDispose() {
   await runtime.whenReady();
   const baseline = runtimeMetrics(runtime, backendRows[0].backend, frames);
   runtime.authority.createNode({
-    name: 'py/pending', parentName: null, prefabType: prefab.logicalType,
+    name: 'py/pending', parentName: null, prefabId: prefab.id,
     transformMode: 'live', transform: IDENTITY, visible: true, state: {},
   });
   await loadStarted;

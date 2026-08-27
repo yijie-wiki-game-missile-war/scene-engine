@@ -16,19 +16,19 @@
     "fakeRenderBackend": true
   },
   "checkpoint": {
-    "packetBytes": 112524,
-    "applyToAckMs": 78.0705,
+    "packetBytes": 111524,
+    "applyToAckMs": 27.669417,
     "ackBytes": 155
   },
   "commits": {
     "clientToAck": {
       "samples": 10000,
-      "minimumMs": 0.065875,
-      "p50Ms": 0.081208,
-      "p95Ms": 0.195125,
-      "p99Ms": 0.369584,
-      "maximumMs": 3.985917,
-      "meanMs": 0.102142
+      "minimumMs": 0.024083,
+      "p50Ms": 0.027875,
+      "p95Ms": 0.040709,
+      "p99Ms": 0.066458,
+      "maximumMs": 0.768084,
+      "meanMs": 0.030428
     },
     "ackBytes": {
       "minimum": 155,
@@ -62,85 +62,85 @@
     "checkpoints": [
       {
         "commitSeq": 0,
-        "heapUsedBytes": 10226744,
-        "rssBytes": 85098496,
-        "externalBytes": 2505539,
-        "arrayBuffersBytes": 596114
+        "heapUsedBytes": 10235656,
+        "rssBytes": 85245952,
+        "externalBytes": 2504539,
+        "arrayBuffersBytes": 595114
       },
       {
         "commitSeq": 1000,
-        "heapUsedBytes": 10748648,
-        "rssBytes": 93126656,
-        "externalBytes": 2506549,
-        "arrayBuffersBytes": 597084
+        "heapUsedBytes": 10758288,
+        "rssBytes": 92487680,
+        "externalBytes": 2505549,
+        "arrayBuffersBytes": 596084
       },
       {
         "commitSeq": 2000,
-        "heapUsedBytes": 10644016,
-        "rssBytes": 90996736,
-        "externalBytes": 2506551,
-        "arrayBuffersBytes": 597086
+        "heapUsedBytes": 10653944,
+        "rssBytes": 92749824,
+        "externalBytes": 2505551,
+        "arrayBuffersBytes": 596086
       },
       {
         "commitSeq": 3000,
-        "heapUsedBytes": 10561712,
-        "rssBytes": 90816512,
-        "externalBytes": 2506548,
-        "arrayBuffersBytes": 597083
+        "heapUsedBytes": 10571856,
+        "rssBytes": 92831744,
+        "externalBytes": 2505548,
+        "arrayBuffersBytes": 596083
       },
       {
         "commitSeq": 4000,
-        "heapUsedBytes": 10685880,
-        "rssBytes": 91193344,
-        "externalBytes": 2506551,
-        "arrayBuffersBytes": 597086
+        "heapUsedBytes": 10695520,
+        "rssBytes": 92913664,
+        "externalBytes": 2505551,
+        "arrayBuffersBytes": 596086
       },
       {
         "commitSeq": 5000,
-        "heapUsedBytes": 10654448,
-        "rssBytes": 91275264,
-        "externalBytes": 2506062,
-        "arrayBuffersBytes": 596597
+        "heapUsedBytes": 10669688,
+        "rssBytes": 93011968,
+        "externalBytes": 2505062,
+        "arrayBuffersBytes": 595597
       },
       {
         "commitSeq": 6000,
-        "heapUsedBytes": 10609136,
-        "rssBytes": 94846976,
-        "externalBytes": 2506547,
-        "arrayBuffersBytes": 597082
+        "heapUsedBytes": 10783472,
+        "rssBytes": 95092736,
+        "externalBytes": 2505547,
+        "arrayBuffersBytes": 596082
       },
       {
         "commitSeq": 7000,
-        "heapUsedBytes": 10704208,
-        "rssBytes": 112001024,
-        "externalBytes": 2506551,
-        "arrayBuffersBytes": 597086
+        "heapUsedBytes": 10692832,
+        "rssBytes": 111460352,
+        "externalBytes": 2505551,
+        "arrayBuffersBytes": 596086
       },
       {
         "commitSeq": 8000,
-        "heapUsedBytes": 10626576,
-        "rssBytes": 112033792,
-        "externalBytes": 2506550,
-        "arrayBuffersBytes": 597085
+        "heapUsedBytes": 10704816,
+        "rssBytes": 111493120,
+        "externalBytes": 2505550,
+        "arrayBuffersBytes": 596085
       },
       {
         "commitSeq": 9000,
-        "heapUsedBytes": 10684920,
-        "rssBytes": 111919104,
-        "externalBytes": 2506551,
-        "arrayBuffersBytes": 597086
+        "heapUsedBytes": 10657544,
+        "rssBytes": 111493120,
+        "externalBytes": 2505551,
+        "arrayBuffersBytes": 596086
       },
       {
         "commitSeq": 10000,
-        "heapUsedBytes": 10629744,
-        "rssBytes": 111034368,
-        "externalBytes": 2506064,
-        "arrayBuffersBytes": 596599
+        "heapUsedBytes": 10806600,
+        "rssBytes": 111493120,
+        "externalBytes": 2505064,
+        "arrayBuffersBytes": 595599
       }
     ],
     "stableWindowStartCommit": 2000,
-    "heapGrowthBytes": -14272,
-    "heapSlopeBytesPerCommit": 4.061467,
+    "heapGrowthBytes": 152656,
+    "heapSlopeBytesPerCommit": 15.157067,
     "strictlyMonotonicIncrease": false,
     "heapGrowthLimitBytes": 8388608,
     "heapSlopeLimitBytesPerCommit": 512,

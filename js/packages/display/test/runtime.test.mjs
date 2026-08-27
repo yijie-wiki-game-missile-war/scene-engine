@@ -10,14 +10,14 @@ import {
 import { createFakeRenderBackend } from '../src/testing/fake-render-backend.js';
 import { IDENTITY, createHarness, emptyPrefab } from './helpers.mjs';
 
-function createCommand(name, prefabType = 'test.item', parentName = null, transformMode = 'live') {
-  return { name, parentName, prefabType, transformMode, transform: IDENTITY, visible: true, state: {} };
+function createCommand(name, prefabId = 'target.test.item', parentName = null, transformMode = 'live') {
+  return { name, parentName, prefabId, transformMode, transform: IDENTITY, visible: true, state: {} };
 }
 
 test('Authority create uses one Node graph and initial mode rejects later transform', async (t) => {
   const { runtime, installReturn } = await createHarness(); t.after(() => runtime.dispose());
   assert.equal(installReturn, runtime, 'installScene is a synchronous checkpoint barrier');
-  runtime.authority.createNode(createCommand('py/initial', 'test.item', null, 'initial'));
+  runtime.authority.createNode(createCommand('py/initial', 'target.test.item', null, 'initial'));
   assert.equal(runtime.currentView().getNode('prefab/py/initial/body').parentName, 'py/initial');
   assert.equal(runtime.currentView().getAuthorityOwner('prefab/py/initial/body'), 'py/initial');
   assert.throws(() => runtime.authority.setNodeTransform({
@@ -71,7 +71,7 @@ test('backend factory health bridge drives DisplayRuntime health', async (t) => 
 test('Authority remove rejects a named authority descendant without mutation', async (t) => {
   const { runtime } = await createHarness(); t.after(() => runtime.dispose());
   runtime.authority.createNode(createCommand('py/parent'));
-  runtime.authority.createNode(createCommand('py/child', 'test.item', 'py/parent'));
+  runtime.authority.createNode(createCommand('py/child', 'target.test.item', 'py/parent'));
   assert.throws(() => runtime.authority.removeNode({ name: 'py/parent' }),
     { code: 'display-authority-descendant-exists' });
   assert.equal(runtime.currentView().getNode('py/child').parentName, 'py/parent');
@@ -83,7 +83,7 @@ test('Authority remove rejects a named authority descendant without mutation', a
 test('state resolver validates the whole patch before changing any target', async (t) => {
   const prefab = definePrefab({
     schema: PREFAB_DEFINITION_SCHEMA,
-    id: 'target.stateful', logicalType: 'test.stateful',
+    id: 'target.stateful', gameplayType: 'test.stateful',
     root: { components: [], children: [{
       localName: 'body', visible: true, transform: IDENTITY,
       components: [{
@@ -102,10 +102,10 @@ test('state resolver validates the whole patch before changing any target', asyn
       { id: 'model/good', kind: 'model', url: './good.glb' },
       { id: 'texture/wrong', kind: 'texture', url: './wrong.png' },
     ],
-    prefabEntries: [{ sceneProfile: 'test', logicalType: prefab.logicalType, definition: prefab }],
+    prefabEntries: [prefab],
   });
   t.after(() => runtime.dispose());
-  runtime.authority.createNode({ ...createCommand('py/stateful', prefab.logicalType),
+  runtime.authority.createNode({ ...createCommand('py/stateful', prefab.id),
     state: { visible: true, modelResourceId: 'model/good' } });
   assert.throws(() => runtime.authority.setNodeState({
     name: 'py/stateful', state: { visible: false, modelResourceId: 'model/missing' },
@@ -168,7 +168,7 @@ test('invalid resource patch leaves RenderSystem dirty, draw, and lease state un
   };
   const prefab = emptyPrefab({
     id: 'target.atomic-resource',
-    logicalType: 'test.atomic-resource',
+    gameplayType: 'test.atomic-resource',
     childComponents: [{
       key: 'model', type: 'render.model@1', properties: { modelResourceId: 'model/good' },
     }],
@@ -178,11 +178,11 @@ test('invalid resource patch leaves RenderSystem dirty, draw, and lease state un
   });
   const { runtime, frames } = await createHarness({
     resources: [{ id: 'model/good', kind: 'model', url: './good.glb' }],
-    prefabEntries: [{ sceneProfile: 'test', logicalType: prefab.logicalType, definition: prefab }],
+    prefabEntries: [prefab],
     backendFactory: () => backend,
   });
   t.after(() => runtime.dispose());
-  runtime.authority.createNode({ ...createCommand('py/atomic-resource', prefab.logicalType),
+  runtime.authority.createNode({ ...createCommand('py/atomic-resource', prefab.id),
     state: { modelResourceId: 'model/good' } });
   runtime.start();
   frames.step();
@@ -216,7 +216,7 @@ test('validated state patches install normalized properties exactly once before 
   let armed = false; let armedCalls = 0;
   const prefab = definePrefab({
     schema: PREFAB_DEFINITION_SCHEMA,
-    id: 'target.normalized-state', logicalType: 'test.normalized-state',
+    id: 'target.normalized-state', gameplayType: 'test.normalized-state',
     root: { components: [], children: [{
       localName: 'body', visible: true, transform: IDENTITY,
       components: [{ key: 'state', type: StatefulBehaviour.typeId, properties: { value: 0 } }],
@@ -236,10 +236,10 @@ test('validated state patches install normalized properties exactly once before 
       },
       resourceReferences: () => [],
     }),
-    prefabEntries: [{ sceneProfile: 'test', logicalType: prefab.logicalType, definition: prefab }],
+    prefabEntries: [prefab],
   });
   t.after(() => runtime.dispose());
-  runtime.authority.createNode({ ...createCommand('py/state', prefab.logicalType),
+  runtime.authority.createNode({ ...createCommand('py/state', prefab.id),
     state: { visible: true, value: 0 } });
   armed = true;
   runtime.authority.setNodeState({ name: 'py/state', state: { visible: false, value: 2 } });
@@ -249,16 +249,16 @@ test('validated state patches install normalized properties exactly once before 
 });
 
 test('replaceNodePrefab stages a private shadow scope and preserves authority children', async (t) => {
-  const first = emptyPrefab({ id: 'target.first', logicalType: 'test.first', childName: 'first' });
-  const second = emptyPrefab({ id: 'target.second', logicalType: 'test.second', childName: 'second' });
+  const first = emptyPrefab({ id: 'target.first', gameplayType: 'test.first', childName: 'first' });
+  const second = emptyPrefab({ id: 'target.second', gameplayType: 'test.second', childName: 'second' });
   const { runtime } = await createHarness({ prefabEntries: [
-    { sceneProfile: 'test', logicalType: first.logicalType, definition: first },
-    { sceneProfile: 'test', logicalType: second.logicalType, definition: second },
+    first,
+    second,
   ] });
   t.after(() => runtime.dispose());
-  runtime.authority.createNode(createCommand('py/root', first.logicalType));
-  runtime.authority.createNode(createCommand('py/child', first.logicalType, 'py/root'));
-  runtime.authority.replaceNodePrefab({ name: 'py/root', prefabType: second.logicalType, state: {} });
+  runtime.authority.createNode(createCommand('py/root', first.id));
+  runtime.authority.createNode(createCommand('py/child', first.id, 'py/root'));
+  runtime.authority.replaceNodePrefab({ name: 'py/root', prefabId: second.id, state: {} });
   assert.equal(runtime.currentView().getNode('prefab/py/root/first'), null);
   assert.equal(runtime.currentView().getNode('prefab/py/root/second').parentName, 'py/root');
   assert.equal(runtime.currentView().getNode('py/child').parentName, 'py/root');
@@ -269,22 +269,22 @@ test('replacement shadow handlers cannot mutate live nodes through lookup capabi
     static typeId = 'test.shadow-escape@1';
     onAttach(context) { context.nodeIndex.require('scene/main/camera').setVisible(false); }
   }
-  const first = emptyPrefab({ id: 'target.safe-old', logicalType: 'test.safe-old', childName: 'old' });
-  const escaping = emptyPrefab({ id: 'target.escaping-new', logicalType: 'test.escaping-new', childName: 'new',
+  const first = emptyPrefab({ id: 'target.safe-old', gameplayType: 'test.safe-old', childName: 'old' });
+  const escaping = emptyPrefab({ id: 'target.escaping-new', gameplayType: 'test.escaping-new', childName: 'new',
     childComponents: [{ key: 'escape', type: EscapingBehaviour.typeId, properties: {} }] });
   const { runtime } = await createHarness({
     configureComponents: (registry) => registry.register({
       ComponentClass: EscapingBehaviour, normalizeProperties: () => ({}), resourceReferences: () => [],
     }),
     prefabEntries: [
-      { sceneProfile: 'test', logicalType: first.logicalType, definition: first },
-      { sceneProfile: 'test', logicalType: escaping.logicalType, definition: escaping },
+      first,
+      escaping,
     ],
   });
   t.after(() => runtime.dispose());
-  runtime.authority.createNode(createCommand('py/safe', first.logicalType));
+  runtime.authority.createNode(createCommand('py/safe', first.id));
   assert.throws(() => runtime.authority.replaceNodePrefab({
-    name: 'py/safe', prefabType: escaping.logicalType, state: {},
+    name: 'py/safe', prefabId: escaping.id, state: {},
   }), TypeError);
   assert.equal(runtime.currentView().getNode('scene/main/camera').visibleSelf, true);
   assert(runtime.currentView().getNode('prefab/py/safe/old'));
@@ -293,7 +293,7 @@ test('replacement shadow handlers cannot mutate live nodes through lookup capabi
 
 test('each RenderComponent owns a (nodeName, componentKey) backend binding', async (t) => {
   const prefab = emptyPrefab({
-    id: 'target.rendered', logicalType: 'test.rendered', childName: 'body',
+    id: 'target.rendered', gameplayType: 'test.rendered', childName: 'body',
     childComponents: [
       { key: 'first', type: 'render.model@1', properties: { modelResourceId: 'model/a' } },
       { key: 'second', type: 'render.model@1', properties: { modelResourceId: 'model/a' } },
@@ -301,10 +301,10 @@ test('each RenderComponent owns a (nodeName, componentKey) backend binding', asy
   });
   const { runtime, fakeBackends } = await createHarness({
     resources: [{ id: 'model/a', kind: 'model', url: './a.glb' }],
-    prefabEntries: [{ sceneProfile: 'test', logicalType: prefab.logicalType, definition: prefab }],
+    prefabEntries: [prefab],
   });
   t.after(() => runtime.dispose());
-  runtime.authority.createNode(createCommand('py/rendered', prefab.logicalType));
+  runtime.authority.createNode(createCommand('py/rendered', prefab.id));
   await runtime.whenReady();
   assert(fakeBackends[0].bindings.has(JSON.stringify(['prefab/py/rendered/body', 'first'])));
   assert(fakeBackends[0].bindings.has(JSON.stringify(['prefab/py/rendered/body', 'second'])));
@@ -312,40 +312,40 @@ test('each RenderComponent owns a (nodeName, componentKey) backend binding', asy
 
 test('pending binding create cannot attach after its Node was removed', async (t) => {
   const prefab = emptyPrefab({
-    id: 'target.pending', logicalType: 'test.pending', childName: 'body',
+    id: 'target.pending', gameplayType: 'test.pending', childName: 'body',
     childComponents: [{ key: 'model', type: 'render.model@1', properties: { modelResourceId: 'model/a' } }],
   });
   const fake = createFakeRenderBackend({ asyncCreate: true });
   const { runtime } = await createHarness({
     resources: [{ id: 'model/a', kind: 'model', url: './a.glb' }],
-    prefabEntries: [{ sceneProfile: 'test', logicalType: prefab.logicalType, definition: prefab }],
+    prefabEntries: [prefab],
     backendFactory: () => fake.backend,
   });
   t.after(() => runtime.dispose());
-  runtime.authority.createNode(createCommand('py/pending', prefab.logicalType));
+  runtime.authority.createNode(createCommand('py/pending', prefab.id));
   runtime.authority.removeNode({ name: 'py/pending' });
   await runtime.whenReady();
   assert.equal(fake.bindings.has(JSON.stringify(['prefab/py/pending/body', 'model'])), false);
 });
 
 test('same binding identity waits for a pending old create and its stale cleanup', async (t) => {
-  const first = emptyPrefab({ id: 'target.pending-first', logicalType: 'test.pending-first', childName: 'body',
+  const first = emptyPrefab({ id: 'target.pending-first', gameplayType: 'test.pending-first', childName: 'body',
     childComponents: [{ key: 'model', type: 'render.model@1', properties: { modelResourceId: 'model/a' } }] });
-  const second = emptyPrefab({ id: 'target.pending-second', logicalType: 'test.pending-second', childName: 'body',
+  const second = emptyPrefab({ id: 'target.pending-second', gameplayType: 'test.pending-second', childName: 'body',
     childComponents: [{ key: 'model', type: 'render.model@1', properties: { modelResourceId: 'model/a' } }] });
   const fake = createFakeRenderBackend({ asyncCreate: true });
   const { runtime } = await createHarness({
     resources: [{ id: 'model/a', kind: 'model', url: './a.glb' }],
     prefabEntries: [
-      { sceneProfile: 'test', logicalType: first.logicalType, definition: first },
-      { sceneProfile: 'test', logicalType: second.logicalType, definition: second },
+      first,
+      second,
     ],
     backendFactory: () => fake.backend,
   });
   t.after(() => runtime.dispose());
-  runtime.authority.createNode(createCommand('py/pending-reused', first.logicalType));
+  runtime.authority.createNode(createCommand('py/pending-reused', first.id));
   runtime.authority.replaceNodePrefab({
-    name: 'py/pending-reused', prefabType: second.logicalType, state: {},
+    name: 'py/pending-reused', prefabId: second.id, state: {},
   });
   await runtime.whenReady();
   const relevant = fake.calls.filter((call) => call[1] === 'prefab/py/pending-reused/body'
@@ -368,22 +368,22 @@ test('an asynchronous null binding result makes renderer health fail closed', as
 });
 
 test('same binding identity waits for asynchronous old destroy before replacement create', async (t) => {
-  const first = emptyPrefab({ id: 'target.render-first', logicalType: 'test.render-first', childName: 'body',
+  const first = emptyPrefab({ id: 'target.render-first', gameplayType: 'test.render-first', childName: 'body',
     childComponents: [{ key: 'model', type: 'render.model@1', properties: { modelResourceId: 'model/a' } }] });
-  const second = emptyPrefab({ id: 'target.render-second', logicalType: 'test.render-second', childName: 'body',
+  const second = emptyPrefab({ id: 'target.render-second', gameplayType: 'test.render-second', childName: 'body',
     childComponents: [{ key: 'model', type: 'render.model@1', properties: { modelResourceId: 'model/a' } }] });
   const fake = createFakeRenderBackend({ asyncDestroy: true });
   const { runtime } = await createHarness({
     resources: [{ id: 'model/a', kind: 'model', url: './a.glb' }],
     prefabEntries: [
-      { sceneProfile: 'test', logicalType: first.logicalType, definition: first },
-      { sceneProfile: 'test', logicalType: second.logicalType, definition: second },
+      first,
+      second,
     ],
     backendFactory: () => fake.backend,
   });
   t.after(() => runtime.dispose());
-  runtime.authority.createNode(createCommand('py/reused', first.logicalType));
-  runtime.authority.replaceNodePrefab({ name: 'py/reused', prefabType: second.logicalType, state: {} });
+  runtime.authority.createNode(createCommand('py/reused', first.id));
+  runtime.authority.replaceNodePrefab({ name: 'py/reused', prefabId: second.id, state: {} });
   await runtime.whenReady();
   const relevant = fake.calls.filter((call) => call[1] === 'prefab/py/reused/body' && call[2] === 'model');
   assert.deepEqual(relevant.map((call) => call[0]), ['create', 'destroy', 'create']);
@@ -661,10 +661,8 @@ test('dispose cancels a rebuild after its candidate backend is installed', async
 test('runtime construction seals the catalog registries', async (t) => {
   const { runtime, prefabRegistry, resourceRegistry } = await createHarness();
   t.after(() => runtime.dispose());
-  const late = emptyPrefab({ id: 'target.late', logicalType: 'test.late' });
-  assert.throws(() => prefabRegistry.register({
-    sceneProfile: 'test', logicalType: late.logicalType, definition: late,
-  }), { code: 'display-registry-sealed' });
+  const late = emptyPrefab({ id: 'target.late', gameplayType: 'test.late' });
+  assert.throws(() => prefabRegistry.register(late), { code: 'display-registry-sealed' });
   assert.throws(() => resourceRegistry.register({ id: 'model/late', kind: 'model', url: './late.glb' }),
     { code: 'display-registry-sealed' });
 });

@@ -3,7 +3,7 @@ const VERSION = 2;
 const FIXED_HEADER_BYTES = 16;
 const ATTACHMENT_HEADER_BYTES = 8;
 const WIRE_SCHEMA = 'scene-engine-wire@2';
-export const DISPLAY_CODEC = 'scene-engine-display-node@2';
+export const DISPLAY_CODEC = 'scene-engine-display-node@3';
 const MAX_SAFE = Number.MAX_SAFE_INTEGER;
 
 const PACKET_KIND = Object.freeze({

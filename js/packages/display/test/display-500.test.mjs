@@ -9,7 +9,7 @@ test('500 authority roots share one index and preserve exact canonical identity'
     runtime.authority.createNode({
       name: `py/node-${index}`,
       parentName: null,
-      prefabType: 'test.item',
+      prefabId: 'target.test.item',
       transformMode: 'live',
       transform: { ...IDENTITY, position: [index, 0, 0] },
       visible: true,

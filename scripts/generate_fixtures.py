@@ -75,14 +75,14 @@ def node(
     *,
     x: float = 0.0,
     parent_name: str | None = None,
-    prefab_type: str = "flight.aircraft",
+    prefab_id: str = "flight.aircraft",
     visible: bool = True,
     state: dict | None = None,
 ) -> DisplayNode:
     return DisplayNode(
         name=name,
         parent_name=parent_name,
-        prefab_type=prefab_type,
+        prefab_id=prefab_id,
         transform_mode="live",
         transform=transform(x),
         visible=visible,
@@ -101,15 +101,17 @@ def main() -> None:
     wire_root = ROOT / "fixtures" / "wire-v2"
     display_root = ROOT / "fixtures" / "display-v2"
     tree_root = ROOT / "fixtures" / "json-tree-v1"
+    package_wire_root = ROOT / "js" / "packages" / "client" / "fixtures" / "wire-v2"
     package_log = ROOT / "js" / "packages" / "client" / "fixtures" / "packet-log"
     targets = [wire_root, display_root, tree_root]
     if not args.python_only:
+        targets.append(package_wire_root)
         targets.append(package_log)
     for target in targets:
         reset(target)
 
     initial_nodes = (
-        node("py/root", prefab_type="world.anchor"),
+        node("py/root", prefab_id="world.anchor"),
         node("py/aircraft", parent_name="py/root"),
     )
     display_checkpoint = encode_display_checkpoint(
@@ -120,7 +122,7 @@ def main() -> None:
     )
     commands = (
         DisplayCommand.create(
-            node("py/transient", parent_name="py/root", prefab_type="effects.marker")
+            node("py/transient", parent_name="py/root", prefab_id="effects.marker")
         ),
         DisplayCommand.set_transform("py/aircraft", transform(1.5)),
         DisplayCommand.set_parent("py/aircraft", "py/root"),
@@ -205,12 +207,12 @@ def main() -> None:
         display_commands=display_input,
     )
     final_nodes = (
-        node("py/root", prefab_type="world.anchor"),
+        node("py/root", prefab_id="world.anchor"),
         node(
             "py/aircraft",
             x=1.5,
             parent_name="py/root",
-            prefab_type="flight.aircraft-damaged",
+            prefab_id="flight.aircraft-damaged",
             visible=False,
             state={"animation": "damaged"},
         ),
@@ -268,6 +270,8 @@ def main() -> None:
     }
     for name, data in packets.items():
         (wire_root / name).write_bytes(data)
+        if not args.python_only:
+            (package_wire_root / name).write_bytes(data)
     for name, data in {
         "checkpoint.json": display_checkpoint,
         "command-tick.json": display_tick,

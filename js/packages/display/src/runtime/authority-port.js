@@ -1,5 +1,5 @@
 import { AuthorityComponent } from '../component/authority-component.js';
-import { cloneAndFreeze, exactKeys, nonemptyString } from '../internal.js';
+import { cloneAndFreeze, exactKeys } from '../internal.js';
 import { normalizeTransform } from '../math/transform.js';
 import { Node } from '../node/node.js';
 import { assertNodePrefix } from '../node/node-name.js';
@@ -18,12 +18,12 @@ export class AuthorityPort {
 
   createNode(command) {
     this._assertMutable?.();
-    const record = exactKeys(command, ['name', 'parentName', 'prefabType', 'transformMode',
+    const record = exactKeys(command, ['name', 'parentName', 'prefabId', 'transformMode',
       'transform', 'visible', 'state'], [], 'display-authority-command-invalid');
     const name = assertNodePrefix(record.name, 'py');
     if (this._scene.nodeIndex.has(name)) fail('display-node-name-duplicate');
     const parent = this._resolveParent(record.parentName);
-    const definition = this._resolvePrefab(record.prefabType);
+    const definition = this._resolvePrefab(record.prefabId);
     const compiled = definition.compile(this._scene.registries);
     const transform = normalizeTransform(record.transform);
     if (typeof record.visible !== 'boolean') fail('display-node-visibility-invalid');
@@ -33,7 +33,7 @@ export class AuthorityPort {
     const root = new Node({ name, sceneToken: this._scene.sceneToken,
       transform, visible: record.visible });
     const authority = new AuthorityComponent({
-      prefabType: definition.logicalType,
+      prefabId: definition.id,
       transformMode: record.transformMode,
       state,
     });
@@ -109,15 +109,15 @@ export class AuthorityPort {
 
   replaceNodePrefab(command) {
     this._assertMutable?.();
-    const record = exactKeys(command, ['name', 'prefabType', 'state'], [],
+    const record = exactKeys(command, ['name', 'prefabId', 'state'], [],
       'display-authority-command-invalid');
     const { node, authority } = this._requireAuthority(record.name);
-    const definition = this._resolvePrefab(record.prefabType);
+    const definition = this._resolvePrefab(record.prefabId);
     const compiled = definition.compile(this._scene.registries);
     const state = cloneAndFreeze(record.state, 'display-authority-state-invalid');
     const validatedPatch = this._prefabInstantiator.resolveAndValidateState(compiled, state);
     const replacementAuthority = new AuthorityComponent({
-      prefabType: definition.logicalType,
+      prefabId: definition.id,
       transformMode: authority.transformMode,
       state,
     });
@@ -177,12 +177,8 @@ export class AuthorityPort {
     if (name === null) return this._scene.authorityRootNode;
     return this._scene.nodeIndex.require(assertNodePrefix(name, 'py'));
   }
-  _resolvePrefab(prefabType) {
-    const type = nonemptyString(prefabType, 'display-prefab-type-invalid');
-    return this._scene.registries.prefabRegistry.require(
-      this._scene.compiledDefinition.sceneProfile,
-      type,
-    );
+  _resolvePrefab(prefabId) {
+    return this._scene.registries.prefabRegistry.require(prefabId);
   }
   _hasAuthorityDescendant(node) {
     const visit = (current) => current._children.some((child) => child.name.startsWith('py/') || visit(child));

@@ -1,12 +1,13 @@
-import { cloneAndFreeze, enumValue, nonemptyString } from '../internal.js';
+import { cloneAndFreeze, enumValue } from '../internal.js';
+import { assertPrefabId } from '../resource/prefab-definition.js';
 import { Component } from './component.js';
 
 export class AuthorityComponent extends Component {
   static typeId = 'engine.authority@1';
 
-  constructor({ key = 'authority', prefabType, transformMode, state = {} }) {
+  constructor({ key = 'authority', prefabId, transformMode, state = {} }) {
     super({ key, enabled: true, properties: {} });
-    this._prefabType = nonemptyString(prefabType, 'display-prefab-type-invalid');
+    this._prefabId = assertPrefabId(prefabId);
     this._transformMode = enumValue(
       transformMode,
       ['initial', 'live'],
@@ -15,7 +16,7 @@ export class AuthorityComponent extends Component {
     this._state = cloneAndFreeze(state, 'display-authority-state-invalid');
   }
 
-  get prefabType() { return this._prefabType; }
+  get prefabId() { return this._prefabId; }
   get transformMode() { return this._transformMode; }
   get state() { return this._state; }
   get drivesTransform() { return this._transformMode === 'live'; }
@@ -37,8 +38,8 @@ export class AuthorityComponent extends Component {
   }
 
   _setState(state) { this._state = cloneAndFreeze(state, 'display-authority-state-invalid'); }
-  _setPrefab(prefabType, state) {
-    this._prefabType = nonemptyString(prefabType, 'display-prefab-type-invalid');
+  _setPrefab(prefabId, state) {
+    this._prefabId = assertPrefabId(prefabId);
     this._setState(state);
   }
 }

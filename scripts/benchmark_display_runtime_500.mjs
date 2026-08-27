@@ -143,11 +143,11 @@ class EvidenceRenderer {
   dispose() { this.disposed = true; }
 }
 
-function prefab({ logicalType, withBehaviour }) {
+function prefab({ gameplayType, withBehaviour }) {
   return definePrefab({
     schema: PREFAB_DEFINITION_SCHEMA,
-    id: `benchmark.${logicalType}`,
-    logicalType,
+    id: `benchmark.${gameplayType}`,
+    gameplayType,
     root: {
       components: [],
       children: [
@@ -649,13 +649,10 @@ async function run({ quick }) {
   let observerDisconnectCount = 0;
   const componentRegistry = createComponentRegistry();
   componentRegistry.register({ ComponentClass: BenchmarkBehaviour });
-  const regular = prefab({ logicalType: 'benchmark.regular', withBehaviour: false });
-  const ticking = prefab({ logicalType: 'benchmark.ticking', withBehaviour: true });
+  const regular = prefab({ gameplayType: 'benchmark.regular', withBehaviour: false });
+  const ticking = prefab({ gameplayType: 'benchmark.ticking', withBehaviour: true });
   const sceneRegistry = createSceneRegistry([makeScene()]);
-  const prefabRegistry = createPrefabRegistry([
-    { sceneProfile: 'benchmark.profile', logicalType: regular.logicalType, definition: regular },
-    { sceneProfile: 'benchmark.profile', logicalType: ticking.logicalType, definition: ticking },
-  ]);
+  const prefabRegistry = createPrefabRegistry([regular, ticking]);
   const resourceRegistry = createResourceRegistry(RESOURCES);
   const hostElement = { getBoundingClientRect: () => ({ left: 0, top: 0, width: 1_280, height: 720 }) };
   const canvas = { getContext: () => ({}), toDataURL: () => 'data:image/png;base64,benchmark' };
@@ -695,7 +692,7 @@ async function run({ quick }) {
     runtime.authority.createNode({
       name: model[index].name,
       parentName: null,
-      prefabType: index < BEHAVIOUR_ROOTS ? ticking.logicalType : regular.logicalType,
+      prefabId: index < BEHAVIOUR_ROOTS ? ticking.id : regular.id,
       transformMode: index < INITIAL_ROOTS ? 'initial' : 'live',
       transform: model[index].transform,
       visible: true,

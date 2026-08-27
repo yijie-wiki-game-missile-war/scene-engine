@@ -1,6 +1,7 @@
 # Agent Instructions
 
 Before changing this repository, read `README.md` and the relevant current document in `docs/`.
+For practical use, integration, extension, testing, or debugging, also read `.agents/skills/scene-engine/SKILL.md`; it routes work to the correct public boundary and does not cover game-art production.
 
 `docs/runtime.md` is binding for simulation, scheduling, communication, recording, Replay, animation, and acceptance work.
 The sole logical clock is an ordered integer tick at exactly 60 Hz. Every changed transaction is committed independently;

@@ -167,7 +167,7 @@ def nodes(world: World) -> tuple[DisplayNode, ...]:
         DisplayNode(
             name="py/example",
             parent_name=None,
-            prefab_type="example.node",
+            prefab_id="example.node",
             transform_mode="live",
             transform=transform(world),
             visible=True,

@@ -18,7 +18,7 @@ export function baselineNode(name = 'py/unit-1', parentName = null) {
   return {
     name,
     parent_name: parentName,
-    prefab_type: 'unit.example',
+    prefab_id: 'unit.example',
     transform_mode: 'live',
     transform: transform(),
     visible: true,
@@ -50,7 +50,7 @@ export function checkpointPacket({
       kind: 'display_checkpoint',
       encoding: 'json',
       value: {
-        schema: 'scene-engine-display-checkpoint@2',
+        schema: 'scene-engine-display-checkpoint@3',
         scene_name: 'main',
         scene_catalog_hash: HASH_A,
         prefab_catalog_hash: HASH_B,
@@ -64,7 +64,7 @@ export function checkpointPacket({
 
 export function command(kind, commandSeq, sourceTick, fields = {}) {
   return {
-    schema: 'scene-engine-node-command@2',
+    schema: 'scene-engine-node-command@3',
     command_seq: commandSeq,
     source_tick: sourceTick,
     kind,
@@ -108,7 +108,7 @@ export function commitPacket({
       kind: 'display_command_stream',
       encoding: 'json',
       value: {
-        schema: 'scene-engine-display-command-stream@2',
+        schema: 'scene-engine-display-command-stream@3',
         base_command_seq: baseCommandSeq,
         last_command_seq: lastCommandSeq,
         commands,

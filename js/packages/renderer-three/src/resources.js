@@ -520,9 +520,16 @@ async function loadTexture(url, signal) {
   if (!response.ok) fail('three-texture-request-failed');
   const blob = await response.blob(); assertNotAborted(signal);
   if (typeof globalThis.createImageBitmap !== 'function') fail('three-image-bitmap-unavailable');
-  const image = await createImageBitmap(blob);
+  const image = await createImageBitmap(blob, {
+    imageOrientation: 'flipY',
+    premultiplyAlpha: 'none',
+    colorSpaceConversion: 'none',
+  });
   if (signal.aborted) { image.close?.(); assertNotAborted(signal); }
-  const texture = new THREE.Texture(image); texture.needsUpdate = true; return texture;
+  const texture = new THREE.Texture(image);
+  texture.flipY = false;
+  texture.needsUpdate = true;
+  return texture;
 }
 
 function createMaterialResource(descriptor, dependencies) {

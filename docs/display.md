@@ -7,12 +7,12 @@ alias, feature flag, or dual runtime.
 ## Release tuple
 
 ```text
-scene-engine Python                 0.7.0
-@scene-engine/client               0.8.0
-@scene-engine/display              0.2.0
-@scene-engine/renderer-three       0.9.1
+scene-engine Python                 0.8.0
+@scene-engine/client               0.9.0
+@scene-engine/display              0.3.0
+@scene-engine/renderer-three       0.9.2
 wire                               scene-engine-wire@2
-display                            scene-engine-display-node@2
+display                            scene-engine-display-node@3
 packet log                         scene-engine-packet-log@2
 ```
 
@@ -57,7 +57,7 @@ depth is 128.
 ## Authority and catalog boundary
 
 Python owns the stable name, existence, parent, local transform, visibility,
-logical `prefab_type`, and complete authority state of every `py/` Node. It
+exact `prefab_id`, and complete authority state of every `py/` Node. It
 selects one `scene_name` and sends no URL, model, texture, material, light,
 camera, pipeline, or Prefab-local structure.
 
@@ -109,7 +109,7 @@ session pointer. The ACK is returned only after that swap. Failure disposes the
 candidate and leaves the previous active session untouched. A successful
 replacement disposes the previous session.
 
-A commit contains a strictly ordered `scene-engine-node-command@2` stream. The
+A commit contains a strictly ordered `scene-engine-node-command@3` stream. The
 Engine, not the product, assigns one stream-global `command_seq` to each record
 and stamps the commit `source_tick`. Empty streams preserve the command cursor.
 
@@ -155,7 +155,7 @@ schema:
 }
 ```
 
-`DISPLAY_SUMMARY_SCHEMA` is exported by `@scene-engine/display@0.2.0`.
+`DISPLAY_SUMMARY_SCHEMA` is exported by `@scene-engine/display@0.3.0`.
 `nodeCount` reads `NodeIndex.size`; the other fields read the active Scene id,
 runtime revision, cursor and health. Summary creation never iterates Nodes or
 Components, captures the RenderSystem, clones resources, or invokes

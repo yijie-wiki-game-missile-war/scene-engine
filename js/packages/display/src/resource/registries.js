@@ -1,6 +1,6 @@
-import { nonemptyString, objectHasOwnMethod } from '../internal.js';
+import { objectHasOwnMethod } from '../internal.js';
 import { fail } from '../runtime/health.js';
-import { PrefabDefinition } from './prefab-definition.js';
+import { PrefabDefinition, assertPrefabId } from './prefab-definition.js';
 import { SceneDefinition } from './scene-definition.js';
 
 function assertFinalDefinition(definition, Base, methods) {
@@ -15,7 +15,7 @@ export class SceneRegistry {
   constructor() { this._definitions = new Map(); this._sealed = false; }
   register(definition) {
     if (this._sealed) fail('display-registry-sealed');
-    assertFinalDefinition(definition, SceneDefinition, ['compile', 'instantiate']);
+    assertFinalDefinition(definition, SceneDefinition, ['compile']);
     if (this._definitions.has(definition.id)) fail('display-scene-id-duplicate');
     this._definitions.set(definition.id, definition);
     return definition;
@@ -31,23 +31,20 @@ export class SceneRegistry {
 
 export class PrefabRegistry {
   constructor() { this._definitions = new Map(); this._sealed = false; }
-  register({ sceneProfile, logicalType, definition }) {
+  register(definition) {
     if (this._sealed) fail('display-registry-sealed');
-    assertFinalDefinition(definition, PrefabDefinition, ['compile', 'instantiate', 'validatePatch']);
-    const profile = nonemptyString(sceneProfile, 'display-scene-profile-invalid');
-    const type = nonemptyString(logicalType, 'display-prefab-type-invalid');
-    if (definition.logicalType !== type) fail('display-prefab-type-mismatch');
-    const key = `${profile}\u0000${type}`;
-    if (this._definitions.has(key)) fail('display-prefab-type-duplicate');
-    this._definitions.set(key, definition);
+    assertFinalDefinition(definition, PrefabDefinition, ['compile', 'validatePatch']);
+    const id = assertPrefabId(definition.id);
+    if (this._definitions.has(id)) fail('display-prefab-id-duplicate');
+    this._definitions.set(id, definition);
     return definition;
   }
   seal() { this._sealed = true; return this; }
-  get(sceneProfile, logicalType) {
-    return this._definitions.get(`${sceneProfile}\u0000${logicalType}`) ?? null;
+  get(prefabId) {
+    return this._definitions.get(assertPrefabId(prefabId)) ?? null;
   }
-  require(sceneProfile, logicalType) {
-    const result = this.get(sceneProfile, logicalType);
+  require(prefabId) {
+    const result = this.get(prefabId);
     if (!result) fail('display-prefab-missing');
     return result;
   }
@@ -60,6 +57,6 @@ export function createSceneRegistry(initial = []) {
 }
 export function createPrefabRegistry(initial = []) {
   const registry = new PrefabRegistry();
-  for (const entry of initial) registry.register(entry);
+  for (const definition of initial) registry.register(definition);
   return registry;
 }

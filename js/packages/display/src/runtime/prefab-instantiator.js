@@ -1,7 +1,7 @@
 import { cloneAndFreeze } from '../internal.js';
 import { copyWorldTransform } from '../math/transform.js';
 import { Node } from '../node/node.js';
-import { joinPrefabNodeName, joinSceneNodeName } from '../node/node-name.js';
+import { joinPrefabNodeName } from '../node/node-name.js';
 import { NodeGraph } from '../node/node-graph.js';
 import { NodeIndex } from '../node/node-index.js';
 import { NodeView } from '../node/node-view.js';
@@ -37,39 +37,6 @@ export class PrefabInstantiator {
     if (attach) this.attachScope(scope, componentContext);
     this._scopes.set(root, scope);
     return scope;
-  }
-
-  prepareSceneInstance({ instance, compiled, parent, attach = true,
-    componentContext = this._componentContext }) {
-    const root = new Node({
-      name: joinSceneNodeName(this._scene.name, instance.localName),
-      sceneToken: this._scene.sceneToken,
-      transform: instance.transform,
-      visible: instance.visible,
-    });
-    this._scene.nodeIndex.register(root);
-    try {
-      this._scene.nodeGraph.attach(root, parent);
-      const scope = this._prepare({
-        root,
-        compiled,
-        initialState: instance.state,
-        authorityOwnerName: null,
-        nodeIndex: this._scene.nodeIndex,
-        nodeGraph: this._scene.nodeGraph,
-        componentContext,
-        registerRoot: false,
-      });
-      scope.removeRootOnDispose = true;
-      if (attach) this.attachScope(scope, componentContext);
-      this._scopes.set(root, scope);
-      return scope;
-    } catch (error) {
-      if (root._graph === this._scene.nodeGraph && root._children.length === 0) this._scene.nodeGraph.detach(root);
-      if (this._scene.nodeIndex.get(root.name) === root) this._scene.nodeIndex.unregister(root);
-      root._markDisposed();
-      throw error;
-    }
   }
 
   attachScope(scope, componentContext = this._componentContext) {

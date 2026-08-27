@@ -21,7 +21,7 @@ Exact state layouts:
 - ACK/error: no attachments.
 
 Checkpoint and commit headers carry `stream_id`, `commit_seq`, `source_tick`, `world_revision`, `last_command_seq`,
-`world_codec`, and `display_codec=scene-engine-display-node@2`. Commit adds cause and causation ID. ACK is cumulative over
+`world_codec`, and `display_codec=scene-engine-display-node@3`. Commit adds cause and causation ID. ACK is cumulative over
 `stream_id`, `commit_seq`, and `last_command_seq`.
 
 The Display checkpoint schema contains `scene_name`, three lowercase SHA-256 catalog identities, its command cursor, and a

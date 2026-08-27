@@ -1,17 +1,20 @@
 # Display repair and Showcase cutover report
 
+> Historical closeout: this report records the 0.9.1 renderer tuple. The current
+> renderer patch is 0.9.2; see `docs/renderer-three-0.9.2-patch.md`.
+
 Release state: `READY`.
 
 ## Released tuple
 
 ```text
-scene-engine Python              0.7.0
-@scene-engine/client             0.8.0
-@scene-engine/display            0.2.0
+scene-engine Python                 0.8.0
+@scene-engine/client               0.9.0
+@scene-engine/display              0.3.0
 @scene-engine/renderer-three     0.9.1
 @missile-war-art/web3d           0.3.0
 wire                             scene-engine-wire@2
-display codec                    scene-engine-display-node@2
+display codec                    scene-engine-display-node@3
 packet log                       scene-engine-packet-log@2
 browser products                 production + read-only Showcase
 ```
@@ -40,7 +43,7 @@ The `main` catalog identity remains frozen to scene
 `dc7e8a975d55636722e54203c54fb3148703d2206e9d26033e0fe0e05baa6673`, Prefab
 `753d6cb688677072452a551d9686f7f36d8d11dabe5e2534dacd459b87d254d3`, and state
 `61578f58f0ffd077cbc6da6d65967d72bd59a612bee9f280a6a8511996c3b46d`.
-Python stays at 0.7.0; the wire fields, ACK packet, authority commands, tick
+Python stays on the current 0.8 line; the wire fields, ACK packet, authority commands, tick
 ownership, and catalog identity contract are unchanged.
 
 ## Runtime result
@@ -165,22 +168,24 @@ Reset, Fullscreen wiring, and no Canvas selection passed. Its SHA-256 is
 The final Web3D build contains 84 files, 77 emitted media files, 13 inline media
 items, and exactly `index.html` plus `showcase.html` as entry pages. Build
 SHA-256 is
-`c05d04b6080ae4132b0c7450e36095b978106a639760f155e10960104cae3adc`.
+`9f1e02cac13ad203461780407ff7e7160f704aff86c9dfcac791e2feeabddbef`.
 The removed browser product has no source workspace or build directory.
 
 ## Closed artifacts
 
 | Artifact | SHA-256 |
 | --- | --- |
-| `scene-engine-client-0.8.0.tgz` | `8e52022a9ab5589423b0ce0ba0d97e10622c440f0f532305bb42b949d5d00e0e` |
-| `scene-engine-display-0.2.0.tgz` | `38460bd3963f6a0683a73c7190a72af50e873d0366ca36d77bcdb060c7f33d48` |
-| `scene-engine-renderer-three-0.9.1.tgz` | `5135d9b5b050c94ea556feaf6990363e2832798030e1d0aaabe6abbb7b73950d` |
+| `scene-engine-client-0.9.0.tgz` | `6a55cce126e6fa53ac9a9742af24d5eb018e34a0fbdb89d1c62430eb1ba776e7` |
+| `scene-engine-display-0.3.0.tgz` | `537236091d4cd4805624e018d3de7d1fa127b4bc42afdb2dbfa3671f31b9c8d3` |
+| `scene-engine-renderer-three-0.9.2.tgz` | `70f16f844915ca63bcffe4a9deaafb87632ae5e41200bb5ec9ae162b40aaf7d8` |
+| `scene_engine-0.8.0-py3-none-any.whl` | `3bdba2201f8239c63653c02b43c5169aab6c8d17d4d085e295f7e06824087856` |
 
-Scene Engine `dist` and Arts `vendor` contain only this tuple and are
-byte-identical. Lock SHA-256 values are Scene Engine npm
-`3f43865900616d045e88a40a1b1c5923738d66ed918ccb8cc3f0b9738b35dd28`
+Scene Engine `dist` contains the npm tuple plus the Python wheel. Arts `vendor`
+contains the npm tuple and is byte-identical for those tarballs. Lock SHA-256
+values are Scene Engine npm
+`d09b32cbea06c2e0cfb47076440ed0b134c14a6b5bcfb4332433fd8784404ad5`
 and Arts npm
-`0e209f72614f464248916bc1942c2a41e484bfbdf54978df175dacfd83c87d86`.
+`0f9a9e9b184e933eab6c0d638a402de0504a98f395944af34d6bcae1a7ec064b`.
 
 All P0 architecture, ACK, correctness, batching, browser, lifecycle, artifact,
 clean-install, build, and removal gates are closed. The 19 asset-specific

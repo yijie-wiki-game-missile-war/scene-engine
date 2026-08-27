@@ -31,10 +31,10 @@ from scene_engine.wire import WIRE_SCHEMA, read_engine_packet  # noqa: E402
 
 
 VERSIONS = {
-    "python": "0.7.0",
-    "client": "0.8.0",
-    "display": "0.2.0",
-    "renderer": "0.9.1",
+    "python": "0.8.0",
+    "client": "0.9.0",
+    "display": "0.3.0",
+    "renderer": "0.9.2",
 }
 ARTIFACTS = (
     f"scene-engine-client-{VERSIONS['client']}.tgz",
@@ -306,7 +306,7 @@ def verify_versions() -> None:
     require(scene_engine.__version__ == VERSIONS["python"], "Python import version mismatch")
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     require(
-        re.search(r'^version = "0\.7\.0"$', pyproject, re.MULTILINE) is not None,
+        re.search(r'^version = "0\.8\.0"$', pyproject, re.MULTILINE) is not None,
         "Python project version mismatch",
     )
     package(
@@ -325,10 +325,10 @@ def verify_versions() -> None:
         version=VERSIONS["renderer"],
     )
     require(WIRE_SCHEMA == "scene-engine-wire@2", "wire identity mismatch")
-    require(DISPLAY_CODEC == "scene-engine-display-node@2", "Display codec mismatch")
-    require(DISPLAY_CHECKPOINT_SCHEMA.endswith("@2"), "Display checkpoint mismatch")
-    require(DISPLAY_COMMAND_STREAM_SCHEMA.endswith("@2"), "Display stream mismatch")
-    require(DISPLAY_COMMAND_SCHEMA.endswith("@2"), "Display command mismatch")
+    require(DISPLAY_CODEC == "scene-engine-display-node@3", "Display codec mismatch")
+    require(DISPLAY_CHECKPOINT_SCHEMA.endswith("@3"), "Display checkpoint mismatch")
+    require(DISPLAY_COMMAND_STREAM_SCHEMA.endswith("@3"), "Display stream mismatch")
+    require(DISPLAY_COMMAND_SCHEMA.endswith("@3"), "Display command mismatch")
     require(PACKET_LOG_SCHEMA == "scene-engine-packet-log@2", "packet-log mismatch")
 
 
@@ -401,10 +401,10 @@ def verify_artifacts() -> None:
 def verify_python_game() -> None:
     root = WORKSPACE / "python-game"
     pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
-    require(re.search(r'^version = "0\.7\.0"$', pyproject, re.MULTILINE), "game version mismatch")
-    require('"scene-engine==0.7.0"' in pyproject, "game Engine dependency mismatch")
+    require(re.search(r'^version = "0\.8\.0"$', pyproject, re.MULTILINE), "game version mismatch")
+    require('"scene-engine==0.8.0"' in pyproject, "game Engine dependency mismatch")
     wheels = sorted((root / "vendor").glob("scene_engine-*.whl"))
-    require(len(wheels) == 1 and "0.7.0" in wheels[0].name, "game wheel set is not exact")
+    require(len(wheels) == 1 and "0.8.0" in wheels[0].name, "game wheel set is not exact")
     wheel_files = python_wheel_package_files(wheels[0], package_name="scene_engine")
     require("scene.py" not in wheel_files, "wheel contains removed module")
     require("display.py" in wheel_files, "wheel lacks Display module")

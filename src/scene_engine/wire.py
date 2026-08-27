@@ -21,7 +21,7 @@ from .errors import ConfigurationError, WireError
 
 WIRE_SCHEMA = "scene-engine-wire@2"
 WORLD_TREE_SCHEMA = "scene-engine-json-tree@1"
-DISPLAY_CODEC = "scene-engine-display-node@2"
+DISPLAY_CODEC = "scene-engine-display-node@3"
 WIRE_MAGIC = b"SENG"
 WIRE_MAJOR_VERSION = 2
 _PACKET_HEADER = struct.Struct("<4sBBHIHH")

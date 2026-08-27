@@ -28,7 +28,7 @@ function createRecord(name, x = 0) {
   return {
     name,
     parent_name: null,
-    prefab_type: 'benchmark.node',
+    prefab_id: 'benchmark.node',
     transform_mode: 'live',
     transform: transform(x),
     visible: true,
@@ -57,7 +57,7 @@ function checkpointPacket(nodes) {
       kind: 'display_checkpoint',
       encoding: 'json',
       value: {
-        schema: 'scene-engine-display-checkpoint@2',
+        schema: 'scene-engine-display-checkpoint@3',
         scene_name: 'benchmark',
         ...HASHES,
         last_command_seq: 0,
@@ -69,7 +69,7 @@ function checkpointPacket(nodes) {
 
 function commitPacket({ commitSeq, baseCommandSeq, commands }) {
   const records = commands.map((command, index) => ({
-    schema: 'scene-engine-node-command@2',
+    schema: 'scene-engine-node-command@3',
     command_seq: baseCommandSeq + index + 1,
     source_tick: commitSeq,
     ...command,
@@ -103,7 +103,7 @@ function commitPacket({ commitSeq, baseCommandSeq, commands }) {
       kind: 'display_command_stream',
       encoding: 'json',
       value: {
-        schema: 'scene-engine-display-command-stream@2',
+        schema: 'scene-engine-display-command-stream@3',
         base_command_seq: baseCommandSeq,
         last_command_seq: lastCommandSeq,
         commands: records,
@@ -144,7 +144,7 @@ function createBenchmarkSessionFactory(state) {
       replaceNodePrefab(record) {
         const node = requireNode(record.name);
         state.nodes.set(record.name, {
-          ...node, prefabType: record.prefabType, state: record.state,
+          ...node, prefabId: record.prefabId, state: record.state,
         });
       },
       removeNode(record) {

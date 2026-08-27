@@ -1,12 +1,27 @@
-import { assertSynchronous, cloneAndFreeze, exactKeys, nonemptyString, plainRecord } from '../internal.js';
+import { assertSynchronous, cloneAndFreeze, exactKeys, plainRecord } from '../internal.js';
 import { IDENTITY_TRANSFORM, isIdentityTransform, normalizeTransform } from '../math/transform.js';
 import { assertLocalPath } from '../node/node-name.js';
 import { fail } from '../runtime/health.js';
 import { Resource } from './resource.js';
 import { prepareComponentPropertiesPatch } from '../component/component-registry.js';
 
-export const PREFAB_DEFINITION_SCHEMA = 'scene-engine-prefab-definition@1';
+export const PREFAB_DEFINITION_SCHEMA = 'scene-engine-prefab-definition@2';
 const EMPTY_PATCH = Object.freeze({ nodes: Object.freeze({}), components: Object.freeze({}) });
+const ENCODER = new TextEncoder();
+const PREFAB_ID = /^[a-z0-9][a-z0-9._@-]*(?:\/[a-z0-9][a-z0-9._@-]*)*$/u;
+const GAMEPLAY_TYPE = /^[a-z0-9][a-z0-9._-]*$/u;
+
+export function assertPrefabId(value) {
+  if (typeof value !== 'string' || ENCODER.encode(value).byteLength > 192
+      || !PREFAB_ID.test(value)) fail('display-prefab-id-invalid');
+  return value;
+}
+
+function gameplayType(value) {
+  if (typeof value !== 'string' || ENCODER.encode(value).byteLength > 192
+      || !GAMEPLAY_TYPE.test(value)) fail('display-prefab-gameplay-type-invalid');
+  return value;
+}
 
 function validateComponentSet(components, componentRegistry) {
   const keys = new Set(); const types = new Set(); let drives = false;
@@ -25,20 +40,20 @@ function validateComponentSet(components, componentRegistry) {
 
 export class PrefabDefinition extends Resource {
   constructor(value) {
-    const record = exactKeys(value, ['schema', 'id', 'logicalType', 'root'], ['revision', 'resolveState'],
+    const record = exactKeys(value, ['schema', 'id', 'gameplayType', 'root'], ['revision', 'resolveState'],
       'display-prefab-definition-invalid');
     if (record.schema !== PREFAB_DEFINITION_SCHEMA) fail('display-prefab-definition-invalid');
     if (Object.hasOwn(record, 'resolveState') && typeof record.resolveState !== 'function') {
       fail('display-prefab-resolver-invalid');
     }
     const { resolveState, ...plain } = record;
-    super({ id: nonemptyString(record.id, 'display-prefab-id-invalid'), schema: record.schema,
+    super({ id: assertPrefabId(record.id), schema: record.schema,
       revision: record.revision ?? 0, descriptor: plain });
-    this._logicalType = nonemptyString(record.logicalType, 'display-prefab-type-invalid');
+    this._gameplayType = gameplayType(record.gameplayType);
     this._resolver = resolveState ?? (() => EMPTY_PATCH);
     Object.freeze(this);
   }
-  get logicalType() { return this._logicalType; }
+  get gameplayType() { return this._gameplayType; }
 
   compile({ componentRegistry, resourceRegistry }) {
     resourceRegistry.validateReferences();
@@ -79,7 +94,7 @@ export class PrefabDefinition extends Resource {
       return compiled;
     };
     const root = compileNode(source.root, null, true);
-    return Object.freeze({ definition: this, logicalType: this.logicalType, root,
+    return Object.freeze({ definition: this, id: this.id, gameplayType: this.gameplayType, root,
       nodes: Object.freeze(nodes), componentRegistry, resourceRegistry });
   }
 
@@ -135,7 +150,6 @@ export class PrefabDefinition extends Resource {
     });
   }
 
-  instantiate(scope) { return scope.instantiator.instantiateCompiled(scope, this.compile(scope.registries)); }
 }
 
 export function definePrefab(value) { return new PrefabDefinition(value); }

@@ -83,7 +83,7 @@ function benchmarkPrefab() {
   return definePrefab({
     schema: PREFAB_DEFINITION_SCHEMA,
     id: 'benchmark.authority-unit',
-    logicalType: 'benchmark.authority-unit',
+    gameplayType: 'benchmark.authority-unit',
     root: {
       components: [],
       children: [{
@@ -165,7 +165,7 @@ function baselineNodes() {
   return Array.from({ length: AUTHORITY_ROOTS }, (_, index) => ({
     name: `py/benchmark-${index}`,
     parent_name: null,
-    prefab_type: 'benchmark.authority-unit',
+    prefab_id: 'benchmark.authority-unit',
     transform_mode: 'live',
     transform: transform(index),
     visible: true,
@@ -192,7 +192,7 @@ function checkpointPacket() {
     kind: 'display_checkpoint',
     encoding: 'json',
     value: {
-      schema: 'scene-engine-display-checkpoint@2',
+      schema: 'scene-engine-display-checkpoint@3',
       scene_name: 'benchmark',
       scene_catalog_hash: SCENE_CATALOG_HASH,
       prefab_catalog_hash: PREFAB_CATALOG_HASH,
@@ -206,7 +206,7 @@ function checkpointPacket() {
 function commitPacket(commitSeq) {
   const index = (commitSeq - 1) % AUTHORITY_ROOTS;
   const command = {
-    schema: 'scene-engine-node-command@2',
+    schema: 'scene-engine-node-command@3',
     command_seq: commitSeq,
     source_tick: commitSeq,
     kind: 'node-set-transform',
@@ -239,7 +239,7 @@ function commitPacket(commitSeq) {
     kind: 'display_command_stream',
     encoding: 'json',
     value: {
-      schema: 'scene-engine-display-command-stream@2',
+      schema: 'scene-engine-display-command-stream@3',
       base_command_seq: commitSeq - 1,
       last_command_seq: commitSeq,
       commands: [command],
@@ -260,11 +260,7 @@ function createDisplaySessionFactory(evidence) {
     const fakeBackends = [];
     const runtime = createDisplayRuntime({
       sceneRegistry: createSceneRegistry([benchmarkScene()]),
-      prefabRegistry: createPrefabRegistry([{
-        sceneProfile: 'benchmark.profile',
-        logicalType: prefab.logicalType,
-        definition: prefab,
-      }]),
+      prefabRegistry: createPrefabRegistry([prefab]),
       resourceRegistry: createResourceRegistry(resources()),
       componentRegistry: createComponentRegistry(),
       createRenderBackend() {

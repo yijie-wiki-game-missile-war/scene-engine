@@ -375,7 +375,7 @@ function authorityPayload(command) {
       return Object.freeze({
         name: command.name,
         parentName: command.parentName,
-        prefabType: command.prefabType,
+        prefabId: command.prefabId,
         transformMode: command.transformMode,
         transform: command.transform,
         visible: command.visible,
@@ -392,7 +392,7 @@ function authorityPayload(command) {
     case 'node-replace-prefab':
       return Object.freeze({
         name: command.name,
-        prefabType: command.prefabType,
+        prefabId: command.prefabId,
         state: command.state,
       });
     case 'node-remove':

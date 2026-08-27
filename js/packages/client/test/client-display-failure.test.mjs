@@ -78,15 +78,11 @@ test('real DisplayRuntime invalidates a partially mutated failed commit without 
       const resourceRegistry = createResourceRegistry([]);
       const prefab = definePrefab({
         schema: PREFAB_DEFINITION_SCHEMA,
-        id: 'client-test.unit',
-        logicalType: 'unit.example',
+        id: 'unit.example',
+        gameplayType: 'unit.example',
         root: { components: [], children: [] },
       });
-      const prefabRegistry = createPrefabRegistry([{
-        sceneProfile: 'client-test',
-        logicalType: prefab.logicalType,
-        definition: prefab,
-      }]);
+      const prefabRegistry = createPrefabRegistry([prefab]);
       const sceneRegistry = createSceneRegistry([defineScene({
         schema: SCENE_DEFINITION_SCHEMA,
         id: sceneName,

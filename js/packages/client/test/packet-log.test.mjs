@@ -14,7 +14,7 @@ test('validates packet-log@2 command cursor and replays through sole Authority p
   assert.equal(log.manifest.wire_schema, 'scene-engine-wire@2');
   assert.equal(log.entries.length, 4);
   assert.equal(log.manifest.checkpoint_count, 2);
-  assert.deepEqual(log.entries.map(({ last_command_seq: value }) => value), [0, 2, 2, 2]);
+  assert.deepEqual(log.entries.map(({ last_command_seq: value }) => value), [0, 7, 7, 7]);
   assert.deepEqual(log.records.map(({ packet }) => packet.kind), [
     'engine.checkpoint', 'engine.commit', 'engine.commit', 'engine.checkpoint',
   ]);
@@ -26,11 +26,12 @@ test('validates packet-log@2 command cursor and replays through sole Authority p
     client.applyPacket(record.rawBytes);
   }
   assert.equal(client.currentCommit().commitSeq, 2);
-  assert.equal(client.currentCommit().lastCommandSeq, 2);
-  assert.equal(client.currentWorldState().state.value, 8);
+  assert.equal(client.currentCommit().lastCommandSeq, 7);
+  assert.equal(client.currentWorldState().state.stable.value, 8);
   assert.deepEqual(sessions[0].log.map(([kind]) => kind), [
-    'installScene', 'createNode', 'activate', 'start', 'summary',
-    'begin', 'setNodeTransform', 'setNodeState', 'seal', 'summary',
+    'installScene', 'createNode', 'createNode', 'activate', 'start', 'summary',
+    'begin', 'createNode', 'setNodeTransform', 'setNodeParent', 'setNodeVisible',
+    'setNodeState', 'replaceNodePrefab', 'removeNode', 'seal', 'summary',
     'begin', 'seal', 'summary',
   ]);
   assert.deepEqual(log.packetAt(0), log.records[0].rawBytes);
@@ -44,7 +45,7 @@ test('seek checkpoint constructs a fresh client/runtime at the indexed command c
   const client = new SceneEngineClient({ createDisplaySession: factory });
   client.applyPacket(checkpoint.rawBytes);
   assert.equal(client.currentCommit().commitSeq, 2);
-  assert.equal(client.currentCommit().lastCommandSeq, 2);
+  assert.equal(client.currentCommit().lastCommandSeq, 7);
   assert.equal(sessions.length, 1);
 });
 

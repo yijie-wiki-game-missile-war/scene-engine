@@ -65,10 +65,10 @@ export class ResourceRegistry {
   get size() { return this._resources.size; }
   register(value) {
     if (this._sealed) fail('display-registry-sealed');
-    const descriptor = value instanceof Resource ? value.describe() : normalizeDescriptor(value);
-    const id = value instanceof Resource ? value.id : descriptor.id;
+    const descriptor = normalizeDescriptor(value);
+    const id = descriptor.id;
     if (this._resources.has(id)) fail('display-resource-id-duplicate');
-    const resource = value instanceof Resource ? value : new Resource({
+    const resource = new Resource({
       id,
       schema: descriptor.schema ?? `scene-engine-${descriptor.kind}-resource@1`,
       revision: descriptor.revision ?? 0,

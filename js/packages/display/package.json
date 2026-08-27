@@ -1,6 +1,6 @@
 {
   "name": "@scene-engine/display",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Renderer-neutral Scene Engine node, component, scene, prefab, and display runtime",
   "type": "module",
   "sideEffects": false,

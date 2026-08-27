@@ -97,18 +97,19 @@ export class SceneDefinition extends Resource {
       });
     });
     const prefabInstances = source.prefabInstances.map((value) => {
-      const record = exactKeys(value, ['localName', 'parentLocalName', 'prefabType'],
+      const record = exactKeys(value, ['localName', 'parentLocalName', 'prefabId'],
         ['transform', 'visible', 'state'], 'display-scene-prefab-instance-invalid');
       const localName = assertLocalPath(record.localName);
       if (allLocalNames.has(localName)) fail('display-scene-local-name-duplicate');
       allLocalNames.add(localName);
-      const definition = prefabRegistry.require(sceneProfile, record.prefabType);
+      const definition = prefabRegistry.require(record.prefabId);
       const visible = Object.hasOwn(record, 'visible') ? record.visible : true;
       if (typeof visible !== 'boolean') fail('display-scene-prefab-instance-invalid');
       return Object.freeze({
         localName,
         parentLocalName: record.parentLocalName === null ? null : assertLocalPath(record.parentLocalName),
-        prefabType: definition.logicalType,
+        prefabId: definition.id,
+        gameplayType: definition.gameplayType,
         definition,
         compiledPrefab: definition.compile({ componentRegistry, resourceRegistry }),
         transform: normalizeTransform(record.transform ?? IDENTITY_TRANSFORM),
@@ -134,7 +135,6 @@ export class SceneDefinition extends Resource {
     });
   }
 
-  instantiate(scene) { return scene.loader.installCompiled(this.compile(scene.registries)); }
 }
 
 export function defineScene(value) { return new SceneDefinition(value); }
