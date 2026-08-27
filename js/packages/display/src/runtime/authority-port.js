@@ -2,7 +2,7 @@ import { AuthorityComponent } from '../component/authority-component.js';
 import { cloneAndFreeze, exactKeys } from '../internal.js';
 import { normalizeTransform } from '../math/transform.js';
 import { Node } from '../node/node.js';
-import { assertNodePrefix } from '../node/node-name.js';
+import { AUTHORITY_PREFIX, assertNodePrefix } from '../node/node-name.js';
 import { fail } from './health.js';
 
 export class AuthorityPort {
@@ -137,7 +137,7 @@ export class AuthorityPort {
         'shadow-placement-rejected'));
       throw error;
     }
-    const authorityChildren = node._children.filter((child) => child.name.startsWith('py/'));
+    const authorityChildren = node._children.filter((child) => child.name.startsWith(AUTHORITY_PREFIX));
 
     for (const child of authorityChildren) this._scene.nodeGraph.reparent(child, this._scene.authorityRootNode);
     this._onCleanupErrors?.(this._prefabInstantiator.disposeScope(oldScope, 'prefab-replaced'));
@@ -181,7 +181,7 @@ export class AuthorityPort {
     return this._scene.registries.prefabRegistry.require(prefabId);
   }
   _hasAuthorityDescendant(node) {
-    const visit = (current) => current._children.some((child) => child.name.startsWith('py/') || visit(child));
+    const visit = (current) => current._children.some((child) => child.name.startsWith(AUTHORITY_PREFIX) || visit(child));
     return visit(node);
   }
 }

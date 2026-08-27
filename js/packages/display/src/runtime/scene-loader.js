@@ -1,5 +1,5 @@
 import { Node } from '../node/node.js';
-import { joinSceneNodeName } from '../node/node-name.js';
+import { AUTHORITY_ROOT_NAME, SCENE_ROOT_NAME, joinSceneNodeName } from '../node/node-name.js';
 import { fail } from './health.js';
 
 export class SceneLoader {
@@ -18,12 +18,12 @@ export class SceneLoader {
     const created = [];
     try {
       const root = new Node({
-        name: 'sys/scene-root',
+        name: SCENE_ROOT_NAME,
         sceneToken: this._scene.sceneToken,
         transform: undefined,
       });
       const authorityRoot = new Node({
-        name: 'sys/authority-root',
+        name: AUTHORITY_ROOT_NAME,
         sceneToken: this._scene.sceneToken,
         transform: undefined,
       });
@@ -136,7 +136,7 @@ export class SceneLoader {
 
   _rollback(created) {
     const errors = [];
-    const root = created.find((node) => node.name === 'sys/scene-root');
+    const root = created.find((node) => node.name === SCENE_ROOT_NAME);
     const ordered = root?._graph === this._scene.nodeGraph
       ? this._scene.nodeGraph.childBeforeParent(root) : [...created].reverse();
     for (const node of ordered) {

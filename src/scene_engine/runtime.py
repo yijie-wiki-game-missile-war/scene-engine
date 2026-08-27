@@ -45,6 +45,7 @@ CREATED = "created"
 RUNNING = "running"
 STOPPED = "stopped"
 FATAL = "fatal"
+TICKS_PER_SECOND = 60
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,10 +96,18 @@ class EngineInput:
         if not isinstance(self.args, dict):
             raise ConfigurationError("input args must be a JSON object")
         validate_json_value(self.args)
+        object.__setattr__(self, "args", _copy_json_value(self.args))
 
 
 @dataclass(frozen=True, slots=True)
 class MutationResult:
+    """Product mutation outcome.
+
+    ``no-op`` and ``rejected`` may carry a ``reason_code`` and
+    ``result_payload`` for client diagnostics; a ``changed`` mutation is
+    described by its commit records and can carry neither.
+    """
+
     status: str
     detail: Any = None
     reason_code: str | None = None
@@ -264,7 +273,14 @@ class EngineRecorder(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class RuntimeConfig:
-    ticks_per_second: int = 60
+    """Bounded runtime limits.
+
+    The 60 Hz rate is fixed by the runtime contract; ``ticks_per_second``
+    exists so configurations state the rate explicitly and accepts only
+    ``TICKS_PER_SECOND``.
+    """
+
+    ticks_per_second: int = TICKS_PER_SECOND
     maximum_ticks_per_pump: int = 120
     maximum_inputs_per_pump: int = 256
     maximum_clients: int = 1024
@@ -277,8 +293,13 @@ class RuntimeConfig:
     recording_checkpoint_interval_commits: int = 0
 
     def __post_init__(self) -> None:
-        if self.ticks_per_second != 60 or isinstance(self.ticks_per_second, bool):
-            raise ConfigurationError("ticks_per_second must equal 60")
+        if (
+            self.ticks_per_second != TICKS_PER_SECOND
+            or isinstance(self.ticks_per_second, bool)
+        ):
+            raise ConfigurationError(
+                "ticks_per_second must equal 60; the runtime contract fixes the rate"
+            )
         for field in (
             "maximum_ticks_per_pump",
             "maximum_inputs_per_pump",
@@ -329,6 +350,7 @@ class PumpResult:
     current_tick: int
     commit_seq: int
     caught_up: bool
+    backlog_truncated: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -354,7 +376,12 @@ class _QueuedInput:
 
 
 class SceneEngineRuntime:
-    """Own one mutable world, integer clock, commit stream, and all sessions."""
+    """Own one mutable world, integer clock, commit stream, and all sessions.
+
+    Fatal transitions are one-way: a failed transaction may leave the world
+    with counters ahead of the published stream, so after ``FATAL`` the world
+    must be discarded and rebuilt from a checkpoint, never reused.
+    """
 
     def __init__(
         self,
@@ -445,6 +472,15 @@ class SceneEngineRuntime:
 
     @property
     def health(self) -> RuntimeHealth:
+        """Best-effort snapshot; never waits when another operation is active."""
+        acquired = self._operation_lock.acquire(blocking=False)
+        try:
+            return self._build_health()
+        finally:
+            if acquired:
+                self._operation_lock.release()
+
+    def _build_health(self) -> RuntimeHealth:
         return RuntimeHealth(
             self._state,
             self._stream_id,
@@ -497,7 +533,7 @@ class SceneEngineRuntime:
                 if self._state == FATAL:
                     raise RuntimeFatalError("runtime became fatal while processing input") from self._fatal_cause
 
-            scaled = (now - self._clock_origin) * self._config.ticks_per_second
+            scaled = (now - self._clock_origin) * TICKS_PER_SECOND
             if not math.isfinite(scaled):
                 raise ConfigurationError("clock range is too large")
             target_tick = self._initial_tick + int(math.floor(scaled + 1e-9))
@@ -519,6 +555,7 @@ class SceneEngineRuntime:
                 self._source_tick,
                 self._commit_seq,
                 remaining == 0,
+                attempts < overdue,
             )
 
     def client_connected(self, client_id: Any) -> None:
@@ -648,7 +685,7 @@ class SceneEngineRuntime:
             )
             mutation = self._program.step(
                 self._world,
-                TickContext(proposed, self._config.ticks_per_second),
+                TickContext(proposed, TICKS_PER_SECOND),
             )
             if not isinstance(mutation, MutationResult) or mutation.status != "changed":
                 raise RuntimeError("tick step must return a changed MutationResult")
@@ -658,7 +695,7 @@ class SceneEngineRuntime:
             product = self._program.build_commit(
                 self._world,
                 mutation,
-                CommitContext(proposed, self._config.ticks_per_second),
+                CommitContext(proposed, TICKS_PER_SECOND),
             )
             packet = self._encode_product_commit(proposed, product)
             self._record_state_packet(packet.raw_bytes, checkpoint=False)
@@ -718,7 +755,7 @@ class SceneEngineRuntime:
             product = self._program.build_commit(
                 self._world,
                 mutation,
-                CommitContext(proposed, self._config.ticks_per_second),
+                CommitContext(proposed, TICKS_PER_SECOND),
             )
             packet = self._encode_product_commit(proposed, product)
             self._record_state_packet(packet.raw_bytes, checkpoint=False)
@@ -796,7 +833,7 @@ class SceneEngineRuntime:
             self._commit_seq,
             self._source_tick,
             self._world_revision,
-            self._config.ticks_per_second,
+            TICKS_PER_SECOND,
         )
         product = self._program.build_checkpoint(self._world, context)
         if not isinstance(product, ProductCheckpoint):
@@ -957,12 +994,6 @@ class SceneEngineRuntime:
         if self._state != RUNNING:
             raise RuntimeStateError("runtime is not running")
 
-    def _require_available(self) -> None:
-        if self._state == FATAL:
-            raise RuntimeFatalError("runtime is fatal") from self._fatal_cause
-        if self._state == STOPPED:
-            raise RuntimeStateError("runtime is stopped")
-
     def _mark_fatal(self, exc: BaseException) -> None:
         self._state = FATAL
         self._fatal_cause = exc
@@ -974,6 +1005,14 @@ class SceneEngineRuntime:
                 close_incomplete()
             except Exception:
                 pass
+
+
+def _copy_json_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _copy_json_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_copy_json_value(item) for item in value]
+    return value
 
 
 def _counter(value: Any, field: str) -> int:
@@ -1048,6 +1087,7 @@ __all__ = [
     "RuntimeConfig",
     "RuntimeHealth",
     "SceneEngineRuntime",
+    "TICKS_PER_SECOND",
     "TickContext",
     "WorldCounters",
 ]

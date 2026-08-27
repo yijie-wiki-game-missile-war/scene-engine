@@ -349,8 +349,9 @@ export function parseCanonicalJSON(value, { maximumDepth = 256 } = {}) {
     if (/[.eE0-9]/u.test(source[cursor] ?? '')) fail('json-number-invalid');
     const result = Number(match[0]);
     if (!Number.isFinite(result)) fail('json-number-nonfinite');
-    if (!/[.eE]/u.test(match[0]) && !Number.isSafeInteger(result)) {
-      fail('json-number-unsafe-integer');
+    if (!/[.eE]/u.test(match[0])) {
+      if (Object.is(result, -0)) return 0;
+      if (!Number.isSafeInteger(result)) fail('json-number-unsafe-integer');
     }
     return result;
   };
@@ -408,6 +409,9 @@ export function encodeJSON(value, { sortKeys = true } = {}) {
     if (typeof item === 'number') {
       if (Object.is(item, -0)) return '0';
       if (Number.isInteger(item) && !Number.isSafeInteger(item)) {
+        // JSON.stringify silently rounds integers beyond 2^53; the
+        // exponential token keeps the wire value a finite float, which the
+        // canonical Python decoder accepts.
         return item.toExponential().replace(/e\+?(-?)0*(\d+)/u, 'e$1$2');
       }
       return JSON.stringify(item);

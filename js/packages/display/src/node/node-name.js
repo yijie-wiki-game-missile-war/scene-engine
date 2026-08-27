@@ -2,6 +2,9 @@ import { nonemptyString } from '../internal.js';
 import { fail } from '../runtime/health.js';
 
 export const NODE_PREFIXES = Object.freeze(['sys', 'scene', 'py', 'prefab']);
+export const SCENE_ROOT_NAME = 'sys/scene-root';
+export const AUTHORITY_ROOT_NAME = 'sys/authority-root';
+export const AUTHORITY_PREFIX = 'py/';
 const SEGMENT = /^[a-z0-9][a-z0-9._-]*$/;
 const MAX_BYTES = 192;
 

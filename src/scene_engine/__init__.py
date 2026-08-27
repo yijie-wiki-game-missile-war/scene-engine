@@ -35,6 +35,7 @@ from .runtime import (
     RuntimeConfig,
     RuntimeHealth,
     SceneEngineRuntime,
+    TICKS_PER_SECOND,
     TickContext,
     WorldCounters,
 )
@@ -70,6 +71,7 @@ __all__ = [
     "RuntimeStateError",
     "SceneEngineError",
     "SceneEngineRuntime",
+    "TICKS_PER_SECOND",
     "SessionBackpressureError",
     "SessionError",
     "SystemMonotonicClock",

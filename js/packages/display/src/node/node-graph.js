@@ -1,4 +1,5 @@
 import { composeWorldTransform } from '../math/transform.js';
+import { AUTHORITY_PREFIX, AUTHORITY_ROOT_NAME, SCENE_ROOT_NAME } from './node-name.js';
 import { fail } from '../runtime/health.js';
 
 export class NodeGraph {
@@ -39,7 +40,7 @@ export class NodeGraph {
   reparent(node, parent) {
     this._requireAttached(node);
     this._requireAttached(parent);
-    if (node.parent === null || node.name === 'sys/scene-root' || node.name === 'sys/authority-root') {
+    if (node.parent === null || node.name === SCENE_ROOT_NAME || node.name === AUTHORITY_ROOT_NAME) {
       fail('display-node-reparent-forbidden');
     }
     this._validateSameScene(node, parent);
@@ -176,8 +177,8 @@ export class NodeGraph {
     return result;
   }
   _validateAuthorityParent(node, parent) {
-    if (!node.name.startsWith('py/')) return;
-    if (parent.name !== 'sys/authority-root' && !parent.name.startsWith('py/')) {
+    if (!node.name.startsWith(AUTHORITY_PREFIX)) return;
+    if (parent.name !== AUTHORITY_ROOT_NAME && !parent.name.startsWith(AUTHORITY_PREFIX)) {
       fail('display-authority-parent-invalid');
     }
   }

@@ -16,17 +16,21 @@ from enum import IntEnum
 from types import MappingProxyType
 from typing import Any
 
+from .display import (
+    ValidatedDisplayCommandStream,
+    validate_display_checkpoint,
+    validate_display_command_stream,
+)
 from .errors import ConfigurationError, WireError
+from .json_tree import MAXIMUM_SAFE_INTEGER, WORLD_TREE_SCHEMA
 
 
 WIRE_SCHEMA = "scene-engine-wire@2"
-WORLD_TREE_SCHEMA = "scene-engine-json-tree@1"
 DISPLAY_CODEC = "scene-engine-display-node@3"
 WIRE_MAGIC = b"SENG"
 WIRE_MAJOR_VERSION = 2
 _PACKET_HEADER = struct.Struct("<4sBBHIHH")
 _ATTACHMENT_HEADER = struct.Struct("<BBHI")
-MAXIMUM_SAFE_INTEGER = (1 << 53) - 1
 
 
 class PacketKind(IntEnum):
@@ -624,20 +628,13 @@ def _validate_attachment_layout(
         raise WireError("attachment order or encoding is invalid for packet kind")
     try:
         if kind is PacketKind.CHECKPOINT:
-            from .display import validate_display_checkpoint
-
             validate_display_checkpoint(
                 attachments[1].value,
                 expected_last_command_seq=header["last_command_seq"],
             )
         elif kind is PacketKind.COMMIT:
-            from .display import (
-                _ValidatedDisplayCommandStream,
-                validate_display_command_stream,
-            )
-
             display_stream = attachments[1].value
-            if isinstance(display_stream, _ValidatedDisplayCommandStream):
+            if isinstance(display_stream, ValidatedDisplayCommandStream):
                 if (
                     display_stream.source_tick != header["source_tick"]
                     or display_stream["last_command_seq"]
@@ -687,10 +684,8 @@ def _prevalidated_display_stream(
 ) -> bool:
     if kind is not AttachmentKind.DISPLAY_COMMAND_STREAM:
         return False
-    from .display import _ValidatedDisplayCommandStream
-
     return (
-        isinstance(value, _ValidatedDisplayCommandStream)
+        isinstance(value, ValidatedDisplayCommandStream)
         and value.maximum_json_depth <= limits.maximum_json_depth
     )
 
@@ -817,12 +812,16 @@ def _text(value: Any, field: str) -> str:
     return value
 
 
+_IDENTITY_HEAD = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+_IDENTITY_EXTRA = "._:@/-"
+
+
 def _identity(value: Any, field: str) -> str:
     result = _text(value, field)
     if len(result.encode("utf-8")) > 160:
         raise WireError(f"{field} exceeds 160 UTF-8 bytes")
-    allowed = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._:@/-"
-    if result[0] not in allowed[:62] or any(character not in allowed for character in result):
+    allowed = _IDENTITY_HEAD + _IDENTITY_EXTRA
+    if result[0] not in _IDENTITY_HEAD or any(character not in allowed for character in result):
         raise WireError(f"{field} is not a canonical identity")
     return result
 

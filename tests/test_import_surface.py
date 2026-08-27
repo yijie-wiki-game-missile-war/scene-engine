@@ -34,6 +34,7 @@ def test_python_root_exports_are_exact() -> None:
         "RuntimeStateError",
         "SceneEngineError",
         "SceneEngineRuntime",
+        "TICKS_PER_SECOND",
         "SessionBackpressureError",
         "SessionError",
         "SystemMonotonicClock",

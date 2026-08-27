@@ -14,7 +14,10 @@ from functools import cmp_to_key
 from typing import Any
 
 from .errors import JsonTreeError
-from .wire import MAXIMUM_SAFE_INTEGER, WORLD_TREE_SCHEMA
+
+
+WORLD_TREE_SCHEMA = "scene-engine-json-tree@1"
+MAXIMUM_SAFE_INTEGER = (1 << 53) - 1
 
 
 _FORBIDDEN_SEGMENTS = frozenset(("__proto__", "prototype", "constructor"))

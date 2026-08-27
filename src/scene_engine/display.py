@@ -82,8 +82,8 @@ class _ImmutableList(list[Any]):
     sort = _immutable
 
 
-class _ValidatedDisplayCommandStream(_ImmutableDict):
-    """Private seal proving a command stream was built from validated records."""
+class ValidatedDisplayCommandStream(_ImmutableDict):
+    """Seal proving a command stream was built from validated records."""
 
     def __init__(
         self, value: Mapping[str, Any], *, source_tick: int, maximum_json_depth: int
@@ -366,7 +366,7 @@ def encode_display_command_stream(
         maximum_record_depth + 2 if records else 1,
     )
     return (
-        _ValidatedDisplayCommandStream(
+        ValidatedDisplayCommandStream(
             {
                 "schema": DISPLAY_COMMAND_STREAM_SCHEMA,
                 "base_command_seq": base_command_seq,
@@ -598,7 +598,6 @@ def _node_name(value: Any, field: str) -> str:
         "scene",
         "py",
         "prefab",
-        "editor",
     }:
         raise ConfigurationError(f"{field} has an invalid Node prefix")
     if any(_NODE_SEGMENT.fullmatch(segment) is None for segment in segments):
@@ -733,6 +732,7 @@ __all__ = [
     "DisplayTransform",
     "MAXIMUM_NODE_DEPTH",
     "MAXIMUM_NODE_NAME_BYTES",
+    "ValidatedDisplayCommandStream",
     "encode_display_checkpoint",
     "encode_display_command_stream",
     "validate_display_checkpoint",
