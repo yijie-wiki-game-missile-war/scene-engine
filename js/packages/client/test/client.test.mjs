@@ -386,19 +386,16 @@ test('Promise-returning commit summary fails the gate and publishes no ACK', () 
   );
 });
 
-test('display session contract rejects the legacy full-view field and requires summary/currentView', () => {
+test('display session accepts wrapper fields but extracts only the four required capabilities', () => {
   const extra = createMockDisplayFactory();
   const extraClient = new SceneEngineClient({
     createDisplaySession(metadata) {
       const session = extra.factory(metadata);
-      return { ...session, [['display', 'View', 'Provider'].join('')]: () => {} };
+      return { ...session, diagnostics: () => ({ session: 'extra' }) };
     },
   });
-  assert.throws(
-    () => extraClient.applyPacket(checkpointPacket()),
-    (error) => error.code === 'display-session-fields-invalid',
-  );
-  assert.equal(extra.sessions[0].log.at(-1)[0], 'dispose');
+  assert.ok(extraClient.applyPacket(checkpointPacket()).ackPacket instanceof Uint8Array);
+  assert.equal(extra.sessions[0].log.some(([kind]) => kind === 'dispose'), false);
 
   const missing = createMockDisplayFactory();
   const missingClient = new SceneEngineClient({
@@ -413,6 +410,24 @@ test('display session contract rejects the legacy full-view field and requires s
     (error) => error.code === 'display-session-runtime-invalid',
   );
   assert.equal(missing.sessions[0].log.at(-1)[0], 'dispose');
+});
+
+test('checkpoint rejects a Display catalog identity mismatch before scene installation', () => {
+  const mismatch = createMockDisplayFactory();
+  const client = new SceneEngineClient({
+    createDisplaySession(metadata) {
+      const session = mismatch.factory(metadata);
+      session.runtime.catalogIdentity = () => Object.freeze({
+        sceneCatalogHash: 'f'.repeat(64),
+        prefabCatalogHash: metadata.prefabCatalogHash,
+        stateSchemaHash: metadata.stateSchemaHash,
+      });
+      return session;
+    },
+  });
+  assert.throws(() => client.applyPacket(checkpointPacket()),
+    (error) => error.code === 'display-catalog-identity-mismatch');
+  assert.deepEqual(mismatch.sessions[0].log.map(([kind]) => kind), ['dispose']);
 });
 
 test('failed replacement checkpoint disposes only candidate and does not swap old display', () => {

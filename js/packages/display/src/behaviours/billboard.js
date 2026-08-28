@@ -21,33 +21,34 @@ export class BillboardComponent extends BehaviourComponent {
   static tickPhase = 'before-render';
   static drivesTransform = true;
 
-  onAttach(context) {
-    if (this.properties.mode === 'initialize') this._orient(context);
+  onAttach(display) {
+    if (this.properties.mode === 'initialize') this._orient(display);
   }
 
   tick(frame) {
     if (this.properties.mode === 'continuous') this._orient(frame.display);
   }
 
-  _orient(context) {
-    const cameraName = this.properties.cameraName ?? context.scene.activeCameraName;
+  _orient(display) {
+    const cameraName = this.properties.cameraName ?? display.scene.activeCameraName;
     if (cameraName === null) fail('display-active-camera-missing');
-    context.nodeGraph.flushWorldTransforms();
-    const camera = context.nodeIndex.require(cameraName);
+    const cameraPosition = display.nodes.require(cameraName).getWorldTransform().position;
     const node = this.node;
-    const cameraPosition = camera._worldTransform?.position ?? camera.getWorldTransform().position;
+    const nodeWorld = node.getWorldTransform();
     const direction = [
-      cameraPosition[0] - node._worldTransform.position[0],
-      cameraPosition[1] - node._worldTransform.position[1],
-      cameraPosition[2] - node._worldTransform.position[2],
+      cameraPosition[0] - nodeWorld.position[0],
+      cameraPosition[1] - nodeWorld.position[1],
+      cameraPosition[2] - nodeWorld.position[2],
     ];
+    const parentWorld = node.parentName === null
+      ? null : display.nodes.require(node.parentName).getWorldTransform();
     const localDirection = localDirectionForWorldFacing(
-      node.parent?._worldTransform ?? null,
+      parentWorld,
       direction,
       this.properties.axisMode,
     );
     const rotation = quaternionFromForward(localDirection, 'full');
-    node.setLocalTransform({
+    this.setDrivenLocalTransform({
       position: node.localTransform.position,
       rotationXyzw: rotation,
       scale: node.localTransform.scale,

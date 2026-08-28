@@ -33,6 +33,9 @@ export function checkpointPacket({
   lastCommandSeq = 0,
   worldSnapshot = { tick: sourceTick, world_revision: worldRevision, value: 0 },
   nodes = [baselineNode()],
+  sceneCatalogHash = HASH_A,
+  prefabCatalogHash = HASH_B,
+  stateSchemaHash = HASH_C,
 } = {}) {
   return encodePacket('engine.checkpoint', {
     schema: 'scene-engine-wire@2',
@@ -52,9 +55,9 @@ export function checkpointPacket({
       value: {
         schema: 'scene-engine-display-checkpoint@3',
         scene_name: 'main',
-        scene_catalog_hash: HASH_A,
-        prefab_catalog_hash: HASH_B,
-        state_schema_hash: HASH_C,
+        scene_catalog_hash: sceneCatalogHash,
+        prefab_catalog_hash: prefabCatalogHash,
+        state_schema_hash: stateSchemaHash,
         last_command_seq: lastCommandSeq,
         nodes,
       },
@@ -151,6 +154,13 @@ export function createMockDisplayFactory({ failMethod = null, asyncMethod = null
     };
     const session = {
       runtime: {
+        catalogIdentity() {
+          return Object.freeze({
+            sceneCatalogHash: metadata.sceneCatalogHash,
+            prefabCatalogHash: metadata.prefabCatalogHash,
+            stateSchemaHash: metadata.stateSchemaHash,
+          });
+        },
         installScene: (value) => invoke('installScene', value),
         activate(value) {
           const result = invoke('activate', value);

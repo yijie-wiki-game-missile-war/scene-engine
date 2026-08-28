@@ -14,7 +14,7 @@ import { Component, replaceComponentProperties } from './component.js';
 import { RenderComponent } from '../render/render-component.js';
 import { RENDER_COMPONENT_DESCRIPTORS } from '../render/components.js';
 
-const FINAL_METHODS = ['attach', 'setEnabled', 'patchProperties', 'dispose'];
+const FINAL_METHODS = ['attach', 'setEnabled', 'setDrivenLocalTransform', 'patchProperties', 'dispose'];
 const FORBIDDEN_TRANSFORM_FIELDS = new Set([
   'position', 'rotation', 'rotationXyzw', 'scale', 'transform', 'matrix', 'worldMatrix',
   'localTransform',
@@ -71,7 +71,7 @@ export function prepareComponentPropertiesPatch(registry, {
   const resources = requireResourceRegistry(resourceRegistry);
   const current = plainRecord(currentProperties, 'display-component-properties-invalid');
   const delta = plainRecord(patch, 'display-component-properties-invalid');
-  const properties = registry.normalizeProperties(typeId, { ...current, ...delta });
+  const properties = registry.normalizeProperties(typeId, { ...current, ...delta }, resources);
   registry.validateResourceReferences(typeId, properties, resources);
   PREPARED_PROPERTY_PATCHES.set(properties, Object.freeze({
     registry,
@@ -115,6 +115,14 @@ export class ComponentRegistry {
   seal() { this._sealed = true; return this; }
 
   has(typeId) { return this._types.has(typeId); }
+  catalogEntries() {
+    return Object.freeze([...this._types].map(([typeId, descriptor]) => Object.freeze({
+      typeId,
+      allowMultiple: descriptor.ComponentClass.allowMultiple === true,
+      tickPhase: descriptor.ComponentClass.tickPhase ?? null,
+      drivesTransform: descriptor.ComponentClass.drivesTransform === true,
+    })).sort((left, right) => left.typeId < right.typeId ? -1 : left.typeId > right.typeId ? 1 : 0));
+  }
   require(typeId) {
     const descriptor = this._types.get(typeId);
     if (!descriptor) fail('display-component-type-missing');
@@ -130,7 +138,7 @@ export class ComponentRegistry {
     const key = nonemptyString(record.key, 'display-component-key-invalid');
     const enabled = Object.hasOwn(record, 'enabled') ? record.enabled : true;
     if (typeof enabled !== 'boolean') fail('display-component-enabled-invalid');
-    const properties = this.normalizeProperties(typeId, record.properties ?? {});
+    const properties = this.normalizeProperties(typeId, record.properties ?? {}, resourceRegistry);
     this.validateResourceReferences(typeId, properties, resourceRegistry);
     return cloneAndFreeze({ key, type: typeId, enabled, properties });
   }
@@ -176,10 +184,10 @@ export class ComponentRegistry {
     return replaceComponentProperties(record.component, properties);
   }
 
-  normalizeProperties(typeId, value) {
+  normalizeProperties(typeId, value, resourceRegistry = null) {
     const descriptor = this.require(typeId);
     const properties = cloneAndFreeze(
-      descriptor.normalizeProperties(value),
+      descriptor.normalizeProperties(value, resourceRegistry),
       'display-component-properties-invalid',
     );
     assertNoComponentTransform(properties);

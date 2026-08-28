@@ -1,6 +1,7 @@
-# Three RenderBackend 0.9.2
+# Three RenderBackend 0.9.3
 
-`@scene-engine/renderer-three@0.9.2` exports only:
+`@scene-engine/renderer-three@0.9.3` is the browser composition-root implementation of Display's flat RenderBackendPort. Its
+root exports only:
 
 ```text
 THREE_RENDER_BACKEND_SCHEMA
@@ -8,38 +9,60 @@ ThreeRenderBackendError
 createThreeRenderBackend
 ```
 
-The factory accepts the public Display backend options: DOM host, canvas, renderer profile, ResourceRegistry and lifecycle
-AbortSignal. It returns the 13-method RenderBackend port used by DisplayRuntime.
+The package also publishes `src/index.d.ts`.
 
-Each RenderComponent owns one flat binding identified by `(nodeName, componentKey)`. The backend receives an Engine-computed
-world matrix, visibility and closed component properties. It does not reconstruct Node parents, run Component handlers,
-schedule RAF, own product controls, infer default lights, or expose Scene/Camera/Object3D/Material/Texture values.
+## Boundary
 
-Logical visibility is independent of the selected Three representation. For each binding:
+The factory accepts DOM host, canvas, renderer profile, ResourceRegistry, lifecycle AbortSignal and a health observer. It returns
+13 methods used by DisplayRuntime:
 
 ```text
-ordinary object drawable = record.visible && !record.batched
-batch instance drawable  = record.visible && record.batched
+createBinding / updateBinding / destroyBinding
+prepareFrame / render / requestResize
+pick / projectWorldPoint / focusWorldPoint / capture
+whenIdle / diagnostics / dispose
 ```
 
-An ordinary object and its `InstancedMesh` instance are alternative representations of one RenderComponent, never two visual
-parts. Creating a batch hides the retained ordinary object. Transform, visibility, property and resource-replacement updates
-must preserve that state; no update path may set the ordinary object directly from logical visibility. A hidden batch member
-uses a zero matrix. Batch exit or disposal clears the batch state and restores the ordinary object according to logical
-visibility. Display Core never receives `batched`, `InstancedMesh` or another renderer-specific state field.
+The backend owns Three/WebGL objects, model/texture/material loading, GPU resources, flat bindings, batching, resize, draw,
+picking, capture and disposal. It does not own:
 
-Supported public component types are model, mesh, sprite, surface, particle, camera, background, ambient light, directional
-light, point light and spot light. Resource loads honor AbortSignal and generation tokens. Removing a pending binding prevents
-late attachment; destroy/recreate for the same identity is serialized. Source model material semantics are retained unless
-closed component properties explicitly override alpha/depth behavior.
+- product World or rules;
+- Node names, parent graph or local Transform;
+- Component lifecycle;
+- application RAF;
+- hidden cameras or lights;
+- product callbacks or controls;
+- caller-visible Three objects.
 
-URL textures are decoded as vertically pre-oriented ImageBitmaps and installed with `Texture.flipY = false`, so image-top maps
-to the top of standard Three UV geometry exactly once. The same rule applies to textures used by sprites, atlases, materials,
-surfaces, particles and backgrounds.
+Display passes an Engine-computed world matrix, logical visibility and already normalized closed component properties. Display
+must reject invalid business records before commit seal; the backend repeats defensive shape/resource checks to protect its own
+boundary and asset-loading failures.
 
-`prepareFrame` consumes only dirty bindings and the active camera binding. `render` performs the draw requested by
-DisplayRuntime. Ordinary picking excludes batched records, and batch picking maps its instance back to the same logical
-binding, so one binding can produce at most one hit. A hit returns `{nodeName,componentKey,point,distance}` and a miss returns
-`null`; projection/focus return plain data. Backend failure is reported
-through health and can invoke `DisplayRuntime.rebuildRenderBackend()`, which preserves Node/Component identity and remounts
-declarative bindings. Disposal aborts pending work and releases renderer, geometry, material, texture and listener ownership.
+## Binding representation
+
+Each RenderComponent owns one logical binding `(nodeName, componentKey)`. Logical visibility is independent of representation:
+
+```text
+ordinary object drawable = visible && !batched
+batch instance drawable  = visible && batched
+```
+
+An ordinary object and its `InstancedMesh` instance are alternatives, never two visual parts. Batch creation hides the ordinary
+object; a hidden instance uses a zero matrix; leaving or disposing the batch restores the ordinary object according to logical
+visibility. Ordinary picking excludes batched records, and instance hits map back to the same logical binding.
+
+## Resources and time
+
+Resource loads honor AbortSignal and generation tokens. Removing a pending binding prevents late attachment; destroy/recreate
+for one identity is serialized. URL textures are decoded with one consistent vertical-orientation rule. Source model material
+semantics remain unless closed component properties explicitly override them.
+
+Simulation animation uses `sourceTick / TICKS_PER_SECOND`; visual-only animation may use `visualSeconds`. Neither renderer
+time source mutates World state. `TICKS_PER_SECOND` remains an internal variable equal to the fixed contract value 60.
+
+`prepareFrame(frame)` consumes dirty bindings and the active camera; parameterless `render()` performs the requested draw from
+that prepared state. Picking returns plain
+`{nodeName, componentKey, point, distance}` data or `null`; project/focus/capture/diagnostics also return plain data only.
+
+Backend health can trigger `DisplayRuntime.rebuildRenderBackend()`, which preserves Display Node/Component identity and remounts
+bindings. Disposal aborts pending work and releases renderer, geometry, material, texture, binding and listener ownership.

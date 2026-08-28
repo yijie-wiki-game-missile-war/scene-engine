@@ -96,7 +96,7 @@ def commands_for(scenario: str, variant: int) -> tuple[DisplayCommand, ...]:
             for index in range(CHURN_NODE_COUNT)
         )
         created = tuple(
-            DisplayCommand.create(
+            DisplayCommand.create_node(
                 DisplayNode(
                     name=f"py/churn-{variant:04d}-{index:02d}",
                     parent_name=None,

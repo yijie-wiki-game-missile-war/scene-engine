@@ -1,5 +1,8 @@
 # JavaScript DisplayRuntime formal acceptance evidence
 
+
+> **历史验收证据：** 本目录保存旧发布组合的正式测量，不代表当前 0.9/0.10/0.4/0.9.3 组合已经由这些文件验收。
+
 `js-display-runtime-500-formal.json` and `js-client-ack-500-formal.json` are generated,
 not hand-authored. Reproduce both from the Scene Engine repository with the cutover
 runbook commands:

@@ -1,5 +1,8 @@
 # Three RenderBackend 0.9.2 texture-orientation patch
 
+> **Historical patch record only:** the active renderer version is listed in `README.md`; this file preserves 0.9.2 evidence.
+
+
 Release date: 2026-08-25
 
 `@scene-engine/renderer-three@0.9.2` fixes URL texture orientation without changing

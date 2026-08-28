@@ -4,11 +4,21 @@ export {
   DisplayRuntime,
   createDisplayRuntime,
 } from './runtime/display-runtime.js';
+export { TICKS_PER_SECOND } from './constants.js';
+export {
+  DISPLAY_CATALOG_MANIFEST_SCHEMA,
+  buildDisplayCatalogManifest,
+  canonicalDisplayCatalogJson,
+  computeDisplayCatalogIdentity,
+  defineDisplayCatalogManifest,
+  normalizeDisplayCatalogIdentity,
+  sameDisplayCatalogIdentity,
+  toDisplayCatalogIdentityRecord,
+} from './catalog/identity.js';
 export { DisplayRuntimeError } from './runtime/health.js';
 
 export { Component } from './component/component.js';
 export { BehaviourComponent } from './component/behaviour-component.js';
-export { AuthorityComponent } from './component/authority-component.js';
 export { RenderComponent } from './render/render-component.js';
 
 export {

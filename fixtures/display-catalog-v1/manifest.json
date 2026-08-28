@@ -1,0 +1,213 @@
+{
+  "schema": "scene-engine-display-catalog-manifest@1",
+  "scenes": [
+    {
+      "schema": "scene-engine-scene-definition@1",
+      "id": "main",
+      "sceneProfile": "game",
+      "rendererProfile": {
+        "drawMode": "requested",
+        "maximumPixelRatio": 2,
+        "clearRgba": 255,
+        "antialias": true,
+        "alpha": false,
+        "shadows": true,
+        "toneMapping": "aces-filmic"
+      },
+      "activeCameraLocalName": "camera",
+      "nodes": [
+        {
+          "localName": "camera",
+          "parentLocalName": null,
+          "transform": {
+            "position": [
+              0,
+              0,
+              0
+            ],
+            "rotationXyzw": [
+              0,
+              0,
+              0,
+              1
+            ],
+            "scale": [
+              1,
+              1,
+              1
+            ]
+          },
+          "components": [
+            {
+              "key": "camera",
+              "type": "render.camera@1",
+              "properties": {
+                "projection": "perspective",
+                "fovYDegrees": 50,
+                "near": 0.1,
+                "far": 1000
+              }
+            }
+          ]
+        }
+      ],
+      "prefabInstances": []
+    }
+  ],
+  "prefabs": [
+    {
+      "schema": "scene-engine-prefab-definition@2",
+      "id": "unit.basic",
+      "gameplayType": "unit.basic",
+      "root": {
+        "components": [],
+        "children": [
+          {
+            "localName": "body",
+            "transform": {
+              "position": [
+                0,
+                0,
+                0
+              ],
+              "rotationXyzw": [
+                0,
+                0,
+                0,
+                1
+              ],
+              "scale": [
+                1,
+                1,
+                1
+              ]
+            },
+            "visible": true,
+            "components": [
+              {
+                "key": "model",
+                "type": "render.model@1",
+                "properties": {
+                  "modelResourceId": "model/unit",
+                  "animation": {
+                    "clipId": "idle",
+                    "startTick": 0,
+                    "clock": "simulation",
+                    "loop": true
+                  },
+                  "materialOverrides": {}
+                }
+              }
+            ],
+            "children": []
+          }
+        ]
+      },
+      "revision": 1
+    }
+  ],
+  "resources": [
+    {
+      "id": "model/unit",
+      "kind": "model",
+      "url": "./unit.glb",
+      "clipNames": [
+        "idle",
+        "move"
+      ]
+    },
+    {
+      "id": "texture/ui",
+      "kind": "texture",
+      "url": "./ui.png",
+      "colorSpace": "srgb"
+    }
+  ],
+  "components": [
+    {
+      "typeId": "behavior.billboard@1",
+      "allowMultiple": false,
+      "tickPhase": "before-render",
+      "drivesTransform": true
+    },
+    {
+      "typeId": "behavior.look-at@1",
+      "allowMultiple": false,
+      "tickPhase": "before-render",
+      "drivesTransform": true
+    },
+    {
+      "typeId": "render.ambient-light@1",
+      "allowMultiple": true,
+      "tickPhase": null,
+      "drivesTransform": false
+    },
+    {
+      "typeId": "render.background@1",
+      "allowMultiple": false,
+      "tickPhase": null,
+      "drivesTransform": false
+    },
+    {
+      "typeId": "render.camera@1",
+      "allowMultiple": false,
+      "tickPhase": null,
+      "drivesTransform": false
+    },
+    {
+      "typeId": "render.directional-light@1",
+      "allowMultiple": true,
+      "tickPhase": null,
+      "drivesTransform": false
+    },
+    {
+      "typeId": "render.mesh@1",
+      "allowMultiple": true,
+      "tickPhase": null,
+      "drivesTransform": false
+    },
+    {
+      "typeId": "render.model@1",
+      "allowMultiple": true,
+      "tickPhase": null,
+      "drivesTransform": false
+    },
+    {
+      "typeId": "render.particle@1",
+      "allowMultiple": true,
+      "tickPhase": null,
+      "drivesTransform": false
+    },
+    {
+      "typeId": "render.point-light@1",
+      "allowMultiple": true,
+      "tickPhase": null,
+      "drivesTransform": false
+    },
+    {
+      "typeId": "render.spot-light@1",
+      "allowMultiple": true,
+      "tickPhase": null,
+      "drivesTransform": false
+    },
+    {
+      "typeId": "render.sprite@1",
+      "allowMultiple": true,
+      "tickPhase": null,
+      "drivesTransform": false
+    },
+    {
+      "typeId": "render.surface@1",
+      "allowMultiple": true,
+      "tickPhase": null,
+      "drivesTransform": false
+    }
+  ],
+  "authorityStateSchemas": [
+    {
+      "gameplayType": "unit.basic",
+      "schemaId": "unit.basic.state",
+      "revision": 1
+    }
+  ]
+}

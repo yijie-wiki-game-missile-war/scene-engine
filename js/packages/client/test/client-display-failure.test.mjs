@@ -4,6 +4,8 @@ import test from 'node:test';
 import {
   PREFAB_DEFINITION_SCHEMA,
   SCENE_DEFINITION_SCHEMA,
+  buildDisplayCatalogManifest,
+  computeDisplayCatalogIdentity,
   createComponentRegistry,
   createDisplayRuntime,
   createPrefabRegistry,
@@ -71,47 +73,60 @@ test('rejected thenables are observed while synchronous barriers fail closed', a
 });
 
 test('real DisplayRuntime invalidates a partially mutated failed commit without an ACK', async (t) => {
+  const componentRegistry = createComponentRegistry();
+  const resourceRegistry = createResourceRegistry([]);
+  const prefab = definePrefab({
+    schema: PREFAB_DEFINITION_SCHEMA,
+    id: 'unit.example',
+    gameplayType: 'unit.example',
+    root: { components: [], children: [] },
+  });
+  const prefabRegistry = createPrefabRegistry([prefab]);
+  const sceneRegistry = createSceneRegistry([defineScene({
+    schema: SCENE_DEFINITION_SCHEMA,
+    id: 'main',
+    sceneProfile: 'client-test',
+    rendererProfile: RENDERER_PROFILE,
+    activeCameraLocalName: 'camera',
+    nodes: [{
+      localName: 'camera',
+      parentLocalName: null,
+      transform: transform(),
+      components: [{
+        key: 'camera',
+        type: 'render.camera@1',
+        properties: {
+          projection: 'perspective',
+          fovYDegrees: 50,
+          near: 0.1,
+          far: 100,
+        },
+      }],
+    }],
+    prefabInstances: [],
+  })]);
+  const authorityStateSchemas = Object.freeze([Object.freeze({
+    gameplayType: 'unit.example', schemaId: 'unit.example.state', revision: 1,
+  })]);
+  const catalogIdentity = computeDisplayCatalogIdentity(buildDisplayCatalogManifest({
+    sceneRegistry,
+    prefabRegistry,
+    resourceRegistry,
+    componentRegistry,
+    authorityStateSchemas,
+  }));
+
   const runtimes = [];
   const client = new SceneEngineClient({
     createDisplaySession({ sceneName }) {
-      const componentRegistry = createComponentRegistry();
-      const resourceRegistry = createResourceRegistry([]);
-      const prefab = definePrefab({
-        schema: PREFAB_DEFINITION_SCHEMA,
-        id: 'unit.example',
-        gameplayType: 'unit.example',
-        root: { components: [], children: [] },
-      });
-      const prefabRegistry = createPrefabRegistry([prefab]);
-      const sceneRegistry = createSceneRegistry([defineScene({
-        schema: SCENE_DEFINITION_SCHEMA,
-        id: sceneName,
-        sceneProfile: 'client-test',
-        rendererProfile: RENDERER_PROFILE,
-        activeCameraLocalName: 'camera',
-        nodes: [{
-          localName: 'camera',
-          parentLocalName: null,
-          transform: transform(),
-          components: [{
-            key: 'camera',
-            type: 'render.camera@1',
-            properties: {
-              projection: 'perspective',
-              fovYDegrees: 50,
-              near: 0.1,
-              far: 100,
-            },
-          }],
-        }],
-        prefabInstances: [],
-      })]);
+      assert.equal(sceneName, 'main');
       let nextFrameId = 0;
       const runtime = createDisplayRuntime({
         sceneRegistry,
         prefabRegistry,
         resourceRegistry,
         componentRegistry,
+        authorityStateSchemas,
         createRenderBackend: () => createFakeRenderBackend().backend,
         frameAdapter: {
           request: () => { nextFrameId += 1; return nextFrameId; },
@@ -133,7 +148,11 @@ test('real DisplayRuntime invalidates a partially mutated failed commit without 
     await Promise.all(runtimes.map((runtime) => runtime.dispose()));
   });
 
-  const checkpoint = client.applyPacket(checkpointPacket());
+  const checkpoint = client.applyPacket(checkpointPacket({
+    sceneCatalogHash: catalogIdentity.sceneCatalogHash,
+    prefabCatalogHash: catalogIdentity.prefabCatalogHash,
+    stateSchemaHash: catalogIdentity.stateSchemaHash,
+  }));
   assert.ok(checkpoint.ackPacket instanceof Uint8Array);
   const beforeCommit = client.currentCommit();
   const beforeWorld = client.currentWorldState();

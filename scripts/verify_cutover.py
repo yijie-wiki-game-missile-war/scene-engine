@@ -25,16 +25,17 @@ from scene_engine.display import (  # noqa: E402
     DISPLAY_CODEC,
     DISPLAY_COMMAND_SCHEMA,
     DISPLAY_COMMAND_STREAM_SCHEMA,
+    DisplayCatalogIdentity,
 )
 from scene_engine.recording import PACKET_LOG_SCHEMA  # noqa: E402
 from scene_engine.wire import WIRE_SCHEMA, read_engine_packet  # noqa: E402
 
 
 VERSIONS = {
-    "python": "0.8.0",
-    "client": "0.9.0",
-    "display": "0.3.0",
-    "renderer": "0.9.2",
+    "python": "0.9.0",
+    "client": "0.10.0",
+    "display": "0.4.0",
+    "renderer": "0.9.3",
 }
 ARTIFACTS = (
     f"scene-engine-client-{VERSIONS['client']}.tgz",
@@ -306,7 +307,7 @@ def verify_versions() -> None:
     require(scene_engine.__version__ == VERSIONS["python"], "Python import version mismatch")
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     require(
-        re.search(r'^version = "0\.8\.0"$', pyproject, re.MULTILINE) is not None,
+        re.search(rf'^version = "{re.escape(VERSIONS["python"])}"$', pyproject, re.MULTILINE) is not None,
         "Python project version mismatch",
     )
     package(
@@ -350,6 +351,8 @@ def verify_source_shape() -> None:
         ROOT / "fixtures/wire-v2/checkpoint.bin",
         ROOT / "fixtures/display-v2/checkpoint.json",
         ROOT / "js/packages/display/src/index.js",
+        ROOT / "fixtures/display-catalog-v1/manifest.json",
+        ROOT / "fixtures/display-catalog-v1/identity.json",
     )
     for path in required:
         require(path.exists(), f"required current source missing: {path.relative_to(ROOT)}")
@@ -376,6 +379,13 @@ def verify_fixtures() -> None:
     stream = read_json(ROOT / "fixtures/display-v2/command-tick.json")
     require(checkpoint["schema"] == DISPLAY_CHECKPOINT_SCHEMA, "Display checkpoint fixture mismatch")
     require(stream["schema"] == DISPLAY_COMMAND_STREAM_SCHEMA, "Display stream fixture mismatch")
+    catalog_manifest = read_json(ROOT / "fixtures/display-catalog-v1/manifest.json")
+    catalog_identity = read_json(ROOT / "fixtures/display-catalog-v1/identity.json")
+    require(
+        catalog_manifest.get("schema") == "scene-engine-display-catalog-manifest@1",
+        "Display catalog manifest fixture mismatch",
+    )
+    DisplayCatalogIdentity.from_record(catalog_identity)
 
 
 def verify_artifacts() -> None:
@@ -401,10 +411,10 @@ def verify_artifacts() -> None:
 def verify_python_game() -> None:
     root = WORKSPACE / "python-game"
     pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
-    require(re.search(r'^version = "0\.8\.0"$', pyproject, re.MULTILINE), "game version mismatch")
-    require('"scene-engine==0.8.0"' in pyproject, "game Engine dependency mismatch")
+    require(re.search(rf'^version = "{re.escape(VERSIONS["python"])}"$', pyproject, re.MULTILINE), "game version mismatch")
+    require(f'"scene-engine=={VERSIONS["python"]}"' in pyproject, "game Engine dependency mismatch")
     wheels = sorted((root / "vendor").glob("scene_engine-*.whl"))
-    require(len(wheels) == 1 and "0.8.0" in wheels[0].name, "game wheel set is not exact")
+    require(len(wheels) == 1 and VERSIONS["python"] in wheels[0].name, "game wheel set is not exact")
     wheel_files = python_wheel_package_files(wheels[0], package_name="scene_engine")
     require("scene.py" not in wheel_files, "wheel contains removed module")
     require("display.py" in wheel_files, "wheel lacks Display module")

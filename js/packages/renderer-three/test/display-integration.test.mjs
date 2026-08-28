@@ -58,6 +58,7 @@ test('Display RenderSystem drives the exact backend port and rebuilds from decla
     prefabRegistry: createPrefabRegistry(),
     resourceRegistry: resources,
     componentRegistry: createComponentRegistry(),
+    authorityStateSchemas: [],
     createRenderBackend,
     frameAdapter,
   });

@@ -94,6 +94,23 @@ const RESOURCES = Object.freeze([
   }),
 ]);
 
+function commitAuthority(runtime, cursor, mutation) {
+  const next = Object.freeze({
+    commitSeq: cursor.commitSeq + 1,
+    sourceTick: cursor.sourceTick + 1,
+    lastCommandSeq: cursor.lastCommandSeq + 1,
+  });
+  runtime.commitGate.begin(next);
+  try {
+    mutation();
+    runtime.commitGate.seal(next);
+    Object.assign(cursor, next);
+  } catch (error) {
+    runtime.commitGate.fail(error);
+    throw error;
+  }
+}
+
 const originalImageBitmap = globalThis.createImageBitmap;
 let closedImageBitmapCount = 0;
 globalThis.createImageBitmap = async () => ({
@@ -115,7 +132,7 @@ async function main() {
     runtime: {
       node: process.version,
       displaySchema: 'scene-engine-display-node@3',
-      rendererBackend: '@scene-engine/renderer-three@0.9.2',
+      rendererBackend: '@scene-engine/renderer-three@0.9.3',
       rendererInjection: 'real ThreeRenderBackend with a non-WebGL TestRenderer only',
       resourceLifecycle: 'loadThreeResource + disposeThreeResource',
     },
@@ -228,6 +245,11 @@ async function verifyAuthorityAndRebuildLifecycle() {
     prefabRegistry,
     resourceRegistry,
     componentRegistry,
+    authorityStateSchemas: [{
+      gameplayType: 'leak-matrix.rendered',
+      schemaId: 'leak-matrix.rendered.state@1',
+      revision: 1,
+    }],
     createRenderBackend,
     frameAdapter: frames,
     onHealth: (event) => healthEvents.push(event),
@@ -239,10 +261,11 @@ async function verifyAuthorityAndRebuildLifecycle() {
   const baseline = runtimeMetrics(runtime, backends.at(-1).backend, frames);
   assertHealthyBaseline(baseline);
   const authorityPeaks = [];
+  const authorityCursor = { commitSeq: 0, sourceTick: 0, lastCommandSeq: 0 };
   let previousRoot = null;
   let previousMeshComponent = null;
   for (let cycle = 0; cycle < 100; cycle += 1) {
-    runtime.authority.createNode({
+    commitAuthority(runtime, authorityCursor, () => runtime.authority.createNode({
       name: 'py/leak-cycle',
       parentName: null,
       prefabId: prefab.id,
@@ -250,7 +273,7 @@ async function verifyAuthorityAndRebuildLifecycle() {
       transform: IDENTITY,
       visible: true,
       state: {},
-    });
+    }));
     await runtime.whenReady();
     const root = runtime._nodeIndex.require('py/leak-cycle');
     const visual = runtime._nodeIndex.require('prefab/py/leak-cycle/visual');
@@ -268,7 +291,8 @@ async function verifyAuthorityAndRebuildLifecycle() {
     authorityPeaks.push(peak);
     previousRoot = root;
     previousMeshComponent = meshComponent;
-    runtime.authority.removeNode({ name: 'py/leak-cycle' });
+    commitAuthority(runtime, authorityCursor,
+      () => runtime.authority.removeNode({ name: 'py/leak-cycle' }));
     await runtime.whenReady();
     assert.deepEqual(runtimeMetrics(runtime, backends.at(-1).backend, frames), baseline,
       `authority lifecycle ${cycle + 1} failed to return to baseline`);
@@ -506,6 +530,11 @@ async function verifyPendingBindingDispose() {
     prefabRegistry: createPrefabRegistry([prefab]),
     resourceRegistry,
     componentRegistry,
+    authorityStateSchemas: [{
+      gameplayType: 'leak-matrix.pending',
+      schemaId: 'leak-matrix.pending.state@1',
+      revision: 1,
+    }],
     createRenderBackend(options) {
       const row = directBackendFromOptions(options, delayedLoad);
       backendRows.push(row);
@@ -517,10 +546,11 @@ async function verifyPendingBindingDispose() {
   runtime.activate();
   await runtime.whenReady();
   const baseline = runtimeMetrics(runtime, backendRows[0].backend, frames);
-  runtime.authority.createNode({
+  const authorityCursor = { commitSeq: 0, sourceTick: 0, lastCommandSeq: 0 };
+  commitAuthority(runtime, authorityCursor, () => runtime.authority.createNode({
     name: 'py/pending', parentName: null, prefabId: prefab.id,
     transformMode: 'live', transform: IDENTITY, visible: true, state: {},
-  });
+  }));
   await loadStarted;
   const pendingBeforeDispose = runtimeMetrics(runtime, backendRows[0].backend, frames);
   assert.equal(pendingBeforeDispose.pendingBindingCount, 1);

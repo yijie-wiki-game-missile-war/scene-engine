@@ -4,7 +4,7 @@ import { Node } from '../node/node.js';
 import { joinPrefabNodeName } from '../node/node-name.js';
 import { NodeGraph } from '../node/node-graph.js';
 import { NodeIndex } from '../node/node-index.js';
-import { NodeView } from '../node/node-view.js';
+import { createInternalComponentContext } from './component-context.js';
 import { fail } from './health.js';
 
 function componentPath(localPath, key) { return `${localPath ?? '$root'}/${key}`; }
@@ -327,28 +327,19 @@ export class PrefabInstantiator {
         return nodeGraph.flushWorldTransforms();
       },
     });
-    const viewFor = (node) => new NodeView(node, graphView);
-    const overlayIndex = {
-      get(name) {
-        const node = nodeIndex.get(name) ?? live.nodeIndex.get(name);
-        return node === null ? null : viewFor(node);
-      },
-      require(name) {
-        const node = nodeIndex.get(name) ?? live.nodeIndex.require(name);
-        return viewFor(node);
-      },
-      has: (name) => nodeIndex.has(name) || live.nodeIndex.has(name),
-    };
-    const shadow = {
-      scene: Object.freeze({ name: live.scene.name, activeCameraName: live.scene.activeCameraName }),
-      nodeIndex: Object.freeze(overlayIndex),
+    const overlayIndex = Object.freeze({
+      get(name) { return nodeIndex.get(name) ?? live.nodeIndex.get(name); },
+      require(name) { return nodeIndex.get(name) ?? live.nodeIndex.require(name); },
+      has(name) { return nodeIndex.has(name) || live.nodeIndex.has(name); },
+    });
+    return createInternalComponentContext({
+      scene: live.scene,
+      nodeIndex: overlayIndex,
       nodeGraph: graphView,
       componentAttached() {},
       componentEnabledChanged() {},
       componentPropertiesChanged() {},
       componentDetaching() {},
-    };
-    shadow.display = shadow;
-    return shadow;
+    });
   }
 }

@@ -55,7 +55,7 @@ def _write_wheel(path: Path, files: dict[str, bytes]) -> None:
     with zipfile.ZipFile(path, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
         for relative, contents in files.items():
             archive.writestr(f"scene_engine/{relative}", contents)
-        archive.writestr("scene_engine-0.8.0.dist-info/METADATA", b"ignored metadata\n")
+        archive.writestr("scene_engine-0.9.0.dist-info/METADATA", b"ignored metadata\n")
 
 
 def test_package_tarball_is_closed_against_engine_source(tmp_path: Path) -> None:
@@ -159,12 +159,12 @@ def test_npm_file_install_rejects_integrity_for_different_vendor_bytes(tmp_path:
 def test_python_wheel_rejects_stale_package_files_but_ignores_dist_info(tmp_path: Path) -> None:
     source_root = tmp_path / "scene_engine"
     source_root.mkdir()
-    (source_root / "__init__.py").write_bytes(b'__version__ = "0.8.0"\n')
+    (source_root / "__init__.py").write_bytes(b'__version__ = "0.9.0"\n')
     (source_root / "display.py").write_bytes(b"DISPLAY_CODEC = 'scene-engine-display-node@3'\n")
     cache = source_root / "__pycache__"
     cache.mkdir()
     (cache / "scene.cpython-312.pyc").write_bytes(b"ignored interpreter cache")
-    wheel = tmp_path / "scene_engine-0.8.0-py3-none-any.whl"
+    wheel = tmp_path / "scene_engine-0.9.0-py3-none-any.whl"
     _write_wheel(
         wheel,
         {

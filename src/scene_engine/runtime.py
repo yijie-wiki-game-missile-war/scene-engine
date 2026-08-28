@@ -103,24 +103,27 @@ class EngineInput:
 class MutationResult:
     """Product mutation outcome.
 
-    ``no-op`` and ``rejected`` may carry a ``reason_code`` and
-    ``result_payload`` for client diagnostics; a ``changed`` mutation is
-    described by its commit records and can carry neither.
+    Only ``changed`` may carry opaque ``commit_context`` passed to
+    ``build_commit``. ``no-op`` and ``rejected`` may carry a ``reason_code``
+    and JSON ``result_payload`` for client diagnostics.
     """
 
     status: str
-    detail: Any = None
+    commit_context: Any = None
     reason_code: str | None = None
     result_payload: Any = None
 
     def __post_init__(self) -> None:
         if self.status not in {"changed", "no-op", "rejected"}:
             raise ConfigurationError("mutation status is invalid")
-        if self.status == "changed" and (
-            self.reason_code is not None or self.result_payload is not None
-        ):
+        if self.status == "changed":
+            if self.reason_code is not None or self.result_payload is not None:
+                raise ConfigurationError(
+                    "changed mutation cannot have a reason_code or result_payload"
+                )
+        elif self.commit_context is not None:
             raise ConfigurationError(
-                "changed mutation cannot have a reason_code or result_payload"
+                "only changed mutation may carry commit_context"
             )
         if self.status == "rejected":
             _text(self.reason_code, "reason_code")
@@ -130,28 +133,26 @@ class MutationResult:
             validate_json_value(self.result_payload)
 
     @classmethod
-    def changed(cls, detail: Any = None) -> "MutationResult":
-        return cls("changed", detail)
+    def changed(cls, commit_context: Any = None) -> "MutationResult":
+        return cls("changed", commit_context)
 
     @classmethod
     def no_op(
         cls,
-        detail: Any = None,
         *,
         reason_code: str | None = None,
         result_payload: Any = None,
     ) -> "MutationResult":
-        return cls("no-op", detail, reason_code, result_payload)
+        return cls("no-op", None, reason_code, result_payload)
 
     @classmethod
     def rejected(
         cls,
         reason_code: str,
-        detail: Any = None,
         *,
         result_payload: Any = None,
     ) -> "MutationResult":
-        return cls("rejected", detail, reason_code, result_payload)
+        return cls("rejected", None, reason_code, result_payload)
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,6 +221,7 @@ class TickContext:
 class InputContext:
     proposed_commit: EngineCommit
     stale_observation: bool
+    ticks_per_second: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -276,8 +278,8 @@ class RuntimeConfig:
     """Bounded runtime limits.
 
     The 60 Hz rate is fixed by the runtime contract; ``ticks_per_second``
-    exists so configurations state the rate explicitly and accepts only
-    ``TICKS_PER_SECOND``.
+    exists so configurations and runtime calculations carry the rate explicitly;
+    it accepts only ``TICKS_PER_SECOND``.
     """
 
     ticks_per_second: int = TICKS_PER_SECOND
@@ -294,8 +296,9 @@ class RuntimeConfig:
 
     def __post_init__(self) -> None:
         if (
-            self.ticks_per_second != TICKS_PER_SECOND
-            or isinstance(self.ticks_per_second, bool)
+            isinstance(self.ticks_per_second, bool)
+            or not isinstance(self.ticks_per_second, int)
+            or self.ticks_per_second != TICKS_PER_SECOND
         ):
             raise ConfigurationError(
                 "ticks_per_second must equal 60; the runtime contract fixes the rate"
@@ -533,7 +536,7 @@ class SceneEngineRuntime:
                 if self._state == FATAL:
                     raise RuntimeFatalError("runtime became fatal while processing input") from self._fatal_cause
 
-            scaled = (now - self._clock_origin) * TICKS_PER_SECOND
+            scaled = (now - self._clock_origin) * self._config.ticks_per_second
             if not math.isfinite(scaled):
                 raise ConfigurationError("clock range is too large")
             target_tick = self._initial_tick + int(math.floor(scaled + 1e-9))
@@ -685,7 +688,7 @@ class SceneEngineRuntime:
             )
             mutation = self._program.step(
                 self._world,
-                TickContext(proposed, TICKS_PER_SECOND),
+                TickContext(proposed, self._config.ticks_per_second),
             )
             if not isinstance(mutation, MutationResult) or mutation.status != "changed":
                 raise RuntimeError("tick step must return a changed MutationResult")
@@ -695,7 +698,7 @@ class SceneEngineRuntime:
             product = self._program.build_commit(
                 self._world,
                 mutation,
-                CommitContext(proposed, TICKS_PER_SECOND),
+                CommitContext(proposed, self._config.ticks_per_second),
             )
             packet = self._encode_product_commit(proposed, product)
             self._record_state_packet(packet.raw_bytes, checkpoint=False)
@@ -726,7 +729,13 @@ class SceneEngineRuntime:
                 or queued.request.observed_commit_seq != self._commit_seq
             )
             mutation = self._program.handle_input(
-                self._world, queued.request, InputContext(proposed, stale)
+                self._world,
+                queued.request,
+                InputContext(
+                    proposed,
+                    stale,
+                    self._config.ticks_per_second,
+                ),
             )
             if not isinstance(mutation, MutationResult):
                 raise RuntimeError("handle_input must return MutationResult")
@@ -755,7 +764,7 @@ class SceneEngineRuntime:
             product = self._program.build_commit(
                 self._world,
                 mutation,
-                CommitContext(proposed, TICKS_PER_SECOND),
+                CommitContext(proposed, self._config.ticks_per_second),
             )
             packet = self._encode_product_commit(proposed, product)
             self._record_state_packet(packet.raw_bytes, checkpoint=False)
@@ -833,7 +842,7 @@ class SceneEngineRuntime:
             self._commit_seq,
             self._source_tick,
             self._world_revision,
-            TICKS_PER_SECOND,
+            self._config.ticks_per_second,
         )
         product = self._program.build_checkpoint(self._world, context)
         if not isinstance(product, ProductCheckpoint):

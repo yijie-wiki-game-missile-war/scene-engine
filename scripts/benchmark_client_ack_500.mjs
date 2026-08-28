@@ -9,6 +9,9 @@ import { DISPLAY_CODEC, encodePacket } from '../js/packages/client/src/wire.js';
 import {
   PREFAB_DEFINITION_SCHEMA,
   SCENE_DEFINITION_SCHEMA,
+  TICKS_PER_SECOND,
+  buildDisplayCatalogManifest,
+  computeDisplayCatalogIdentity,
   createComponentRegistry,
   createDisplayRuntime,
   createPrefabRegistry,
@@ -30,14 +33,16 @@ const EXPECTED_NODE_COUNT = 1_503;
 const FORMAL_COMMITS = 10_000;
 const QUICK_COMMITS = 500;
 const P95_LIMIT_MS = 8;
-const P99_LIMIT_MS = 1_000 / 60;
+const P99_LIMIT_MS = 1_000 / TICKS_PER_SECOND;
 const HEAP_GROWTH_LIMIT_BYTES = 8 * 1024 * 1024;
 const HEAP_SLOPE_LIMIT_BYTES_PER_COMMIT = 512;
 const STREAM_ID = '00000000-0000-4000-8000-000000000500';
 const WORLD_CODEC = 'benchmark-world-state@1';
-const SCENE_CATALOG_HASH = 'a'.repeat(64);
-const PREFAB_CATALOG_HASH = 'b'.repeat(64);
-const STATE_SCHEMA_HASH = 'c'.repeat(64);
+const AUTHORITY_STATE_SCHEMAS = Object.freeze([Object.freeze({
+  gameplayType: 'benchmark.authority-unit',
+  schemaId: 'benchmark.authority-unit.state@1',
+  revision: 1,
+})]);
 const IDENTITY = Object.freeze({
   position: Object.freeze([0, 0, 0]),
   rotationXyzw: Object.freeze([0, 0, 0, 1]),
@@ -161,6 +166,22 @@ function resources() {
   }];
 }
 
+function benchmarkCatalogIdentity() {
+  const sceneRegistry = createSceneRegistry([benchmarkScene()]);
+  const prefabRegistry = createPrefabRegistry([benchmarkPrefab()]);
+  const resourceRegistry = createResourceRegistry(resources());
+  const componentRegistry = createComponentRegistry();
+  return computeDisplayCatalogIdentity(buildDisplayCatalogManifest({
+    sceneRegistry,
+    prefabRegistry,
+    resourceRegistry,
+    componentRegistry,
+    authorityStateSchemas: AUTHORITY_STATE_SCHEMAS,
+  }));
+}
+
+const CATALOG_IDENTITY = benchmarkCatalogIdentity();
+
 function baselineNodes() {
   return Array.from({ length: AUTHORITY_ROOTS }, (_, index) => ({
     name: `py/benchmark-${index}`,
@@ -194,9 +215,9 @@ function checkpointPacket() {
     value: {
       schema: 'scene-engine-display-checkpoint@3',
       scene_name: 'benchmark',
-      scene_catalog_hash: SCENE_CATALOG_HASH,
-      prefab_catalog_hash: PREFAB_CATALOG_HASH,
-      state_schema_hash: STATE_SCHEMA_HASH,
+      scene_catalog_hash: CATALOG_IDENTITY.sceneCatalogHash,
+      prefab_catalog_hash: CATALOG_IDENTITY.prefabCatalogHash,
+      state_schema_hash: CATALOG_IDENTITY.stateSchemaHash,
       last_command_seq: 0,
       nodes: baselineNodes(),
     },
@@ -250,9 +271,9 @@ function commitPacket(commitSeq) {
 function createDisplaySessionFactory(evidence) {
   return (metadata) => {
     if (metadata.sceneName !== 'benchmark'
-        || metadata.sceneCatalogHash !== SCENE_CATALOG_HASH
-        || metadata.prefabCatalogHash !== PREFAB_CATALOG_HASH
-        || metadata.stateSchemaHash !== STATE_SCHEMA_HASH) {
+        || metadata.sceneCatalogHash !== CATALOG_IDENTITY.sceneCatalogHash
+        || metadata.prefabCatalogHash !== CATALOG_IDENTITY.prefabCatalogHash
+        || metadata.stateSchemaHash !== CATALOG_IDENTITY.stateSchemaHash) {
       throw new Error('benchmark session metadata mismatch');
     }
     const prefab = benchmarkPrefab();
@@ -263,6 +284,7 @@ function createDisplaySessionFactory(evidence) {
       prefabRegistry: createPrefabRegistry([prefab]),
       resourceRegistry: createResourceRegistry(resources()),
       componentRegistry: createComponentRegistry(),
+      authorityStateSchemas: AUTHORITY_STATE_SCHEMAS,
       createRenderBackend() {
         const fake = createFakeRenderBackend();
         fakeBackends.push(fake);

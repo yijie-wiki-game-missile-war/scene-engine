@@ -1,5 +1,8 @@
 # Scene Engine 显示端改动审核与收口建议
 
+
+> **历史审核记录：** 本文保存 2026-08-25 审核时的结论，不能用来判断当前 API。当前实现请以 `README.md`、`docs/` 当前合同和源码为准。
+
 审核日期：2026-08-25
 审核对象：`missile-war-display-closeout-code-docs-20260825` 中的 `scene-engine`、`python-game`、`arts` 三个独立仓库快照
 目标：确认通用显示运行时是否已经正确收回 `scene-engine`，检查公开合同、测试和交付材料，并补充一份面向 Agent 的 Scene Engine 使用 Skill。

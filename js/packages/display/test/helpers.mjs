@@ -63,7 +63,7 @@ export function emptyPrefab({ id = 'target.test.item', gameplayType = 'test.item
 
 export async function createHarness({ prefabEntries = null, resources = [], sceneNodes = [],
   prefabInstances = [], backendFactory = null, onHealth = null, configureComponents = null,
-  runtimeOptions = {},
+  bootstrapAuthority = null, runtimeOptions = {},
 } = {}) {
   const componentRegistry = createComponentRegistry();
   configureComponents?.(componentRegistry);
@@ -100,13 +100,39 @@ export async function createHarness({ prefabEntries = null, resources = [], scen
     prefabRegistry,
     resourceRegistry,
     componentRegistry,
+    authorityStateSchemas: [...new Set(entries.map((entry) => entry.gameplayType))].map(
+      (gameplayType) => ({ gameplayType, schemaId: `${gameplayType}.state`, revision: 1 }),
+    ),
     createRenderBackend: createBackend,
     frameAdapter: frames,
     onHealth,
     ...runtimeOptions,
   });
   const installReturn = runtime.installScene({ sceneName: 'main' });
+  bootstrapAuthority?.(runtime.authority);
   runtime.activate();
   return { runtime, frames, fakeBackends, componentRegistry, resourceRegistry,
     prefabRegistry, sceneRegistry, installReturn };
+}
+
+/** Apply one synchronous Authority transaction using the same begin/apply/seal boundary as Client. */
+export function commitAuthority(runtime, mutate, {
+  sourceTickDelta = 0,
+  commandCount = 1,
+} = {}) {
+  const previous = runtime.summary().cursor;
+  const cursor = Object.freeze({
+    commitSeq: previous.commitSeq + 1,
+    sourceTick: previous.sourceTick + sourceTickDelta,
+    lastCommandSeq: previous.lastCommandSeq + commandCount,
+  });
+  runtime.commitGate.begin(cursor);
+  try {
+    const result = mutate(cursor);
+    runtime.commitGate.seal(cursor);
+    return result;
+  } catch (error) {
+    runtime.commitGate.fail(error);
+    throw error;
+  }
 }

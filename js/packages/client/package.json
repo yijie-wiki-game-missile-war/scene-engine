@@ -1,6 +1,6 @@
 {
   "name": "@scene-engine/client",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "description": "Scene Engine wire decoder, WorldState client, display authority bridge, and packet-log reader",
   "type": "module",
   "sideEffects": false,
@@ -9,7 +9,11 @@
     "fixtures"
   ],
   "exports": {
-    ".": "./src/index.js",
+    ".": {
+      "types": "./src/index.d.ts",
+      "import": "./src/index.js",
+      "default": "./src/index.js"
+    },
     "./package.json": "./package.json"
   },
   "scripts": {
@@ -17,5 +21,6 @@
   },
   "engines": {
     "node": "^20.19.0 || >=22.12.0"
-  }
+  },
+  "types": "./src/index.d.ts"
 }

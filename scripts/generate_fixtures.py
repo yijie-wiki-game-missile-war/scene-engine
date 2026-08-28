@@ -121,7 +121,7 @@ def main() -> None:
         nodes=initial_nodes,
     )
     commands = (
-        DisplayCommand.create(
+        DisplayCommand.create_node(
             node("py/transient", parent_name="py/root", prefab_id="effects.marker")
         ),
         DisplayCommand.set_transform("py/aircraft", transform(1.5)),

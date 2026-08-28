@@ -2,8 +2,8 @@ import { BehaviourComponent } from '../component/behaviour-component.js';
 import { enumValue, exactKeys, tuple } from '../internal.js';
 import { quaternionFromForward } from '../math/quaternion.js';
 import { localDirectionForWorldFacing } from '../math/transform.js';
-import { fail } from '../runtime/health.js';
 import { assertNodeName } from '../node/node-name.js';
+import { fail } from '../runtime/health.js';
 
 export function normalizeLookAtProperties(value) {
   const record = exactKeys(value, [], ['targetNodeName', 'targetPosition', 'axisMode'],
@@ -27,27 +27,26 @@ export class LookAtComponent extends BehaviourComponent {
   static drivesTransform = true;
 
   tick(frame) {
-    const context = frame.display;
-    context.nodeGraph.flushWorldTransforms();
+    const display = frame.display;
     const target = this.properties.targetNodeName === null
       ? this.properties.targetPosition
-      : (() => {
-        const targetNode = context.nodeIndex.require(this.properties.targetNodeName);
-        return targetNode._worldTransform?.position ?? targetNode.getWorldTransform().position;
-      })();
+      : display.nodes.require(this.properties.targetNodeName).getWorldTransform().position;
     const node = this.node;
+    const nodeWorld = node.getWorldTransform();
     const direction = [
-      target[0] - node._worldTransform.position[0],
-      target[1] - node._worldTransform.position[1],
-      target[2] - node._worldTransform.position[2],
+      target[0] - nodeWorld.position[0],
+      target[1] - nodeWorld.position[1],
+      target[2] - nodeWorld.position[2],
     ];
+    const parentWorld = node.parentName === null
+      ? null : display.nodes.require(node.parentName).getWorldTransform();
     const localDirection = localDirectionForWorldFacing(
-      node.parent?._worldTransform ?? null,
+      parentWorld,
       direction,
       this.properties.axisMode,
     );
     const rotation = quaternionFromForward(localDirection, 'full');
-    node.setLocalTransform({
+    this.setDrivenLocalTransform({
       position: node.localTransform.position,
       rotationXyzw: rotation,
       scale: node.localTransform.scale,

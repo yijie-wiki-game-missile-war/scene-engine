@@ -7,6 +7,7 @@ import { NodeGraph } from '../src/node/node-graph.js';
 import { NodeIndex } from '../src/node/node-index.js';
 import { assertNodeName, joinPrefabNodeName, joinSceneNodeName, parseNodeName } from '../src/node/node-name.js';
 import { Node } from '../src/node/node.js';
+import { createInternalComponentContext } from '../src/runtime/component-context.js';
 import { IDENTITY } from './helpers.mjs';
 
 test('Node names use the frozen grammar and helpers never rename', () => {
@@ -46,7 +47,7 @@ test('world matrix preserves affine shear from non-uniform parent scale and chil
   assert(Math.abs(world.matrix[5]) < 1e-12);
 });
 
-test('Billboard and LookAt face world targets through a scaled and rotated ancestor', () => {
+test('initialize and continuous Billboard and LookAt face targets through a scaled and rotated ancestor', () => {
   const token = {}; const index = new NodeIndex(); const graph = new NodeGraph({ nodeIndex: index });
   const halfAngle = Math.PI / 8;
   const parent = new Node({ name: 'scene/main/parent', sceneToken: token, transform: {
@@ -55,23 +56,31 @@ test('Billboard and LookAt face world targets through a scaled and rotated ances
     scale: [100, 1, 3],
   } });
   const billboardNode = new Node({ name: 'scene/main/billboard', sceneToken: token, transform: IDENTITY });
+  const initializedNode = new Node({ name: 'scene/main/initialized-billboard', sceneToken: token,
+    transform: IDENTITY });
   const lookAtNode = new Node({ name: 'scene/main/look-at', sceneToken: token, transform: IDENTITY });
   const camera = new Node({ name: 'scene/main/camera', sceneToken: token,
     transform: { ...IDENTITY, position: [20, 4, 11] } });
-  for (const node of [parent, billboardNode, lookAtNode, camera]) index.register(node);
-  graph.attach(parent); graph.attach(billboardNode, parent); graph.attach(lookAtNode, parent); graph.attach(camera);
+  for (const node of [parent, billboardNode, initializedNode, lookAtNode, camera]) index.register(node);
+  graph.attach(parent); graph.attach(billboardNode, parent); graph.attach(initializedNode, parent);
+  graph.attach(lookAtNode, parent); graph.attach(camera);
   graph.flushWorldTransforms();
-  const context = { scene: { activeCameraName: camera.name }, nodeIndex: index, nodeGraph: graph };
+  const context = createInternalComponentContext({
+    scene: { name: 'main', activeCameraName: camera.name }, nodeIndex: index, nodeGraph: graph,
+  });
   const components = [
     [billboardNode, new BillboardComponent({ key: 'billboard', properties: {
       mode: 'continuous', axisMode: 'full', cameraName: camera.name,
+    } })],
+    [initializedNode, new BillboardComponent({ key: 'billboard', properties: {
+      mode: 'initialize', axisMode: 'full', cameraName: camera.name,
     } })],
     [lookAtNode, new LookAtComponent({ key: 'look-at', properties: {
       targetNodeName: camera.name, targetPosition: null, axisMode: 'full',
     } })],
   ];
   for (const [node, component] of components) {
-    node.addComponent(component); component.attach(node, context); component.tick({ display: context });
+    node.addComponent(component); component.attach(node, context); component.tick({ display: context.publicDisplay });
   }
   graph.flushWorldTransforms();
   for (const [node] of components) {

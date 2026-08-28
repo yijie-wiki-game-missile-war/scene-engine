@@ -1,4 +1,9 @@
 import { ComponentScheduler } from '../component/component-scheduler.js';
+import {
+  buildDisplayCatalogManifest,
+  computeDisplayCatalogIdentity,
+} from '../catalog/identity.js';
+import { createInternalComponentContext } from './component-context.js';
 import { assertSynchronous, cloneAndFreeze, exactKeys, safeInteger } from '../internal.js';
 import { NodeGraph } from '../node/node-graph.js';
 import { NodeIndex } from '../node/node-index.js';
@@ -21,6 +26,7 @@ const DISPLAY_OPTION_KEYS = Object.freeze({
     'resourceRegistry',
     'componentRegistry',
     'createRenderBackend',
+    'authorityStateSchemas',
   ]),
   optional: Object.freeze(['hostElement', 'canvas', 'frameAdapter', 'onHealth']),
 });
@@ -71,13 +77,14 @@ export class DisplayRuntime {
       resourceRegistry,
       componentRegistry,
       createRenderBackend,
+      authorityStateSchemas,
     } = record;
     const hostElement = record.hostElement ?? null;
     const canvas = record.canvas ?? null;
     const frameAdapter = record.frameAdapter ?? null;
     const onHealth = record.onHealth ?? null;
     if (!sceneRegistry || !prefabRegistry || !resourceRegistry || !componentRegistry
-        || typeof createRenderBackend !== 'function'
+        || typeof createRenderBackend !== 'function' || !Array.isArray(authorityStateSchemas)
         || (onHealth !== null && typeof onHealth !== 'function')) {
       fail('display-options-invalid');
     }
@@ -105,6 +112,15 @@ export class DisplayRuntime {
     this._rebuildPromise = null;
     this._disposePromise = null;
     this._lifecycleAbortController = new AbortController();
+
+    this._catalogManifest = buildDisplayCatalogManifest({
+      sceneRegistry,
+      prefabRegistry,
+      resourceRegistry,
+      componentRegistry,
+      authorityStateSchemas,
+    });
+    this._catalogIdentity = computeDisplayCatalogIdentity(this._catalogManifest);
 
     for (const registry of [sceneRegistry, prefabRegistry, resourceRegistry, componentRegistry]) {
       if (typeof registry.seal !== 'function') fail('display-options-invalid');
@@ -137,20 +153,15 @@ export class DisplayRuntime {
       renderSystem: this._renderSystem,
       sceneToken: Object.freeze({}),
     });
-    this._componentContext = {
-      display: null,
+    this._componentContext = createInternalComponentContext({
       scene: this._scene,
       nodeIndex: this._nodeIndex,
       nodeGraph: this._nodeGraph,
-      scheduler: this._scheduler,
-      renderSystem: this._renderSystem,
-      authority: null,
       componentAttached: (component) => this._componentAttached(component),
       componentEnabledChanged: (component) => this._componentEnabledChanged(component),
       componentPropertiesChanged: (component) => this._componentPropertiesChanged(component),
       componentDetaching: (component) => this._componentDetaching(component),
-    };
-    this._componentContext.display = this._componentContext;
+    });
     this._prefabInstantiator = new PrefabInstantiator({
       scene: this._scene,
       componentContext: this._componentContext,
@@ -163,7 +174,6 @@ export class DisplayRuntime {
       onCleanupErrors: (errors) => this._reportCleanupErrors(errors),
       assertMutable: () => this._assertAuthorityMutable(),
     }));
-    this._componentContext.authority = this.authority;
     this._sceneLoader = new SceneLoader({
       scene: this._scene,
       componentContext: this._componentContext,
@@ -198,6 +208,8 @@ export class DisplayRuntime {
     this._revision += 1;
     return this;
   }
+
+  catalogIdentity() { this._assertNotDisposed(); return this._catalogIdentity; }
 
   activate(cursor = ZERO_CURSOR) {
     this._assertNotDisposed();
@@ -358,8 +370,6 @@ export class DisplayRuntime {
       } finally {
         try { scene.release(); } catch (error) { cleanupErrors.push(error); }
         this._reportCleanupErrors(cleanupErrors);
-        this.authority = null;
-        this.commitGate = null;
         this._hostElement = null;
         this._canvas = null;
         this._createRenderBackend = null;
@@ -373,6 +383,8 @@ export class DisplayRuntime {
         this._componentContext = null;
         this._prefabInstantiator = null;
         this._sceneLoader = null;
+        this._catalogManifest = null;
+        this._catalogIdentity = null;
         this._lifecycleAbortController = null;
         this._rebuildPromise = null;
         this._health = 'disposed';
@@ -462,7 +474,7 @@ export class DisplayRuntime {
       visualSeconds: Math.max(0, (now - this._visualOrigin) / 1000),
       deltaSeconds,
       frameIndex: this._frameIndex,
-      display: this._componentContext,
+      display: this._componentContext.publicDisplay,
     });
     try {
       this._scheduler.runUpdate(frame);
@@ -470,7 +482,7 @@ export class DisplayRuntime {
       this._scheduler.runBeforeRender(frame);
       this._nodeGraph.flushWorldTransforms();
       if (!this._renderSystem.prepareFrame(frame)) return;
-      this._renderSystem.render(frame);
+      this._renderSystem.render();
       this._frameIndex += 1;
     } catch (error) {
       if (this._health === 'ready') this._failRuntime('display-frame-failed', error);
@@ -532,6 +544,9 @@ export class DisplayRuntime {
   _assertAuthorityMutable() {
     this._assertHealthy();
     if (!this._installed) fail('display-scene-not-installed');
+    if (this._active && this._pendingCursor === null) {
+      fail('display-authority-outside-commit');
+    }
   }
   _assertNotDisposed() { if (this._disposed) fail('display-disposed'); }
   _assertHealthy() {

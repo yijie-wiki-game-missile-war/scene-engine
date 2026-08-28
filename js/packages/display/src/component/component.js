@@ -3,8 +3,14 @@ import { fail } from '../runtime/health.js';
 
 const COMPONENT_MUTATION_TOKEN = Object.freeze({});
 const REPLACE_PROPERTIES = Symbol('scene-engine.component.replace-properties');
+const ATTACHMENTS = new WeakMap();
 
-// Package-private: the mutation token and symbol are intentionally not exported.  The
+// Package-private helpers. The package root does not export these capabilities.
+export function attachedComponentNode(component) {
+  return ATTACHMENTS.get(component)?.node ?? null;
+}
+
+// Package-private: the mutation token and symbol are intentionally not exported. The
 // ComponentRegistry is the only public object that can reach this operation.
 export function replaceComponentProperties(component, properties) {
   if (!(component instanceof Component)) fail('display-component-invalid');
@@ -24,15 +30,13 @@ export class Component {
     if (typeof enabled !== 'boolean') fail('display-component-enabled-invalid');
     this._enabled = enabled;
     this.#properties = cloneAndFreeze(properties, 'display-component-properties-invalid');
-    this._node = null;
-    this._context = null;
     this._attached = false;
     this._attachAttempted = false;
     this._disposed = false;
   }
 
   get key() { return this._key; }
-  get node() { return this._node; }
+  get node() { return ATTACHMENTS.get(this)?.view ?? null; }
   get enabled() { return this._enabled; }
   get disposed() { return this._disposed; }
   get properties() { return this.#properties; }
@@ -40,17 +44,18 @@ export class Component {
 
   attach(node, context) {
     if (this._disposed) fail('display-component-disposed');
-    if (this._attachAttempted || this._attached || this._node !== null) {
+    if (this._attachAttempted || this._attached || ATTACHMENTS.has(this)) {
       fail('display-component-already-attached');
     }
-    if (!node || !context) fail('display-component-attach-invalid');
-    this._node = node;
-    this._context = context;
+    if (!node || !context || typeof context.nodeViewFor !== 'function'
+        || !context.publicDisplay) fail('display-component-attach-invalid');
+    const attachment = { node, context, view: context.nodeViewFor(node) };
+    ATTACHMENTS.set(this, attachment);
     this._attachAttempted = true;
     let hookStarted = false;
     try {
       hookStarted = true;
-      assertSynchronous(this.onAttach?.(context), 'display-component-async-handler');
+      assertSynchronous(this.onAttach?.(context.publicDisplay), 'display-component-async-handler');
       this._attached = true;
       context.componentAttached?.(this);
     } catch (error) {
@@ -59,13 +64,12 @@ export class Component {
       }
       if (hookStarted) {
         try {
-          assertSynchronous(this.onDispose?.(context, 'attach-rollback'),
+          assertSynchronous(this.onDispose?.(context.publicDisplay, 'attach-rollback'),
             'display-component-async-handler');
         } catch { /* preserve the attach error */ }
       }
       this._attached = false;
-      this._node = null;
-      this._context = null;
+      ATTACHMENTS.delete(this);
       throw error;
     }
     return this;
@@ -76,25 +80,38 @@ export class Component {
     if (typeof enabled !== 'boolean') fail('display-component-enabled-invalid');
     if (enabled === this._enabled) return;
     this._enabled = enabled;
-    if (this._attached) this._context.componentEnabledChanged?.(this);
+    const attachment = ATTACHMENTS.get(this);
+    if (this._attached) attachment.context.componentEnabledChanged?.(this);
+  }
+
+  /**
+   * Change only this component's own Node transform. The capability exists only for
+   * components whose class declares drivesTransform=true and never applies to py/ roots.
+   */
+  setDrivenLocalTransform(transform) {
+    if (this._disposed) fail('display-component-disposed');
+    const attachment = ATTACHMENTS.get(this);
+    // The attachment exists during onAttach, before scheduler registration completes.
+    if (!attachment) fail('display-component-not-attached');
+    attachment.context.setDrivenLocalTransform(this, attachment.node, transform);
   }
 
   dispose(reason = 'disposed') {
     if (this._disposed) return Object.freeze([]);
     const errors = [];
-    if (this._attached) {
-      try { this._context.componentDetaching?.(this); } catch (error) { errors.push(error); }
+    const attachment = ATTACHMENTS.get(this) ?? null;
+    if (this._attached && attachment !== null) {
+      try { attachment.context.componentDetaching?.(this); } catch (error) { errors.push(error); }
       try {
         assertSynchronous(
-          this.onDispose?.(this._context, reason),
+          this.onDispose?.(attachment.context.publicDisplay, reason),
           'display-component-async-handler',
         );
       } catch (error) { errors.push(error); }
     }
     this._attached = false;
     this._disposed = true;
-    this._context = null;
-    this._node = null;
+    ATTACHMENTS.delete(this);
     return Object.freeze(errors);
   }
 
@@ -103,17 +120,24 @@ export class Component {
     if (this._disposed) fail('display-component-disposed');
     const previous = this.#properties;
     this.#properties = properties;
+    const attachment = ATTACHMENTS.get(this);
     try {
-      if (this._attached) this._context.componentPropertiesChanged?.(this);
+      if (this._attached) attachment.context.componentPropertiesChanged?.(this);
     } catch (error) {
       this.#properties = previous;
       throw error;
     }
     return this.#properties;
   }
+
   _adoptContext(context) {
-    if (!this._attached || this._disposed) fail('display-component-adopt-state-invalid');
-    this._context = context;
+    const attachment = ATTACHMENTS.get(this);
+    if (!this._attached || this._disposed || !attachment
+        || typeof context.nodeViewFor !== 'function' || !context.publicDisplay) {
+      fail('display-component-adopt-state-invalid');
+    }
+    attachment.context = context;
+    attachment.view = context.nodeViewFor(attachment.node);
     context.componentAttached?.(this);
   }
 }

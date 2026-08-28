@@ -1,14 +1,18 @@
 {
   "name": "@scene-engine/display",
-  "version": "0.3.0",
-  "description": "Renderer-neutral Scene Engine node, component, scene, prefab, and display runtime",
+  "version": "0.4.0",
+  "description": "Renderer-isolated browser Scene, Prefab, Node, Component, Resource, and projection runtime",
   "type": "module",
   "sideEffects": false,
   "files": [
     "src"
   ],
   "exports": {
-    ".": "./src/index.js",
+    ".": {
+      "types": "./src/index.d.ts",
+      "import": "./src/index.js",
+      "default": "./src/index.js"
+    },
     "./package.json": "./package.json"
   },
   "scripts": {
@@ -16,5 +20,6 @@
   },
   "engines": {
     "node": "^20.19.0 || >=22.12.0"
-  }
+  },
+  "types": "./src/index.d.ts"
 }

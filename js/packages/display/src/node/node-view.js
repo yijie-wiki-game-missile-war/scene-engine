@@ -4,7 +4,11 @@ import { writeWorldTransform } from '../math/transform.js';
 export class NodeView {
   #node;
   #graph;
-  constructor(node, graph) { this.#node = node; this.#graph = graph; }
+  constructor(node, graph) {
+    this.#node = node;
+    this.#graph = graph;
+    Object.freeze(this);
+  }
   get name() { return this.#node.name; }
   get label() { return this.#node.label; }
   get parentName() { return this.#node.parent?.name ?? null; }

@@ -4,10 +4,27 @@ import test from 'node:test';
 import { BehaviourComponent } from '../src/component/behaviour-component.js';
 import { ComponentScheduler } from '../src/component/component-scheduler.js';
 import { ComponentRegistry } from '../src/component/component-registry.js';
+import { NodeGraph } from '../src/node/node-graph.js';
+import { NodeIndex } from '../src/node/node-index.js';
 import { Node } from '../src/node/node.js';
 import { RenderComponent } from '../src/render/render-component.js';
 import { createResourceRegistry } from '../src/resource/resource-registry.js';
+import { createInternalComponentContext } from '../src/runtime/component-context.js';
 import { IDENTITY } from './helpers.mjs';
+
+
+function componentContext(node, callbacks = {}) {
+  const nodeIndex = new NodeIndex();
+  const nodeGraph = new NodeGraph({ nodeIndex });
+  nodeIndex.register(node);
+  nodeGraph.attach(node);
+  return createInternalComponentContext({
+    scene: { name: 'main', activeCameraName: null },
+    nodeIndex,
+    nodeGraph,
+    ...callbacks,
+  });
+}
 
 class ProbeBehaviour extends BehaviourComponent {
   static typeId = 'test.probe@1';
@@ -22,11 +39,11 @@ test('Component attach/tick/dispose is synchronous, ordered, and idempotent', ()
   const component = new ProbeBehaviour({ key: 'probe', properties: {} });
   const node = new Node({ name: 'scene/main/node', sceneToken: {}, transform: IDENTITY });
   node.addComponent(component);
-  const context = {
+  const context = componentContext(node, {
     componentAttached: (value) => scheduler.register(value),
     componentEnabledChanged: (value) => scheduler.setEnabled(value, value.enabled),
     componentDetaching: (value) => scheduler.unregister(value),
-  };
+  });
   component.attach(node, context); scheduler.runUpdate({});
   component.setEnabled(false); scheduler.runUpdate({});
   assert.deepEqual(component.events, ['attach', 'tick']);
@@ -48,12 +65,35 @@ test('Promise-returning handlers fail attach, consume rejection, and do not stay
   const component = new AsyncBehaviour({ key: 'async', properties: {} });
   const node = new Node({ name: 'scene/main/node', sceneToken: {}, transform: IDENTITY });
   node.addComponent(component);
-  assert.throws(() => component.attach(node, {}), { code: 'display-component-async-handler' });
+  assert.throws(() => component.attach(node, componentContext(node)),
+    { code: 'display-component-async-handler' });
   assert.equal(component.node, null);
   assert.equal(disposed, 1);
   await new Promise((resolve) => setImmediate(resolve));
   process.off('unhandledRejection', onUnhandled);
   assert.deepEqual(unhandled, []);
+});
+
+test('Behaviour hooks receive only read-only Display and Node views', () => {
+  let received = null;
+  class CapabilityProbe extends BehaviourComponent {
+    static typeId = 'test.capability-probe@1';
+    onAttach(display) { received = display; }
+  }
+  const component = new CapabilityProbe({ key: 'probe', properties: {} });
+  const node = new Node({ name: 'scene/main/node', sceneToken: {}, transform: IDENTITY });
+  node.addComponent(component);
+  component.attach(node, componentContext(node));
+
+  assert.equal(Object.isFrozen(received), true);
+  assert.equal('nodeIndex' in received, false);
+  assert.equal('nodeGraph' in received, false);
+  assert.equal('authority' in received, false);
+  assert.equal('renderSystem' in received, false);
+  assert.equal(Object.isFrozen(component.node), true);
+  assert.equal(component.node.name, node.name);
+  assert.equal(component.node.setVisible, undefined);
+  assert.equal(component.node.setLocalTransform, undefined);
 });
 
 test('Scheduler snapshot makes additions next-round and removals immediate', () => {
@@ -120,7 +160,9 @@ test('Component properties have one resource-validated atomic Registry mutation 
   const node = new Node({ name: 'scene/main/node', sceneToken: {}, transform: IDENTITY });
   node.addComponent(component);
   let changed = 0;
-  component.attach(node, { componentPropertiesChanged() { changed += 1; } });
+  component.attach(node, componentContext(node, {
+    componentPropertiesChanged() { changed += 1; },
+  }));
 
   assert.equal(component.patchProperties, undefined);
   assert.equal(component._replaceNormalizedProperties, undefined);

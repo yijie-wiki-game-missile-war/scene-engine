@@ -1,5 +1,7 @@
 export const THREE_RENDER_BACKEND_SCHEMA = 'scene-engine-three-render-backend@1';
 
+export const TICKS_PER_SECOND = 60;
+
 export const COMPONENT_TYPES = Object.freeze(new Set([
   'render.model@1',
   'render.mesh@1',

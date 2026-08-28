@@ -27,6 +27,7 @@ export class SceneRegistry {
     if (!result) fail('display-scene-missing');
     return result;
   }
+  values() { return this._definitions.values(); }
 }
 
 export class PrefabRegistry {
@@ -48,6 +49,7 @@ export class PrefabRegistry {
     if (!result) fail('display-prefab-missing');
     return result;
   }
+  values() { return this._definitions.values(); }
 }
 
 export function createSceneRegistry(initial = []) {

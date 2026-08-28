@@ -1,7 +1,11 @@
 # Display repair and Showcase cutover report
 
-> Historical closeout: this report records the 0.9.1 renderer tuple. The current
-> renderer patch is 0.9.2; see `docs/renderer-three-0.9.2-patch.md`.
+> **Historical evidence only:** this report records an older release tuple and is not a current API contract.
+> See `README.md` for the active tuple and current documents.
+
+
+> Historical closeout: this report records the 0.9.1 renderer tuple. At that closeout,
+> the follow-up renderer patch was 0.9.2; see `docs/renderer-three-0.9.2-patch.md`.
 
 Release state: `READY`.
 
@@ -25,7 +29,7 @@ browser products                 production + read-only Showcase
 | --- | --- | --- | --- |
 | Implementation base | `4b7843f312c70743bb0edc15621cdc9ccbe9b7ac` | `4eb74f5a946abab233da2849642bcf587cdde415` | `30529c999fcd8b92b0988c6ae46984d22ecb99d4` |
 | Final tested commit | `4b7843f312c70743bb0edc15621cdc9ccbe9b7ac` | `4eb74f5a946abab233da2849642bcf587cdde415` | `005ecd7a6b0a5a506b5587aaff3a8db94f46d0a5` |
-| Delivered commit | `$Format:%H$` | delivery manifest | delivery manifest |
+| Delivered commit | `444421ceec212f862499a2a08011c838a88147b0` | delivery manifest | delivery manifest |
 
 The implementation base is the tuple at the start of this closeout. Final
 Engine, gameplay, Arts, clean-install, capture, and browser tests ran against

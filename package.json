@@ -1,6 +1,6 @@
 {
   "name": "scene-engine-workspace",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "private": true,
   "type": "module",
   "packageManager": "npm@11.9.0",
@@ -12,7 +12,11 @@
     "js/packages/*"
   ],
   "scripts": {
-    "test": "npm test --workspaces --if-present",
-    "verify": "uv run python scripts/verify_cutover.py"
+    "test": "npm test --workspaces --if-present && npm run typecheck",
+    "verify": "uv run python scripts/verify_cutover.py",
+    "typecheck": "tsc -p js/types/tsconfig.json"
+  },
+  "devDependencies": {
+    "typescript": "5.8.3"
   }
 }

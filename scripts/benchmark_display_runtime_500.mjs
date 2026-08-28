@@ -11,6 +11,7 @@ import {
   BehaviourComponent,
   PREFAB_DEFINITION_SCHEMA,
   SCENE_DEFINITION_SCHEMA,
+  TICKS_PER_SECOND,
   createComponentRegistry,
   createDisplayRuntime,
   createPrefabRegistry,
@@ -37,7 +38,7 @@ const FORMAL_VALIDATION_TICKS = 600;
 const FORMAL_SOAK_TICKS = 36_000;
 const QUICK_VALIDATION_TICKS = 30;
 const QUICK_SOAK_TICKS = 120;
-const TICK_MS = 1_000 / 60;
+const TICK_MS = 1_000 / TICKS_PER_SECOND;
 const FRAME_BUDGET_MS = TICK_MS;
 const PREPARE_P95_TARGET_MS = 8;
 const HEAP_GROWTH_LIMIT_BYTES = 8 * 1024 * 1024;
@@ -542,11 +543,11 @@ function commandSizeSummary(values) {
 
 function secondWindows(metrics, start, length) {
   const result = [];
-  for (let offset = 0; offset < length; offset += 60) {
+  for (let offset = 0; offset < length; offset += TICKS_PER_SECOND) {
     const from = start + offset;
-    const to = Math.min(start + length, from + 60);
+    const to = Math.min(start + length, from + TICKS_PER_SECOND);
     result.push({
-      second: Math.floor(offset / 60),
+      second: Math.floor(offset / TICKS_PER_SECOND),
       ticks: to - from,
       commandApply: summary(metrics.commandApplyUs.subarray(from, to)),
       transformFlush: summary(metrics.transformFlushUs.subarray(from, to)),
@@ -682,6 +683,10 @@ async function run({ quick }) {
     prefabRegistry,
     resourceRegistry,
     componentRegistry,
+    authorityStateSchemas: [
+      { gameplayType: 'benchmark.regular', schemaId: 'benchmark.regular.state@1', revision: 1 },
+      { gameplayType: 'benchmark.ticking', schemaId: 'benchmark.ticking.state@1', revision: 1 },
+    ],
     createRenderBackend,
     frameAdapter: frames,
     onHealth: (event) => healthEvents.push(event),
@@ -816,11 +821,11 @@ async function run({ quick }) {
     source: await sourceIdentity(),
     hardware: hardware(),
     parameters: {
-      authoritativeRateHz: 60,
+      authoritativeRateHz: TICKS_PER_SECOND,
       validationTicks,
-      validationLogicalSeconds: validationTicks / 60,
+      validationLogicalSeconds: validationTicks / TICKS_PER_SECOND,
       soakTicks,
-      soakLogicalSeconds: soakTicks / 60,
+      soakLogicalSeconds: soakTicks / TICKS_PER_SECOND,
       totalCommittedTicks: totalTicks,
       commandsPerTick: COMMANDS_PER_TICK,
       totalCommands: lastCommandSeq,

@@ -1,3 +1,4 @@
+import { attachedComponentNode } from '../component/component.js';
 import { assertSynchronous, cloneAndFreeze } from '../internal.js';
 import { DisplayRuntimeError, fail } from '../runtime/health.js';
 import { CameraComponent } from './components.js';
@@ -53,13 +54,14 @@ export class RenderSystem {
 
   register(component) {
     this._assertUsable();
-    if (!(component instanceof RenderComponent) || component.node === null) {
+    const node = attachedComponentNode(component);
+    if (!(component instanceof RenderComponent) || node === null) {
       fail('display-render-component-invalid');
     }
     if (this._entries.has(component)) fail('display-render-component-duplicate');
     const entry = {
       component,
-      identity: bindingIdentity(component.node.name, component.key),
+      identity: bindingIdentity(node.name, component.key),
       binding: null,
       state: 'unregistered',
       token: null,
@@ -67,8 +69,8 @@ export class RenderSystem {
       generation: this._generation,
     };
     this._entries.set(component, entry);
-    let entries = this._byNode.get(component.node);
-    if (!entries) { entries = new Set(); this._byNode.set(component.node, entries); }
+    let entries = this._byNode.get(node);
+    if (!entries) { entries = new Set(); this._byNode.set(node, entries); }
     entries.add(entry);
     if (this._backend) this._mount(entry);
     this._onNeedsDraw?.();
@@ -78,9 +80,10 @@ export class RenderSystem {
     const entry = this._entries.get(component);
     if (!entry) return;
     this._entries.delete(component);
-    const entries = this._byNode.get(component.node);
+    const node = attachedComponentNode(component);
+    const entries = this._byNode.get(node);
     entries?.delete(entry);
-    if (entries?.size === 0) this._byNode.delete(component.node);
+    if (entries?.size === 0) this._byNode.delete(node);
     entry.token = null;
     entry.state = 'disposed';
     if (entry.binding !== null && this._backend && !this._retiredBackends.has(this._backend)) {
@@ -121,7 +124,7 @@ export class RenderSystem {
     for (const entry of this._entries.values()) {
       if (!entry.dirty || entry.state !== 'ready') continue;
       const component = entry.component;
-      const node = component.node;
+      const node = attachedComponentNode(component);
       const patch = Object.freeze({
         identity: entry.identity,
         worldMatrix: Object.freeze(Array.from(node._worldTransform.matrix)),
@@ -150,10 +153,10 @@ export class RenderSystem {
     return true;
   }
 
-  render(frame) {
+  render() {
     this._assertHealthy();
     return this._runBackend('display-render-draw-failed', () => assertSynchronous(
-      this._backend.render(frame),
+      this._backend.render(),
       'display-render-backend-async-frame-method',
     ));
   }

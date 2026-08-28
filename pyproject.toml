@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "scene-engine"
-version = "0.8.0"
-description = "Fixed-step runtime with world state and Display Node command publication"
+version = "0.9.0"
+description = "Server-authoritative fixed-step runtime and deterministic Display projection publication"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = []

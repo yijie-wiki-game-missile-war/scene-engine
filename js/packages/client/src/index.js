@@ -128,6 +128,11 @@ export class SceneEngineClient {
         'display-session-factory-async',
       );
       candidate = createSession(candidate);
+      assertCatalogIdentity(candidate.runtime, Object.freeze({
+        sceneCatalogHash: checkpoint.sceneCatalogHash,
+        prefabCatalogHash: checkpoint.prefabCatalogHash,
+        stateSchemaHash: checkpoint.stateSchemaHash,
+      }));
       callSynchronous(
         candidate.runtime.installScene,
         candidate.runtime,
@@ -340,23 +345,44 @@ function displayCursor(commit) {
 function createSession(value) {
   requireSynchronousResult(value, 'display-session-factory-async');
   requireRecord(value, 'display-session-invalid');
-  const expected = new Set([
-    'runtime', 'authorityPort', 'commitGate', 'dispose',
-  ]);
-  const keys = Reflect.ownKeys(value);
-  if (keys.length !== expected.size
-      || keys.some((key) => typeof key !== 'string' || !expected.has(key))) {
-    fail('display-session-fields-invalid');
+  for (const key of ['runtime', 'authorityPort', 'commitGate', 'dispose']) {
+    if (!Object.hasOwn(value, key)) fail('display-session-fields-invalid');
   }
   requireMethods(
     value.runtime,
-    ['installScene', 'activate', 'start', 'summary', 'currentView'],
+    ['catalogIdentity', 'installScene', 'activate', 'start', 'summary', 'currentView'],
     'display-session-runtime-invalid',
   );
   requireMethods(value.authorityPort, Object.values(AUTHORITY_METHOD), 'authority-port-invalid');
   requireMethods(value.commitGate, ['begin', 'seal', 'fail'], 'display-commit-gate-invalid');
   if (typeof value.dispose !== 'function') fail('display-session-dispose-invalid');
-  return value;
+  return Object.freeze({
+    runtime: value.runtime,
+    authorityPort: value.authorityPort,
+    commitGate: value.commitGate,
+    dispose: () => value.dispose.call(value),
+  });
+}
+
+function assertCatalogIdentity(runtime, expected) {
+  const actual = callSynchronous(
+    runtime.catalogIdentity,
+    runtime,
+    [],
+    'display-catalog-identity-async',
+  );
+  requireRecord(actual, 'display-catalog-identity-invalid');
+  const fields = ['sceneCatalogHash', 'prefabCatalogHash', 'stateSchemaHash'];
+  const keys = Reflect.ownKeys(actual);
+  if (keys.length !== fields.length || keys.some((key) => !fields.includes(key))) {
+    fail('display-catalog-identity-invalid');
+  }
+  for (const field of fields) {
+    if (typeof actual[field] !== 'string' || !/^[0-9a-f]{64}$/u.test(actual[field])) {
+      fail('display-catalog-identity-invalid');
+    }
+    if (actual[field] !== expected[field]) fail('display-catalog-identity-mismatch');
+  }
 }
 
 function callAuthority(authorityPort, method, record) {

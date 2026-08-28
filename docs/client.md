@@ -1,6 +1,7 @@
-# JavaScript client 0.9
+# JavaScript Client 0.10
 
-`@scene-engine/client@0.9.0` exports:
+`@scene-engine/client@0.10.0` is the only browser packet decoder, immutable WorldState owner, cumulative ACK barrier and Display
+session bridge. Its root exports:
 
 ```text
 SceneEngineClient
@@ -12,31 +13,71 @@ readEnginePacket
 readPacketLog
 ```
 
-The constructor requires a synchronous `createDisplaySession(metadata)` function. A session has exactly these fields, with no
-optional or extra fields:
+The package also publishes `src/index.d.ts`.
+
+## Session contract
+
+The constructor requires synchronous `createDisplaySession(metadata)`. The returned object must contain:
 
 ```text
 runtime
-authorityPort create/set/reparent/state/replace/remove methods
-commitGate begin / seal / fail
+  catalogIdentity / installScene / activate / start / summary / currentView
+authorityPort
+  createNode / setNodeTransform / setNodeParent / setNodeVisible / setNodeState / replaceNodePrefab / removeNode
+commitGate
+  begin / seal / fail
 dispose
 ```
 
-`runtime` must synchronously provide `installScene`, `activate`, `start`, `summary` and `currentView`. Promise-returning session
-factories, runtime methods, authority operations, commit-gate operations, summaries or current views fail closed.
+A product wrapper may contain extra fields. Client validates the required capabilities, extracts only these four fields into its
+own frozen session wrapper and ignores the extras. A missing required field fails closed.
 
-Checkpoint processing builds a complete World candidate, validates the Display baseline and catalog identities, creates a
-fresh candidate session, installs `sceneName`, applies every authority root parent-first, activates the exact cursor and starts
-the runtime. It then obtains an O(1) summary, encodes ACK, atomically swaps the session/World/cursors, disposes the previous
-session, and queues the observer. Any pre-swap failure completely disposes the candidate and leaves the previous session
-active.
+The transaction barrier is synchronous. `createDisplaySession`, `catalogIdentity`, `installScene`, `activate`, `start`, every
+Authority operation, `commitGate.begin`, `commitGate.seal`, `summary`, and `currentView` must return directly; a Promise from any
+of them fails closed. Cleanup is deliberately different: `dispose` and error-path `commitGate.fail` may return a Promise, but the
+Client observes it only to suppress an unhandled rejection and never waits for it before replacement, failure propagation, or
+ACK handling.
 
-Commit processing first validates the entire command stream and World patch. It then opens the exact cursor gate, invokes one
-AuthorityPort method per command, seals the cursor, publishes the WorldState and cursors, reads `runtime.summary()`, and encodes
-the cumulative ACK. A command failure calls `gate.fail`, publishes no ACK, and leaves the projection invalid. Resource
-completion, full-tree snapshots, HUD, drawing and observers are outside this synchronous barrier.
+## Checkpoint
 
-The `onCommit` payload is a frozen record with exactly:
+Checkpoint processing:
+
+1. validates the packet, World snapshot and parent-first Display baseline;
+2. creates a fresh candidate session;
+3. reads `runtime.catalogIdentity()` and compares all three SHA-256 values with the checkpoint;
+4. installs `sceneName` only after identity matches;
+5. creates every authority root parent-first;
+6. activates the exact cursor and starts the runtime;
+7. reads O(1) summary and builds ACK bytes;
+8. atomically swaps session, WorldState and cursors;
+9. disposes the previous session and queues the observer.
+
+Any pre-swap failure disposes the candidate and leaves the previous active session untouched. A catalog mismatch therefore
+cannot partially install the wrong Scene.
+
+## Commit
+
+Commit processing validates the complete command stream and next immutable World before it opens the Display gate. It then:
+
+```text
+commitGate.begin(cursor)
+  -> one AuthorityPort call per command
+commitGate.seal(cursor)
+  -> publish WorldState and cursors
+  -> runtime.summary()
+  -> encode cumulative ACK
+  -> queue onCommit microtask
+```
+
+A command failure calls `commitGate.fail`, emits no ACK and leaves the projection invalid. The Client never performs local repair;
+recovery requires a fresh checkpoint/session.
+
+ACK means WorldState, all synchronous Authority operations and the cursor were accepted. It does not wait for resources,
+DisplayView construction, HUD, observers, RAF or draw.
+
+## Observation and explicit queries
+
+`onCommit` receives a frozen record:
 
 ```js
 {
@@ -47,13 +88,14 @@ The `onCommit` payload is a frozen record with exactly:
 }
 ```
 
-The observer is queued with `queueMicrotask` only after the commit has succeeded and its ACK bytes exist. `applyPacket()`
-returns those ACK bytes synchronously; the observer cannot delay, withhold or roll back them, and an observer exception does
-not change the installed state.
+It is queued only after ACK bytes exist. Observer failure cannot delay, withhold or roll back the commit.
 
-`displaySummary` uses `scene-engine-display-summary@1` and is O(1): scene name, runtime revision, cursor, `NodeIndex.size` and
-health only. A full immutable DisplayView is produced only by explicit `client.currentDisplayView()`. `client.capture()` is an
-explicit complete snapshot and includes a DisplayView; neither operation is called for normal checkpoint/commit observation.
+Use:
 
-The client has no product Node graph or transform cache. Replay feeds the same exact packet bytes through the same client and
-AuthorityPort path.
+- `currentWorldState()` and `currentCommit()` for current pointers;
+- `currentDisplayView()` only for explicit full-tree picking, focus, diagnosis or tests;
+- `capture()` for an explicit complete snapshot;
+- `encodeInput(...)` so input carries the current observed stream and commit.
+
+Replay feeds exact recorded Engine packet bytes through the same `applyPacket` and AuthorityPort path. The Client owns no second
+Node graph or Transform cache.

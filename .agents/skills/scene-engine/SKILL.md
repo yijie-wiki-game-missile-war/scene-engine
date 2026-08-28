@@ -101,7 +101,8 @@ class GameProgram:
 
 Rules:
 
-- `step` is called for each ordered tick and must return `MutationResult.changed(...)`.
+- `step` is called for each ordered tick and must return `MutationResult.changed(...)`. Pass any opaque product data needed by
+  `build_commit` as `commit_context`; do not use the removed generic `detail` bag.
 - Input may return `changed`, `no_op`, or `rejected`; only `changed` creates a same-tick commit and increments revision.
 - Product code mutates the World only while the runtime has loaned it through one of these callbacks.
 - Use integer tick for gameplay and simulation animation. Never use wall time, RAF time, WebSocket arrival time, or frame count
@@ -114,8 +115,12 @@ Rules:
   lights, cameras, pipelines, or Prefab-local paths.
 - `PrefabDefinition.id` is the unique display-catalog identity. `PrefabDefinition.gameplayType` is a non-unique
   gameplay/state-contract classification; multiple Prefabs may share it.
-- `DisplayCommand.set_state` replaces the complete state object; it is not a merge patch.
+- `DisplayCommand.set_state` replaces the complete state object; it is not a merge patch. Construct commands only through the
+  named `DisplayCommand.create_node`, `set_transform`, `set_parent`, `set_visible`, `set_state`, `replace_prefab`, and `remove`
+  constructors; the generic `kind + fields` constructor is not public.
 - The Engine, not the product, assigns `command_seq`, commit sequence, stream identity, revision, and encoded bytes.
+- The contract rate is exactly `TICKS_PER_SECOND == 60`. Carry it through `RuntimeConfig.ticks_per_second` and runtime contexts as
+  a variable; it is not a configurable alternate frame rate.
 
 Typical host loop:
 
@@ -125,7 +130,7 @@ runtime = SceneEngineRuntime(
     program=program,
     transport=transport,
     recorder=recorder,
-    config=RuntimeConfig(ticks_per_second=60),
+    config=RuntimeConfig(ticks_per_second=TICKS_PER_SECOND),
 )
 
 runtime.start()
@@ -151,8 +156,7 @@ Create one `SceneEngineClient` for one current live or Replay projection:
 import { SceneEngineClient } from '@scene-engine/client';
 
 const client = new SceneEngineClient({
-  createDisplaySession(metadata) {
-    verifyCatalogIdentity(metadata);
+  createDisplaySession() {
     return createProductDisplaySession();
   },
   onCommit({ kind, commit, worldState, displaySummary }) {
@@ -168,7 +172,8 @@ function receiveEnginePacket(rawBytes) {
 }
 ```
 
-A display session has exactly four fields and no extras:
+A display session must provide these four capabilities. The caller may keep wrapper/debug fields; the Client validates and
+extracts only the four required fields into its own frozen session record:
 
 ```js
 Object.freeze({
@@ -181,10 +186,12 @@ Object.freeze({
 
 Client rules:
 
-- `createDisplaySession`, `installScene`, authority operations, commit-gate operations, `summary`, and `currentView` are
-  synchronous. A Promise from any of them fails closed.
-- A checkpoint creates a fresh candidate Display session, installs the Scene, creates all authority roots parent-first,
-  activates the exact cursor, starts the runtime, then atomically replaces the prior session.
+- `createDisplaySession`, `catalogIdentity`, `installScene`, `activate`, `start`, authority operations,
+  `commitGate.begin`, `commitGate.seal`, `summary`, and `currentView` are synchronous. A Promise from any of them fails closed.
+  Cleanup-only `dispose` and error-path `commitGate.fail` may return a Promise; Client observes but never awaits them.
+- A checkpoint creates a fresh candidate Display session, compares its locally generated catalog identity before Scene
+  installation, installs the Scene, creates all authority roots parent-first, activates the exact cursor, starts the runtime,
+  then atomically replaces the prior session.
 - A commit validates the complete World candidate and command stream before opening the Display commit gate.
 - Send `result.ackPacket` immediately after successful `applyPacket`. ACK does not wait for model/texture loading, HUD,
   observers, RAF, or draw.
@@ -199,16 +206,21 @@ Client rules:
 
 ## Build a Display catalog
 
-Create registries before constructing the runtime. `DisplayRuntime` seals all four registries in its constructor, so complete
-registration first.
+Create registries and the complete authority-state schema list before constructing the runtime. `DisplayRuntime` builds its
+canonical manifest and identity, then seals all four registries in its constructor. Generate the same identity record beside the
+Arts/product build and let Python load it into `DisplayCatalogIdentity`; do not hand-write placeholder hashes.
 
 ```js
+import { writeFileSync } from 'node:fs';
 import {
+  buildDisplayCatalogManifest,
+  computeDisplayCatalogIdentity,
   createComponentRegistry,
   createDisplayRuntime,
   createPrefabRegistry,
   createResourceRegistry,
   createSceneRegistry,
+  toDisplayCatalogIdentityRecord,
 } from '@scene-engine/display';
 import { createThreeRenderBackend } from '@scene-engine/renderer-three';
 
@@ -218,6 +230,22 @@ registerProductComponents(componentRegistry);
 const resourceRegistry = createResourceRegistry(resourceDefinitions);
 const prefabRegistry = createPrefabRegistry(prefabDefinitions);
 const sceneRegistry = createSceneRegistry(sceneDefinitions);
+const authorityStateSchemas = [
+  { gameplayType: 'unit.basic', schemaId: 'unit.basic.state', revision: 1 },
+];
+
+const manifest = buildDisplayCatalogManifest({
+  sceneRegistry,
+  prefabRegistry,
+  resourceRegistry,
+  componentRegistry,
+  authorityStateSchemas,
+});
+const catalogIdentity = computeDisplayCatalogIdentity(manifest);
+writeFileSync(
+  'display-catalog-identity.json',
+  `${JSON.stringify(toDisplayCatalogIdentityRecord(catalogIdentity), null, 2)}\n`,
+);
 
 const runtime = createDisplayRuntime({
   hostElement,
@@ -226,10 +254,15 @@ const runtime = createDisplayRuntime({
   prefabRegistry,
   resourceRegistry,
   componentRegistry,
-  createRenderBackend: (options) => createThreeRenderBackend(options),
+  authorityStateSchemas,
+  createRenderBackend: createThreeRenderBackend,
   onHealth: (event) => reportDisplayHealth(event),
 });
 ```
+
+Every `PrefabDefinition.gameplayType` must have exactly one entry in `authorityStateSchemas`; extra entries and missing entries
+fail manifest construction. Scene, Prefab/resources/components, and authority-state schemas are hashed in separate domains. The
+Client calls `runtime.catalogIdentity()` and compares all three hashes with the checkpoint before `installScene`.
 
 For a standalone read-only display surface, use the runtime directly:
 
@@ -248,12 +281,12 @@ const capture = runtime.capture();
 await runtime.dispose();
 ```
 
-For Client-driven live or Replay use, return the same runtime through the four-field session object and let the Client call
-`installScene`, `activate`, and `start`.
+For Client-driven live or Replay use, return the runtime through an object containing the four required session capabilities and
+let the Client call `installScene`, checkpoint bootstrap authority creation, `activate`, and `start`.
 
 ### Resource definitions
 
-Resources are immutable renderer-neutral descriptors registered before runtime construction. Supported kinds are:
+Resources are immutable renderer-independent descriptors registered before runtime construction. Supported kinds are:
 
 ```text
 model, mesh, texture, texture-atlas, material, animation, surface, particle
@@ -268,6 +301,8 @@ Resource rules:
 - IDs are stable catalog identities.
 - URLs exist only in Resource descriptors, never in Python authority records or component state.
 - Add `revision` and a lowercase SHA-256 `hash` when the content identity must be frozen.
+- A model used with animation declares a closed `clipNames` list. Display checks `clipId` before mutation; the backend later
+  verifies that the loaded asset matches that catalog.
 - Component definitions refer to Resources by ID; ComponentRegistry validates allowed kinds before mutation.
 - Register only asset Resource descriptors in ResourceRegistry. SceneDefinition and PrefabDefinition belong only in their own
   registries.
@@ -309,8 +344,10 @@ export const blueUnitPrefab = definePrefab({
       components: {
         'body/model': {
           animation: state.animation === null ? null : {
-            clip: state.animation,
-            sourceTick: state.animationSourceTick,
+            clipId: state.animation,
+            startTick: state.animationSourceTick,
+            clock: 'simulation',
+            loop: true,
           },
         },
       },
@@ -345,8 +382,10 @@ export const redUnitPrefab = definePrefab({
       components: {
         'body/model': {
           animation: state.animation === null ? null : {
-            clip: state.animation,
-            sourceTick: state.animationSourceTick,
+            clipId: state.animation,
+            startTick: state.animationSourceTick,
+            clock: 'simulation',
+            loop: true,
           },
         },
       },
@@ -361,8 +400,8 @@ Prefab identity rules:
 - `gameplayType` is intentionally non-unique. Do not reject two definitions because they share it.
 - Prefabs sharing one gameplay type must consume the same complete authority-state schema. A resolver may ignore fields but
   must not require private authority fields outside that schema.
-- Keep `revision` separate from `id`. Raise revision when the definition contract changes; do not use a version suffix in the
-  id as a substitute for revision.
+- Keep `revision` separate from `id`. Raise revision when the declaration or `resolveState` semantics change; resolver function
+  source is deliberately not hashed. Do not use a version suffix in the id as a substitute for revision.
 - Runtime commands and Scene static instances use exact `prefabId`. Do not ask the Registry to guess one Prefab from a
   gameplay type, and do not introduce an implicit default.
 - A Node name is an instance identity; a Prefab id is a reusable definition identity; a gameplay type is only semantic/state
@@ -381,9 +420,11 @@ Prefab structure rules:
 - Do not add a per-instance update loop to a Prefab. Use a registered `BehaviourComponent` only for visual-only component
   behavior that genuinely needs the sole Display RAF.
 
-Authority creation and replacement use exact ids:
+Authority creation and replacement use exact ids. Checkpoint bootstrap may create authority Nodes after Scene
+installation and before activation. After activation, every authority mutation must be inside one active commit gate:
 
 ```js
+// Checkpoint bootstrap: allowed only before runtime.activate(...).
 runtime.authority.createNode({
   name: 'py/unit/42',
   parentName: null,
@@ -394,11 +435,21 @@ runtime.authority.createNode({
   state,
 });
 
-runtime.authority.replaceNodePrefab({
-  name: 'py/unit/42',
-  prefabId: 'product/unit/red-basic',
-  state,
-});
+runtime.activate(checkpointCursor);
+
+// Later commit: all target operations belong to the same cursor barrier.
+runtime.commitGate.begin(commitCursor);
+try {
+  runtime.authority.replaceNodePrefab({
+    name: 'py/unit/42',
+    prefabId: 'product/unit/red-basic',
+    state,
+  });
+  runtime.commitGate.seal(commitCursor);
+} catch (error) {
+  runtime.commitGate.fail(error);
+  throw error;
+}
 ```
 
 Do not carry both `prefabId` and `gameplayType` in an authority command. The registered Definition determines gameplay type;
@@ -489,20 +540,28 @@ render.spot-light@1
 `BillboardComponent` and `LookAtComponent` are built-in visual Behaviours. For a product-specific component:
 
 1. Extend `Component` or `BehaviourComponent`; do not override final lifecycle/mutation methods.
-2. Give it one stable static `typeId` and, for a Behaviour, one `tickPhase` of `update` or `before-render`.
+2. Give it one versioned static `typeId` and, for a Behaviour, one `tickPhase` of `update` or `before-render`. Bump the
+   `typeId` version whenever its property schema or lifecycle semantics change; catalog hashing cannot serialize function bodies.
 3. Register a descriptor with `ComponentClass`, a complete synchronous `normalizeProperties`, and a synchronous
-   `resourceReferences` function.
+   `resourceReferences` function. When any of those semantics change, publish a new versioned `typeId`; function source is not
+   part of the catalog manifest.
 4. Keep properties closed, plain, deeply frozen data. Do not store a second Transform in component properties.
 5. Use `onAttach`, `tick`, and `onDispose` only as synchronous optional handlers. Promise-returning handlers fail.
 6. Only BehaviourComponents tick. RenderComponents are declarative and may not implement handlers.
 7. Replace properties only through `componentRegistry.patchComponentProperties(...)`; never mutate the properties object.
+8. Component hooks receive only the public read-only Display query surface and frozen `NodeView` values. They do not receive
+   NodeIndex, NodeGraph, AuthorityPort, CommitGate, scheduler, or RenderSystem.
+9. A transform-driving Behaviour may call `setDrivenLocalTransform(...)` only for its own non-authority Node. It cannot mutate a
+   Python-owned `py/` authority root or any other Node.
+10. Built-in renderer component properties, including nested material, animation, flipbook, surface, particle, light, camera, and
+    background values, are completely normalized before Node mutation and commit-gate seal.
 
 If an object needs an independent pose, create a child Node instead of adding position, rotation, matrix, or Transform fields to
 a Component.
 
 ## Use the Three backend only at composition root
 
-Application and product modules import renderer-neutral `@scene-engine/display` types. Only the browser composition root imports
+Application and product modules import renderer-isolated `@scene-engine/display` contracts. Only the browser composition root imports
 `createThreeRenderBackend` and supplies it to `DisplayRuntime`.
 
 The Three backend owns:
@@ -530,8 +589,8 @@ or explicit acceptance work.
 
 ## Time, identity, and mutation rules
 
-- Rule time is `source_tick / 60`. Display may derive visual sampling from source tick or use an explicitly visual-only clock,
-  but visual time never changes the World.
+- Rule time is `source_tick / TICKS_PER_SECOND`; the contract value is exactly 60. Display may derive visual sampling from
+  source tick or use an explicitly visual-only clock, but visual time never changes the World.
 - Node names are immutable lowercase canonical paths under exactly `sys/`, `scene/`, `py/`, or `prefab/`.
 - Full `py/` authority name is the runtime instance identity. `PrefabDefinition.id` is the reusable definition identity;
   `gameplayType` is non-unique state-contract metadata. Never use one in place of another.
@@ -539,9 +598,11 @@ or explicit acceptance work.
   path.
 - `null` authority parent means `sys/authority-root`; a non-null authority parent must be an existing `py/` Node.
 - Each Node owns exactly one local TRS. World Transform is derived by the sole NodeGraph.
-- Each authority operation has exactly one target and validates before mutation.
+- Each authority operation has exactly one target and validates before mutation. Before activation this is only checkpoint
+  bootstrap; after activation it is legal only while one commit gate is active.
 - `setNodeState` is complete replacement. `replaceNodePrefab` takes an exact `prefabId`, stages and validates a shadow scope,
-  then swaps it atomically for that target operation.
+  then swaps it atomically for that target operation. Built-in render-state validation completes before mutation/seal, never
+  first in a later RAF.
 - A full DisplayView is an explicit diagnostic/query snapshot, not a state owner and not a per-commit cache.
 
 ## Failure and disposal
@@ -564,13 +625,17 @@ or explicit acceptance work.
 - raw asset URLs or renderer details in Python DisplayNode/DisplayCommand state;
 - direct Three imports outside `@scene-engine/renderer-three` and the composition root;
 - hidden default camera, light, material, or model behavior in the backend;
-- asynchronous session factories, authority operations, state resolvers, Component handlers, or registry normalizers;
+- asynchronous session factories, catalog-identity calls, authority operations, state resolvers, Component handlers, or
+  registry normalizers;
 - mutation of registries after DisplayRuntime construction;
 - full-tree `currentDisplayView()` generation inside the normal commit observer;
-- direct construction of internal Node, Scene, scope, RenderSystem, or backend-binding classes;
+- direct construction of internal Node, Scene, scope, NodeIndex, NodeGraph, AuthorityComponent, RenderSystem, or
+  backend-binding classes;
 - a Prefab Registry keyed by gameplay type, a uniqueness rule on gameplay type, or an implicit default Prefab selector;
 - authority fields named `prefab_type`/`prefabType`; the formal contract uses `prefab_id`/`prefabId`;
 - calls to `SceneDefinition.instantiate()` or `PrefabDefinition.instantiate()`; use `runtime.installScene` and AuthorityPort;
+- authority mutation outside checkpoint bootstrap or an active commit gate;
+- manual/fake catalog hashes instead of the canonical manifest-derived build artifact;
 - game-art production instructions, visual style guidance, Showcase catalog work, capture composition, or asset review in this
   Skill.
 

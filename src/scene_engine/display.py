@@ -1,4 +1,4 @@
-"""Display Node/Component publication records for the breaking 0.7 contract.
+"""Display Node/Component publication records for the current R2 contract.
 
 The product publishes a complete checkpoint baseline and, after that, only
 single-target logical commands.  Engine owns the command sequence and source
@@ -22,7 +22,6 @@ DISPLAY_CODEC = "scene-engine-display-node@3"
 DISPLAY_CHECKPOINT_SCHEMA = "scene-engine-display-checkpoint@3"
 DISPLAY_COMMAND_STREAM_SCHEMA = "scene-engine-display-command-stream@3"
 DISPLAY_COMMAND_SCHEMA = "scene-engine-node-command@3"
-
 MAXIMUM_NODE_NAME_BYTES = 192
 MAXIMUM_PREFAB_ID_BYTES = 192
 MAXIMUM_SCENE_NAME_BYTES = 96
@@ -98,7 +97,7 @@ class ValidatedDisplayCommandStream(_ImmutableDict):
 
 @dataclass(frozen=True, slots=True)
 class DisplayCatalogIdentity:
-    """Exact Arts catalog identities required by one display session."""
+    """Exact Arts catalog identities loaded from the Display build artifact."""
 
     scene_catalog_hash: str
     prefab_catalog_hash: str
@@ -109,6 +108,20 @@ class DisplayCatalogIdentity:
             value = getattr(self, field)
             if not isinstance(value, str) or _HASH.fullmatch(value) is None:
                 raise ConfigurationError(f"{field} must be a lowercase SHA-256")
+
+    @classmethod
+    def from_record(cls, value: Mapping[str, Any]) -> "DisplayCatalogIdentity":
+        if not isinstance(value, Mapping) or set(value) != {
+            "scene_catalog_hash",
+            "prefab_catalog_hash",
+            "state_schema_hash",
+        }:
+            raise ConfigurationError("display catalog identity fields are invalid")
+        return cls(
+            scene_catalog_hash=value["scene_catalog_hash"],
+            prefab_catalog_hash=value["prefab_catalog_hash"],
+            state_schema_hash=value["state_schema_hash"],
+        )
 
     def to_record(self) -> dict[str, str]:
         return {
@@ -240,52 +253,58 @@ class DisplayNode:
 
 @dataclass(frozen=True, slots=True, init=False)
 class DisplayCommand:
-    """One independently validated logical mutation with exactly one target."""
+    """One independently validated logical mutation with exactly one target.
+
+    Commands are closed records. Product code must use the named constructors so
+    an invalid kind/field combination cannot be assembled dynamically.
+    """
 
     kind: str
     name: str
     fields: Mapping[str, Any]
 
-    def __init__(self, *, kind: str, name: str, **fields: Any) -> None:
-        if kind not in _COMMAND_KINDS:
-            raise ConfigurationError("display command kind is invalid")
-        _authority_name(name, "name")
-        normalized = _normalize_command_fields(kind, name, fields)
-        object.__setattr__(self, "kind", kind)
-        object.__setattr__(self, "name", name)
-        object.__setattr__(self, "fields", _freeze(normalized))
+    def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+        raise ConfigurationError(
+            "DisplayCommand must be created with a named constructor"
+        )
 
     @classmethod
-    def create(cls, node: DisplayNode) -> "DisplayCommand":
+    def create_node(cls, node: DisplayNode) -> "DisplayCommand":
         if not isinstance(node, DisplayNode):
             raise ConfigurationError("node-create requires DisplayNode")
         record = node.to_record()
         name = record.pop("name")
-        return cls(kind="node-create", name=name, **record)
+        return _new_display_command(kind="node-create", name=name, **record)
 
     @classmethod
     def set_transform(
         cls, name: str, transform: DisplayTransform | Mapping[str, Any]
     ) -> "DisplayCommand":
-        return cls(kind="node-set-transform", name=name, transform=transform)
+        return _new_display_command(
+            kind="node-set-transform", name=name, transform=transform
+        )
 
     @classmethod
     def set_parent(cls, name: str, parent_name: str | None) -> "DisplayCommand":
-        return cls(kind="node-set-parent", name=name, parent_name=parent_name)
+        return _new_display_command(
+            kind="node-set-parent", name=name, parent_name=parent_name
+        )
 
     @classmethod
     def set_visible(cls, name: str, visible: bool) -> "DisplayCommand":
-        return cls(kind="node-set-visible", name=name, visible=visible)
+        return _new_display_command(
+            kind="node-set-visible", name=name, visible=visible
+        )
 
     @classmethod
     def set_state(cls, name: str, state: Mapping[str, Any]) -> "DisplayCommand":
-        return cls(kind="node-set-state", name=name, state=state)
+        return _new_display_command(kind="node-set-state", name=name, state=state)
 
     @classmethod
     def replace_prefab(
         cls, name: str, prefab_id: str, state: Mapping[str, Any]
     ) -> "DisplayCommand":
-        return cls(
+        return _new_display_command(
             kind="node-replace-prefab",
             name=name,
             prefab_id=prefab_id,
@@ -294,7 +313,7 @@ class DisplayCommand:
 
     @classmethod
     def remove(cls, name: str) -> "DisplayCommand":
-        return cls(kind="node-remove", name=name)
+        return _new_display_command(kind="node-remove", name=name)
 
     def to_record(self, *, command_seq: int, source_tick: int) -> dict[str, Any]:
         _safe_integer(command_seq, "command_seq")
@@ -307,6 +326,18 @@ class DisplayCommand:
             "name": self.name,
             **_thaw(self.fields),
         }
+
+
+def _new_display_command(*, kind: str, name: str, **fields: Any) -> DisplayCommand:
+    if kind not in _COMMAND_KINDS:
+        raise ConfigurationError("display command kind is invalid")
+    _authority_name(name, "name")
+    normalized = _normalize_command_fields(kind, name, fields)
+    command = object.__new__(DisplayCommand)
+    object.__setattr__(command, "kind", kind)
+    object.__setattr__(command, "name", name)
+    object.__setattr__(command, "fields", _freeze(normalized))
+    return command
 
 
 def encode_display_checkpoint(
@@ -489,7 +520,7 @@ def _command_from_record(value: Any) -> DisplayCommand:
     }
     if kind not in expected_by_kind or set(value) != common | expected_by_kind[kind]:
         raise ConfigurationError("display command record fields are invalid")
-    return DisplayCommand(
+    return _new_display_command(
         kind=kind,
         name=value["name"],
         **{field: value[field] for field in expected_by_kind[kind]},

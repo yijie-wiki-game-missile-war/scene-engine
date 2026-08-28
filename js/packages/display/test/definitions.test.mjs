@@ -157,6 +157,12 @@ test('Resource registry closes nested references and hash identity', () => {
   { code: 'display-resource-missing' });
   assert.throws(() => createResourceRegistry([{ id: 'model/a', kind: 'model', url: './a.glb',
     hash: 'ABC' }]), { code: 'display-resource-hash-invalid' });
+  assert.throws(() => createResourceRegistry([{ id: 'model/a', kind: 'model', url: './a.glb',
+    clipNames: 'idle' }]), { code: 'display-resource-definition-invalid' });
+  assert.throws(() => createResourceRegistry([{ id: 'model/a', kind: 'model', url: './a.glb',
+    clipNames: ['idle', 'idle'] }]), { code: 'display-resource-definition-invalid' });
+  assert.throws(() => createResourceRegistry([{ id: 'model/a', kind: 'model', url: './a.glb',
+    clipNames: [''] }]), { code: 'display-resource-definition-invalid' });
   const registry = createResourceRegistry([
     { id: 'texture/a', kind: 'texture', url: './a.png' },
     { id: 'atlas/a', kind: 'texture-atlas', textureResourceId: 'texture/a', columns: 1, rows: 1 },
@@ -207,6 +213,40 @@ test('built-in RenderComponents reject an existing resource of the wrong kind', 
   assert.throws(() => components.compile({
     key: 'model', type: 'render.model@1', properties: { modelResourceId: 'asset/wrong' },
   }, resources), { code: 'display-resource-reference-kind-invalid' });
+});
+
+test('built-in renderer nested properties are closed before a backend sees them', () => {
+  const components = createComponentRegistry();
+  const resources = createResourceRegistry([
+    { id: 'model/animated', kind: 'model', url: './animated.glb', clipNames: ['idle'] },
+    { id: 'texture/plain', kind: 'texture', url: './plain.png' },
+    { id: 'particle/smoke', kind: 'particle', textureResourceId: 'texture/plain', maximumCapacity: 8 },
+  ]);
+
+  assert.throws(() => components.compile({
+    key: 'model', type: 'render.model@1', properties: {
+      modelResourceId: 'model/animated', animation: { clipId: 7 },
+    },
+  }, resources), { code: 'display-component-properties-invalid' });
+  assert.throws(() => components.compile({
+    key: 'model', type: 'render.model@1', properties: {
+      modelResourceId: 'model/animated', animation: { clipId: 'missing' },
+    },
+  }, resources), { code: 'display-model-animation-clip-invalid' });
+  assert.throws(() => components.compile({
+    key: 'sprite', type: 'render.sprite@1', properties: {
+      textureResourceId: 'texture/plain', width: 1, height: 1,
+      flipbook: { frameCount: 2, frameTicks: 1 },
+    },
+  }, resources), { code: 'display-sprite-flipbook-atlas-required' });
+  assert.throws(() => components.compile({
+    key: 'particle', type: 'render.particle@1', properties: {
+      particleResourceId: 'particle/smoke', parameters: { capacity: 9 },
+    },
+  }, resources), { code: 'display-particle-capacity-invalid' });
+  assert.throws(() => components.compile({
+    key: 'sun', type: 'render.directional-light@1', properties: { angleDegrees: 45 },
+  }, resources), { code: 'display-component-properties-invalid' });
 });
 
 test('editor Node prefix is not part of the runtime name grammar', () => {

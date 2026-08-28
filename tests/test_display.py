@@ -81,7 +81,7 @@ def test_checkpoint_rejects_duplicate_missing_parent_and_invalid_authority_names
 
 def test_command_stream_assigns_one_strict_sequence_per_single_target_record() -> None:
     commands = (
-        DisplayCommand.create(node("py/aircraft-17")),
+        DisplayCommand.create_node(node("py/aircraft-17")),
         DisplayCommand.set_transform("py/aircraft-17", transform(9.0)),
         DisplayCommand.set_state("py/aircraft-17", {"animation": {"state": "move"}}),
         DisplayCommand.remove("py/aircraft-17"),
@@ -142,7 +142,7 @@ def test_command_shapes_state_and_transform_are_closed_and_owned() -> None:
     record = command.to_record(command_seq=1, source_tick=0)
     assert record["state"] == {"selected": False, "parts": [1, 2]}
 
-    with pytest.raises(ConfigurationError, match="fields"):
+    with pytest.raises(ConfigurationError, match="named constructor"):
         DisplayCommand(kind="node-remove", name="py/a", visible=True)
     with pytest.raises(ConfigurationError, match="scale"):
         DisplayTransform(

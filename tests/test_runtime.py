@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
+from decimal import Decimal
 import pytest
 
 import scene_engine.runtime as runtime_module
@@ -15,6 +16,7 @@ from scene_engine import (
     RuntimeConfig,
     RuntimeFatalError,
     SceneEngineRuntime,
+    TICKS_PER_SECOND,
     WorldCounters,
 )
 from scene_engine.recording import PacketLogWriter, read_packet_log
@@ -52,6 +54,7 @@ class Program:
         self.checkpoint_calls = 0
         self.invalid_commit_display = False
         self.world_codec = "example-world@1"
+        self.callback_rates = defaultdict(list)
 
     def read_counters(self, world: World) -> WorldCounters:
         return WorldCounters(world.tick, world.world_revision)
@@ -62,6 +65,7 @@ class Program:
 
     def step(self, world: World, context) -> MutationResult:
         self.steps += 1
+        self.callback_rates["step"].append(context.ticks_per_second)
         if self.reenter:
             self.runtime.pump()
         if self.fail_step:
@@ -71,6 +75,7 @@ class Program:
 
     def handle_input(self, world: World, request, context) -> MutationResult:
         self.input_calls += 1
+        self.callback_rates["handle_input"].append(context.ticks_per_second)
         if request.command == "reject":
             return MutationResult.rejected("denied", result_payload={"value": world.value})
         if request.command == "no-op":
@@ -82,6 +87,7 @@ class Program:
 
     def build_checkpoint(self, world: World, context) -> ProductCheckpoint:
         self.checkpoint_calls += 1
+        self.callback_rates["build_checkpoint"].append(context.ticks_per_second)
         return ProductCheckpoint(
             self.world_codec,
             {"tick": world.tick, "value": world.value, "world_revision": world.world_revision},
@@ -91,6 +97,7 @@ class Program:
         )
 
     def build_commit(self, world: World, mutation, context) -> ProductCommit:
+        self.callback_rates["build_commit"].append(context.ticks_per_second)
         if self.fail_build:
             raise RuntimeError("publication failed")
         changes = []
@@ -150,6 +157,33 @@ class Recorder:
         self.sealed = True
 
 
+def test_mutation_result_commit_context_is_changed_only() -> None:
+    marker = object()
+    changed = MutationResult.changed(marker)
+    assert changed.commit_context is marker
+    assert not hasattr(changed, "detail")
+
+    no_op = MutationResult.no_op(
+        reason_code="unchanged",
+        result_payload={"value": 1},
+    )
+    rejected = MutationResult.rejected(
+        "denied",
+        result_payload={"value": 2},
+    )
+    assert no_op.commit_context is None
+    assert rejected.commit_context is None
+
+    with pytest.raises(ConfigurationError, match="only changed mutation"):
+        MutationResult("no-op", marker)
+    with pytest.raises(ConfigurationError, match="only changed mutation"):
+        MutationResult("rejected", marker, "denied")
+    with pytest.raises(TypeError):
+        MutationResult.no_op(marker)  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        MutationResult.rejected("denied", marker)  # type: ignore[call-arg]
+
+
 def catalog() -> DisplayCatalogIdentity:
     return DisplayCatalogIdentity("a" * 64, "b" * 64, "c" * 64)
 
@@ -193,6 +227,41 @@ def make_runtime(*, config=None, recorder=None):
     program.runtime = runtime
     runtime.start()
     return runtime, clock, world, program, transport
+
+
+def test_runtime_rate_is_fixed_by_contract_but_carried_as_config_value() -> None:
+    config = RuntimeConfig()
+    assert config.ticks_per_second == TICKS_PER_SECOND == 60
+    for invalid_rate in (30, True, 60.0, Decimal(60), 60 + 0j):
+        with pytest.raises(ConfigurationError, match="must equal 60"):
+            RuntimeConfig(ticks_per_second=invalid_rate)
+
+
+def test_every_product_callback_receives_the_contract_rate() -> None:
+    runtime, clock, _, program, transport = make_runtime()
+    assert program.callback_rates["build_checkpoint"] == [TICKS_PER_SECOND]
+
+    runtime.client_connected("a")
+    acknowledge(runtime, transport, "a")
+    clock.advance(1 / TICKS_PER_SECOND)
+    runtime.pump()
+    acknowledge(runtime, transport, "a")
+
+    send_input(
+        runtime,
+        "a",
+        input_id="a:rate",
+        command="increment",
+        args={"amount": 1.0},
+    )
+    runtime.pump()
+
+    assert program.callback_rates["step"] == [TICKS_PER_SECOND]
+    assert program.callback_rates["handle_input"] == [TICKS_PER_SECOND]
+    assert program.callback_rates["build_commit"] == [
+        TICKS_PER_SECOND,
+        TICKS_PER_SECOND,
+    ]
 
 
 def acknowledge(runtime, transport, client_id, packet=None):

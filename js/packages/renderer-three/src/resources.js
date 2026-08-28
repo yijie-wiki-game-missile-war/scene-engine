@@ -3,6 +3,7 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { clone as cloneSkeleton } from 'three/addons/utils/SkeletonUtils.js';
 
 import { fail } from './errors.js';
+import { TICKS_PER_SECOND } from './constants.js';
 import { exactRecord, finiteTuple, isPlainRecord, stableData } from './validation.js';
 
 const DISPOSED_ASSETS = new WeakSet();
@@ -291,7 +292,7 @@ function createSpriteHandle(asset, descriptor, initialProperties) {
       if (!properties.flipbook) return;
       const timeline = properties.flipbook.clock === 'simulation'
         ? Math.max(0, frame.sourceTick - properties.flipbook.startTick)
-        : Math.max(0, frame.visualSeconds * 60);
+        : Math.max(0, frame.visualSeconds * TICKS_PER_SECOND);
       const ordinal = Math.floor(timeline / properties.flipbook.frameTicks);
       const offset = properties.flipbook.loop
         ? ordinal % properties.flipbook.frameCount
@@ -670,7 +671,7 @@ function normalizeParticleProperties(value, descriptor) {
     'animation', 'renderOrder']), 'three-particle-properties-invalid');
   const params = { ...(descriptor.defaults ?? {}), ...(record.parameters ?? {}) };
   const result = {
-    durationTicks: positiveInteger(params.durationTicks ?? 60),
+    durationTicks: positiveInteger(params.durationTicks ?? TICKS_PER_SECOND),
     capacity: positiveInteger(params.capacity ?? descriptor.maximumCapacity),
     seed: nonnegativeInteger(params.seed ?? 0), rate: nonnegative(params.rate ?? 0),
     size: positiveNumber(params.size ?? 1), velocity: vector(params.velocity ?? [0, 0, 0]),
@@ -920,15 +921,17 @@ function sampleParticles(points, properties, frame) {
   const params = properties.parameters;
   const elapsedTicks = properties.animation.clock === 'simulation'
     ? Math.max(0, frame.sourceTick - properties.animation.startTick)
-    : Math.max(0, frame.visualSeconds * 60);
+    : Math.max(0, frame.visualSeconds * TICKS_PER_SECOND);
   const positions = points.geometry.attributes.position.array;
   const rate = params.rate * properties.intensity;
-  const alive = Math.min(params.capacity, Math.floor(elapsedTicks * rate / 60));
+  const alive = Math.min(params.capacity,
+    Math.floor(elapsedTicks * rate / TICKS_PER_SECOND));
   for (let index = 0; index < params.capacity; index += 1) {
     const offset = index * 3;
     if (index >= alive) { positions[offset] = 0; positions[offset + 1] = 0; positions[offset + 2] = 0; continue; }
-    const birthTick = rate === 0 ? 0 : index * 60 / rate;
-    const time = (Math.max(0, elapsedTicks - birthTick) % params.durationTicks) / 60;
+    const birthTick = rate === 0 ? 0 : index * TICKS_PER_SECOND / rate;
+    const time = (Math.max(0, elapsedTicks - birthTick) % params.durationTicks)
+      / TICKS_PER_SECOND;
     for (let axis = 0; axis < 3; axis += 1) {
       const noise = randomUnit(params.seed + index * 7 + axis * 101) * 2 - 1;
       const velocity = params.velocity[axis] + params.spread[axis] * noise;
@@ -977,7 +980,7 @@ function validateAtlasFrame(descriptor, frame) {
 
 function animationSeconds(animation, frame) {
   if (animation.clock === 'visual') return Math.max(0, frame.visualSeconds);
-  return Math.max(0, frame.sourceTick - animation.startTick) / 60;
+  return Math.max(0, frame.sourceTick - animation.startTick) / TICKS_PER_SECOND;
 }
 
 function disposeTemplates(templates) {

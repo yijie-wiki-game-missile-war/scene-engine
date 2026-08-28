@@ -44,6 +44,15 @@ function normalizeDescriptor(value) {
     if (!Array.isArray(descriptor.lodUrls)) fail('display-resource-definition-invalid');
     for (const url of descriptor.lodUrls) validateUrl(url);
   }
+  if (Object.hasOwn(descriptor, 'clipNames')) {
+    if (!Array.isArray(descriptor.clipNames)) fail('display-resource-definition-invalid');
+    const names = new Set();
+    for (const name of descriptor.clipNames) {
+      nonemptyString(name, 'display-resource-definition-invalid');
+      if (names.has(name)) fail('display-resource-definition-invalid');
+      names.add(name);
+    }
+  }
   if (kind === 'mesh' && !Object.hasOwn(descriptor, 'url') && !Object.hasOwn(descriptor, 'positions')) {
     fail('display-resource-definition-invalid');
   }
