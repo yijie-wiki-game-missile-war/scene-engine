@@ -23,6 +23,7 @@ from scene_engine.recording import PacketLogWriter, read_packet_log
 from scene_engine.display import (
     DisplayCatalogIdentity,
     DisplayCommand,
+    DisplayMatrixPool,
     DisplayNode,
     DisplayTransform,
 )
@@ -54,8 +55,11 @@ class Program:
         self.input_calls = 0
         self.checkpoint_calls = 0
         self.invalid_commit_display = False
+        self.mutate_checkpoint_pool = False
         self.world_codec = "example-world@1"
         self.callback_rates = defaultdict(list)
+        self.display_matrix_pool = DisplayMatrixPool()
+        self.display_node_id = self.display_matrix_pool.append(transform(World()))
 
     def read_counters(self, world: World) -> WorldCounters:
         return WorldCounters(world.tick, world.world_revision)
@@ -89,12 +93,15 @@ class Program:
     def build_checkpoint(self, world: World, context) -> ProductCheckpoint:
         self.checkpoint_calls += 1
         self.callback_rates["build_checkpoint"].append(context.ticks_per_second)
+        if self.mutate_checkpoint_pool:
+            self.display_matrix_pool.set(self.display_node_id, transform(world))
         return ProductCheckpoint(
             self.world_codec,
             {"tick": world.tick, "value": world.value, "world_revision": world.world_revision},
             "main",
             catalog(),
-            nodes(world),
+            self.display_matrix_pool,
+            nodes(world, self.display_node_id),
         )
 
     def build_commit(self, world: World, mutation, context) -> ProductCommit:
@@ -116,9 +123,9 @@ class Program:
         )
         display_commands = (
             (
-                DisplayCommand.set_transform("py/example", transform(world)),
+                DisplayCommand.set_transform(self.display_node_id),
                 DisplayCommand.set_state(
-                    "py/example", {"tick": world.tick, "value": world.value}
+                    self.display_node_id, {"tick": world.tick, "value": world.value}
                 ),
             )
             if context.commit.cause == "tick"
@@ -126,9 +133,12 @@ class Program:
         )
         if self.invalid_commit_display:
             display_commands = ("not-a-display-command",)
+        elif context.commit.cause == "tick":
+            self.display_matrix_pool.set(self.display_node_id, transform(world))
         return ProductCommit(
             self.world_codec,
             {"schema": "scene-engine-json-tree@1", "changes": changes},
+            self.display_matrix_pool,
             display_commands,
         )
 
@@ -212,14 +222,13 @@ def transform(world: World) -> DisplayTransform:
     )
 
 
-def nodes(world: World) -> tuple[DisplayNode, ...]:
+def nodes(world: World, node_id: int = 0) -> tuple[DisplayNode, ...]:
     return (
         DisplayNode(
-            name="py/example",
-            parent_name=None,
+            node_id=node_id,
+            parent_node_id=None,
             prefab_id="example.node",
             transform_mode="live",
-            transform=transform(world),
             visible=True,
             state={"tick": world.tick, "value": world.value},
         ),
@@ -797,11 +806,14 @@ def test_stream_codec_and_display_commands_are_validated_before_commit(failure) 
 
 
 def test_product_display_port_is_structured_and_has_no_legacy_alias() -> None:
+    pool = DisplayMatrixPool()
+    pool.append(transform(World()))
     product = ProductCheckpoint(
         "example-world@1",
         {"tick": 0},
         "main",
         catalog(),
+        pool,
         list(nodes(World())),
     )
     assert isinstance(product.display_nodes, tuple)
@@ -810,6 +822,7 @@ def test_product_display_port_is_structured_and_has_no_legacy_alias() -> None:
     commit = ProductCommit(
         "example-world@1",
         {"schema": "scene-engine-json-tree@1", "changes": []},
+        pool,
         [],
     )
     assert not hasattr(commit, "events")
@@ -820,18 +833,21 @@ def test_product_display_port_is_structured_and_has_no_legacy_alias() -> None:
             {"tick": 0},
             "main",
             catalog(),
+            pool,
             scene_frame=b"legacy",
         )
     with pytest.raises(ConfigurationError):
         ProductCommit(
             "example-world@1",
             {"schema": "scene-engine-json-tree@1", "changes": []},
+            pool,
             ("invalid",),
         )
     with pytest.raises(TypeError):
         ProductCommit(  # type: ignore[call-arg]
             "example-world@1",
             {"schema": "scene-engine-json-tree@1", "changes": []},
+            pool,
             events={},
         )
 
@@ -868,3 +884,58 @@ def test_checkpoint_and_each_display_command_stream_encode_once(
     assert checkpoint_calls == 1
     assert encode_ticks == [1]
     assert not hasattr(runtime_module, "encode_scene_frame_against_bootstrap")
+
+
+def test_noninitial_checkpoint_build_is_read_only_for_the_matrix_pool() -> None:
+    runtime, clock, _, program, transport = make_runtime()
+    runtime.client_connected("existing")
+    acknowledge(runtime, transport, "existing")
+    clock.advance(1 / 60)
+    runtime.pump()
+    assert runtime._checkpoint_cache is None
+
+    program.mutate_checkpoint_pool = True
+    with pytest.raises(RuntimeFatalError, match="checkpoint materialization"):
+        runtime.client_connected("late")
+    assert runtime.health.state == "fatal"
+    assert isinstance(runtime.health.fatal_cause, RuntimeError)
+    assert "modified the display matrix pool" in str(runtime.health.fatal_cause)
+
+
+def test_periodic_checkpoint_cannot_mutate_the_matrix_pool() -> None:
+    recorder = Recorder()
+    runtime, clock, _, program, _ = make_runtime(
+        config=RuntimeConfig(recording_checkpoint_interval_commits=1),
+        recorder=recorder,
+    )
+    program.mutate_checkpoint_pool = True
+    clock.advance(1 / 60)
+
+    with pytest.raises(RuntimeFatalError, match="periodic"):
+        runtime.pump()
+    assert runtime.health.state == "fatal"
+    assert isinstance(runtime.health.fatal_cause, RuntimeError)
+    assert "modified the display matrix pool" in str(runtime.health.fatal_cause)
+
+
+def test_failed_commit_packet_encode_keeps_matrix_row_dirty(monkeypatch) -> None:
+    runtime, clock, _, program, _ = make_runtime()
+
+    def fail_encode_commit(**_kwargs):
+        raise WireError("synthetic packet failure")
+
+    monkeypatch.setattr(runtime_module, "encode_commit", fail_encode_commit)
+    clock.advance(1 / 60)
+    with pytest.raises(RuntimeFatalError):
+        runtime.pump()
+
+    retry, _ = runtime_module.encode_display_command_stream(
+        base_command_seq=0,
+        source_tick=1,
+        matrix_pool=program.display_matrix_pool,
+        commands=(
+            DisplayCommand.set_transform(program.display_node_id),
+            DisplayCommand.set_state(program.display_node_id, {}),
+        ),
+    )
+    assert retry.dirty_node_ids.tolist() == [program.display_node_id]

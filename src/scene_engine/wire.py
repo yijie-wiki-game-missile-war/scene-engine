@@ -11,7 +11,7 @@ import json
 import math
 import struct
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import IntEnum
 from types import MappingProxyType
 from typing import Any
@@ -30,7 +30,7 @@ from .json_tree import MAXIMUM_SAFE_INTEGER, WORLD_TREE_SCHEMA
 
 
 WIRE_SCHEMA = "scene-engine-wire@3"
-DISPLAY_CODEC = "scene-engine-display-node@5"
+DISPLAY_CODEC = "scene-engine-display-node@6"
 WIRE_MAGIC = b"SENG"
 WIRE_MAJOR_VERSION = 3
 _PACKET_HEADER = struct.Struct("<4sBBHIHH")
@@ -167,6 +167,11 @@ class EnginePacket:
     header: Mapping[str, Any]
     attachments: tuple[EngineAttachment, ...]
     raw_bytes: bytes
+    _display_payload: Mapping[str, Any] | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
     @property
     def type(self) -> str:
@@ -300,8 +305,16 @@ def read_engine_packet(
     if cursor != len(raw):
         raise WireError("packet has trailing bytes")
     frozen_attachments = tuple(attachments)
-    _validate_attachment_layout(kind, header, frozen_attachments, limits)
-    return EnginePacket(kind, MappingProxyType(header), frozen_attachments, raw)
+    display_payload = _validate_attachment_layout(
+        kind, header, frozen_attachments, limits
+    )
+    return EnginePacket(
+        kind,
+        MappingProxyType(header),
+        frozen_attachments,
+        raw,
+        display_payload,
+    )
 
 
 def encode_checkpoint(
@@ -617,7 +630,7 @@ def _validate_attachment_layout(
     header: Mapping[str, Any],
     attachments: Sequence[EngineAttachment],
     limits: EngineLimits,
-) -> None:
+) -> Mapping[str, Any] | None:
     if len(attachments) > limits.maximum_attachment_count:
         raise WireError("attachment count exceeds maximum_attachment_count")
     actual = tuple((item.kind, item.encoding) for item in attachments)
@@ -667,7 +680,7 @@ def _validate_attachment_layout(
                     maximum_json_depth=limits.maximum_json_depth,
                 )
             else:
-                decode_display_checkpoint_binary(
+                return decode_display_checkpoint_binary(
                     attachments[1].bytes,
                     expected_last_command_seq=header["last_command_seq"],
                     maximum_json_depth=limits.maximum_json_depth,
@@ -683,7 +696,7 @@ def _validate_attachment_layout(
                     maximum_json_depth=limits.maximum_json_depth,
                 )
             else:
-                decode_display_command_stream_binary(
+                return decode_display_command_stream_binary(
                     attachments[1].bytes,
                     expected_source_tick=header["source_tick"],
                     expected_last_command_seq=header["last_command_seq"],
@@ -691,6 +704,7 @@ def _validate_attachment_layout(
                 )
     except ConfigurationError as exc:
         raise WireError("display attachment is invalid") from exc
+    return None
 
 
 def _json_dumps(

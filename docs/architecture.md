@@ -1,6 +1,6 @@
 # Current architecture
 
-Scene Engine 0.14 owns one deterministic publication and browser-projection boundary:
+Scene Engine 0.15 owns one deterministic publication and browser-projection boundary:
 
 ```text
 mutable product World
@@ -8,9 +8,9 @@ mutable product World
   -> ProductCheckpoint / ProductCommit
   -> scene-engine-wire@3 exact packet bytes
   -> recorder + sessions
-  -> SceneEngineClient 0.12
+  -> SceneEngineClient 0.13
        -> immutable WorldState + cumulative ACK + O(1) DisplaySummary
-       -> DisplayRuntime 0.11 AuthorityPort
+       -> DisplayRuntime 0.12 AuthorityPort
             -> one NodeIndex / one NodeGraph / one Component scheduler / one RAF
             -> one private flat Prefab materialization ledger
             -> RenderSystem
@@ -27,7 +27,7 @@ root imports the Three backend. The current Display API is browser-oriented and 
 | gameplay state and rules | product | six `EngineProgram` callbacks |
 | logical tick, revision, commit and command sequence | Python runtime | checkpoint/commit packet headers |
 | exact packet decode, WorldState pointer and ACK | JavaScript Client | `SceneEngineClient` |
-| Node names, parent graph, local Transform and Prefab instances | DisplayRuntime | `AuthorityPort` plus read-only views |
+| authority IDs/matrix pool, parent graph and Prefab instances | DisplayRuntime | `AuthorityPort` plus read-only views |
 | Scene, Prefab, Resource, Component and state-schema catalog | DisplayRuntime composition | immutable definitions and registries |
 | renderer bindings, batching and GPU resources | Three backend | flat `RenderBackendPort` |
 | recorded bytes and Replay seek | packet-log@3 | exact Engine packets |
@@ -38,13 +38,15 @@ it is not a second hierarchy or a public child-Prefab object model.
 
 ## Product and catalog boundary
 
-Python publishes only complete `py/` authority roots and later single-target mutations. It owns each root's stable name,
-existence, parent, local Transform, visibility, exact `prefabId` and complete authority state. It never publishes URLs, models,
-textures, materials, lights, cameras or Prefab-local paths.
+Python publishes only complete authority roots and later single-target mutations. It owns each root's stream-stable numeric ID,
+existence, parent ID, row in one resident NumPy matrix pool, visibility, exact `prefabId` and complete authority state. It never
+publishes a `py/` name, URL, model, texture, material, light, camera or Prefab-local path. Display deterministically maps an
+authority ID to its internal canonical name `py/<id>`; authored Scene/Prefab paths and renderer `(nodeName,componentKey)` keys
+therefore remain browser-local and unchanged.
 
-Checkpoint roots and structural parent names are validated in Python. Later mutation constructors trust the stable target
-string owned by the product instead of repeating path validation in the per-object hot path. The browser Client validates every
-decoded target before it opens the Display commit gate; an invalid trusted target therefore produces no ACK.
+Checkpoint roots and structural parent IDs are validated in Python. Later mutations address the same `uint32` row directly.
+The browser Client validates the complete ID tables and every active/dirty matrix before it opens the Display commit gate; an
+invalid target or tensor therefore produces no ACK.
 
 Arts/product display code owns concrete Scene, Prefab, Resource and Component definitions. `PrefabDefinition.id` is the unique
 lookup key; `gameplayType` is non-unique state-contract metadata, so multiple Prefabs may share it. Prefab definition schema
@@ -69,16 +71,16 @@ with the checkpoint before it installs a Scene.
 
 ## Transaction and observation boundary
 
-For a checkpoint, Client creates a new candidate Display session, verifies catalog identity, installs the Scene, creates all
-baseline authority roots parent-first, activates the checkpoint cursor and starts the runtime. Only after the candidate is
-complete does it replace the old session.
+For a checkpoint, Client creates a new candidate Display session, verifies catalog identity, installs the Scene, transfers the
+single owned full matrix tensor, creates all baseline authority roots parent-first by ID, activates the checkpoint cursor and
+starts the runtime. Only after the candidate is complete does it replace the old session.
 
 For a commit, Client:
 
-1. validates the whole packet, World candidate and command stream;
+1. validates the whole packet, World candidate, ID tables, matrix tensor and command stream;
 2. opens the exact Display commit gate;
-3. synchronously applies every single-target Authority operation, including complete nested-Prefab candidate validation and
-   materialization diff;
+3. stages the one dirty tensor and synchronously applies ordered ID-targeted Authority operations; create/set-transform consumes
+   its staged row at the original sequence position, preserving nested-Prefab resolver visibility and materialization order;
 4. seals the cursor;
 5. publishes WorldState and cursors;
 6. reads `runtime.summary()` and encodes cumulative ACK;
@@ -129,11 +131,12 @@ returns Three objects. Disposal stops scheduling, aborts pending work, unloads S
 private ledger, releases Components, resource leases and backend bindings, and is idempotent.
 
 Transform has one logical representation end to end: a column-major local Matrix4, carried on Wire as exactly 64
-little-endian binary32 bytes. Python `DisplayTransform` owns one private NumPy `ndarray` with shape `(4, 4)`, dtype `<f4`,
-Fortran-contiguous column-major layout and `writeable=False`; there is no persistent byte payload or parallel TRS owner. The
-binary Display encoder reads that array in column-major order and emits its exact 64 bytes. Client decodes an owned
+little-endian binary32 bytes. Python authority roots share one `DisplayMatrixPool`: a contiguous `<f4` NumPy tensor shaped
+`(n,4,4)` with `[node,column,row]` axes. A checkpoint emits the full tensor once; a commit emits sorted dirty IDs plus one
+compact `(m,4,4)` tensor, rather than serializing matrices inside commands. Client decodes each tensor into one owned
 Float32Array and is still the first semantic gate: it canonicalizes negative zero and rejects nonfinite, non-affine, reflected
-or singular matrices before Authority opens. Display repeats that validation and owns one private Float32Array per Node.
+or singular active rows before Authority opens. Display repeats that validation and its authority Nodes resolve their local
+matrix directly from the shared pool by ID; Scene and Prefab-local Nodes keep their browser-owned matrices.
 NodeGraph derives the sole world matrix with direct
 `parentWorld * localMatrix` multiplication into Float64Array storage. No layer owns a parallel TRS or decomposes the matrix
 during publication.

@@ -4,6 +4,7 @@ import test from 'node:test';
 import {
   GEOMETRY_PREFAB_ID,
   NESTED_PREFAB_ID,
+  authorityNodeName,
   backendRecord,
   commitAuthority,
   createAuthorityNode,
@@ -11,8 +12,10 @@ import {
   transformAt,
 } from './display-runtime-support.mjs';
 
-const ROOT = 'py/foundation-root';
-const MOVER = 'py/foundation-mover';
+const ROOT_ID = 0;
+const MOVER_ID = 1;
+const ROOT = authorityNodeName(ROOT_ID);
+const MOVER = authorityNodeName(MOVER_ID);
 const FIXED = `prefab/${ROOT}/fixed`;
 const DYNAMIC_ALPHA = `prefab/${ROOT}/units/alpha`;
 const DYNAMIC_BRAVO = `prefab/${ROOT}/units/bravo`;
@@ -54,10 +57,10 @@ test('DisplayRuntime drives geometry, nested Prefabs, authority activity, animat
     const animationSystem = runtime._animationSystem;
     const renderSystem = runtime._renderSystem;
     try {
+      const rootTransform = transformAt([10, 0, 0]);
       commitAuthority(runtime, () => runtime.authority.createNode(createAuthorityNode({
-        name: ROOT,
+        nodeId: ROOT_ID,
         prefabId: NESTED_PREFAB_ID,
-        transform: transformAt([10, 0, 0]),
         state: {
           fixedState: { particleIntensity: 0.5 },
           units: {
@@ -69,11 +72,11 @@ test('DisplayRuntime drives geometry, nested Prefabs, authority activity, animat
             },
           },
         },
-      })));
+      })), { matrixRows: [[ROOT_ID, rootTransform]] });
+      const moverTransform = transformAt([-2, 1, 0]);
       commitAuthority(runtime, () => runtime.authority.createNode(createAuthorityNode({
-        name: MOVER,
-        transform: transformAt([-2, 1, 0]),
-      })));
+        nodeId: MOVER_ID,
+      })), { matrixRows: [[MOVER_ID, moverTransform]] });
       await runtime.whenReady();
 
       const initialView = runtime.currentView();
@@ -120,20 +123,25 @@ test('DisplayRuntime drives geometry, nested Prefabs, authority activity, animat
         rotationXyzw: [0, 0, halfTurn, halfTurn],
         scale: [2, 3, 4],
       });
-      commitAuthority(runtime, () => runtime.authority.setNodeTransform({ name: MOVER, transform: moved }));
+      commitAuthority(runtime, () => runtime.authority.setNodeTransform({ nodeId: MOVER_ID }), {
+        matrixRows: [[MOVER_ID, moved]],
+      });
       let view = runtime.currentView();
       assertTupleAlmostEqual(view.getNode(MOVER).localTransform, moved);
       assert.deepEqual(translation(view.getWorldTransform(MOVER)), [2, 3, 4]);
 
       commitAuthority(runtime, () => runtime.authority.setNodeParent({
-        name: MOVER,
-        parentName: ROOT,
+        nodeId: MOVER_ID,
+        parentNodeId: ROOT_ID,
       }));
       view = runtime.currentView();
       assert.equal(view.getNode(MOVER).parentName, ROOT);
       assert.deepEqual(translation(view.getWorldTransform(MOVER)), [12, 3, 4]);
 
-      commitAuthority(runtime, () => runtime.authority.setNodeVisible({ name: MOVER, visible: false }));
+      commitAuthority(runtime, () => runtime.authority.setNodeVisible({
+        nodeId: MOVER_ID,
+        visible: false,
+      }));
       frames.step(0);
       assert.equal(runtime.currentView().getNode(geometryNode(MOVER, 'mesh-node')).visibleInHierarchy,
         false);
@@ -145,7 +153,7 @@ test('DisplayRuntime drives geometry, nested Prefabs, authority activity, animat
         scale: [1.25, 0.75, 2],
       });
       commitAuthority(runtime, () => runtime.authority.setNodeState({
-        name: MOVER,
+        nodeId: MOVER_ID,
         state: {
           meshTransform: childTransform,
           meshVisible: true,
@@ -164,9 +172,12 @@ test('DisplayRuntime drives geometry, nested Prefabs, authority activity, animat
       assert.equal(view.getComponentState(geometryNode(MOVER, 'particle-node'), 'particle')
         .properties.intensity, 2);
 
-      commitAuthority(runtime, () => runtime.authority.setNodeVisible({ name: MOVER, visible: true }));
+      commitAuthority(runtime, () => runtime.authority.setNodeVisible({
+        nodeId: MOVER_ID,
+        visible: true,
+      }));
       commitAuthority(runtime, () => runtime.authority.setNodeState({
-        name: ROOT,
+        nodeId: ROOT_ID,
         state: {
           fixedTransform: transformAt([5, 0, 0], { scale: [1.5, 1.5, 1.5] }),
           fixedVisible: false,
@@ -218,9 +229,9 @@ test('DisplayRuntime drives geometry, nested Prefabs, authority activity, animat
       assert.equal(rebuiltSprite.properties.frame, (frameBeforeRebuild + 1) % 4,
         'animation phase continues after backend rebuild');
 
-      commitAuthority(runtime, () => runtime.authority.removeNode({ name: MOVER }));
+      commitAuthority(runtime, () => runtime.authority.removeNode({ nodeId: MOVER_ID }));
       assert.equal(runtime.currentView().getNode(MOVER), null);
-      commitAuthority(runtime, () => runtime.authority.removeNode({ name: ROOT }));
+      commitAuthority(runtime, () => runtime.authority.removeNode({ nodeId: ROOT_ID }));
       await runtime.whenReady();
       assert.equal(runtime.currentView().getNode(ROOT), null);
       const sceneOnly = backends[1].backend.diagnostics();

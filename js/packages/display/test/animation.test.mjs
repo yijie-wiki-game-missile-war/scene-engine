@@ -126,36 +126,48 @@ async function animationHarness({ prefab = animatedPrefab(),
   return harness;
 }
 
+function authorityNode(nodeId = 0, prefabId = 'target.animated', state = {}) {
+  return {
+    nodeId,
+    parentNodeId: null,
+    prefabId,
+    transformMode: 'live',
+    transform: IDENTITY,
+    visible: true,
+    state,
+  };
+}
+
 function prefabLocalNodeName(rootName, localPath) {
   return rootName.startsWith('prefab/')
     ? `${rootName}/${localPath}` : `prefab/${rootName}/${localPath}`;
 }
 
-function spriteBinding(harness, nodeName = 'py/walk', componentKey = 'sprite') {
+function spriteBinding(harness, nodeName = 'py/0', componentKey = 'sprite') {
   return harness.fakeBackends.at(-1).bindings.get(
     JSON.stringify([prefabLocalNodeName(nodeName, 'body'), componentKey]),
   );
 }
 
-function spritePatch(harness, nodeName = 'py/walk') {
+function spritePatch(harness, nodeName = 'py/0') {
   return spriteBinding(harness, nodeName)?.patch ?? null;
 }
 
-function effectiveFrame(harness, nodeName = 'py/walk') {
+function effectiveFrame(harness, nodeName = 'py/0') {
   return spritePatch(harness, nodeName)?.properties.frame ?? null;
 }
 
-function batchableOf(harness, nodeName = 'py/walk') {
+function batchableOf(harness, nodeName = 'py/0') {
   const patch = spritePatch(harness, nodeName);
   return patch === null ? null : patch.batchable;
 }
 
-function spriteComponent(harness, nodeName = 'py/walk') {
+function spriteComponent(harness, nodeName = 'py/0') {
   return harness.runtime._nodeIndex.require(prefabLocalNodeName(nodeName, 'body'))
     .getComponent('sprite');
 }
 
-function playerComponent(harness, nodeName = 'py/walk') {
+function playerComponent(harness, nodeName = 'py/0') {
   return harness.runtime._nodeIndex.require(nodeName).getComponent('animator');
 }
 
@@ -535,10 +547,8 @@ test('static prefab bindings preflight target type, atlas, and frame bounds', ()
 test('loop step sampling follows the local visual clock, not sourceTick', async (t) => {
   const harness = await animationHarness();
   t.after(() => harness.runtime.dispose());
-  commitAuthority(harness.runtime, () => harness.runtime.authority.createNode({
-    name: 'py/walk', parentName: null, prefabId: 'target.animated',
-    transformMode: 'live', transform: IDENTITY, visible: true, state: {},
-  }), { sourceTickDelta: 1 });
+  commitAuthority(harness.runtime, () => harness.runtime.authority.createNode(authorityNode()),
+    { sourceTickDelta: 1 });
   await harness.runtime.whenReady();
   harness.runtime.start();
 
@@ -559,27 +569,24 @@ test('loop step sampling follows the local visual clock, not sourceTick', async 
 test('a second prefab instance animates from its own visual origin', async (t) => {
   const harness = await animationHarness();
   t.after(() => harness.runtime.dispose());
-  const create = (name) => commitAuthority(harness.runtime, () =>
-    harness.runtime.authority.createNode({
-      name, parentName: null, prefabId: 'target.animated',
-      transformMode: 'live', transform: IDENTITY, visible: true, state: {},
-    }), { sourceTickDelta: 1 });
-  create('py/first');
-  create('py/second');
+  const create = (nodeId) => commitAuthority(harness.runtime, () =>
+    harness.runtime.authority.createNode(authorityNode(nodeId)), { sourceTickDelta: 1 });
+  create(0);
+  create(1);
   await harness.runtime.whenReady();
   harness.runtime.start();
 
   harness.frames.step(16);
-  assert.equal(effectiveFrame(harness, 'py/first'), 0);
-  assert.equal(effectiveFrame(harness, 'py/second'), 0);
+  assert.equal(effectiveFrame(harness, 'py/0'), 0);
+  assert.equal(effectiveFrame(harness, 'py/1'), 0);
   harness.frames.step(150);
-  assert.equal(effectiveFrame(harness, 'py/first'), 1);
-  assert.equal(effectiveFrame(harness, 'py/second'), 1);
-  create('py/third');
+  assert.equal(effectiveFrame(harness, 'py/0'), 1);
+  assert.equal(effectiveFrame(harness, 'py/1'), 1);
+  create(2);
   await harness.runtime.whenReady();
   harness.frames.step(50);
-  assert.equal(effectiveFrame(harness, 'py/first'), 2, 'first at 200ms');
-  assert.equal(effectiveFrame(harness, 'py/third'), 0, 'late instance starts at its own zero');
+  assert.equal(effectiveFrame(harness, 'py/0'), 2, 'first at 200ms');
+  assert.equal(effectiveFrame(harness, 'py/2'), 0, 'late instance starts at its own zero');
 });
 
 test('nested dynamic Prefab players keep scope-local outputs and retained phase', async (t) => {
@@ -588,9 +595,9 @@ test('nested dynamic Prefab players keep scope-local outputs and retained phase'
     prefabEntries: [prefabs.outer, prefabs.leafA, prefabs.leafB],
   });
   t.after(() => harness.runtime.dispose());
-  const owner = 'py/nested-animation';
-  const alpha = 'prefab/py/nested-animation/units/alpha';
-  const bravo = 'prefab/py/nested-animation/units/bravo';
+  const owner = 'py/0';
+  const alpha = 'prefab/py/0/units/alpha';
+  const bravo = 'prefab/py/0/units/bravo';
   const desired = (alphaPrefabId = prefabs.leafA.id, includeBravo = true) => ({
     units: {
       alpha: { prefabId: alphaPrefabId, state: {} },
@@ -598,15 +605,9 @@ test('nested dynamic Prefab players keep scope-local outputs and retained phase'
     },
   });
 
-  commitAuthority(harness.runtime, () => harness.runtime.authority.createNode({
-    name: owner,
-    parentName: null,
-    prefabId: prefabs.outer.id,
-    transformMode: 'live',
-    transform: IDENTITY,
-    visible: true,
-    state: desired(),
-  }), { sourceTickDelta: 1 });
+  commitAuthority(harness.runtime, () => harness.runtime.authority.createNode(
+    authorityNode(0, prefabs.outer.id, desired()),
+  ), { sourceTickDelta: 1 });
   await harness.runtime.whenReady();
   harness.runtime.start();
   harness.frames.step(16);
@@ -631,7 +632,7 @@ test('nested dynamic Prefab players keep scope-local outputs and retained phase'
   const alphaRecord = harness.runtime._animationSystem._players.get(alphaPlayer);
   const startedAtVisualSeconds = alphaRecord.startedAtVisualSeconds;
   commitAuthority(harness.runtime, () => harness.runtime.authority.setNodeState({
-    name: owner,
+    nodeId: 0,
     state: desired(),
   }), { sourceTickDelta: 1 });
   assert.strictEqual(harness.runtime._nodeIndex.require(alpha), alphaRoot);
@@ -644,7 +645,7 @@ test('nested dynamic Prefab players keep scope-local outputs and retained phase'
     'same slot key and Prefab id retain the player phase');
 
   commitAuthority(harness.runtime, () => harness.runtime.authority.setNodeState({
-    name: owner,
+    nodeId: 0,
     state: desired(prefabs.leafB.id, false),
   }), { sourceTickDelta: 1 });
   await harness.runtime.whenReady();
@@ -657,14 +658,14 @@ test('nested dynamic Prefab players keep scope-local outputs and retained phase'
     'changing the Prefab id creates a new player at its own zero');
 
   commitAuthority(harness.runtime, () => harness.runtime.authority.setNodeState({
-    name: owner,
+    nodeId: 0,
     state: { units: {} },
   }), { sourceTickDelta: 1 });
   assert.equal(replacementPlayer.disposed, true);
   assert.equal(harness.runtime._animationSystem._players.size, 0);
 
   commitAuthority(harness.runtime, () => harness.runtime.authority.setNodeState({
-    name: owner,
+    nodeId: 0,
     state: desired(prefabs.leafA.id, false),
   }), { sourceTickDelta: 1 });
   await harness.runtime.whenReady();
@@ -738,22 +739,16 @@ test('dynamic Prefab onAttach animation commands replay after adoption and roll 
       },
     });
     t.after(() => harness.runtime.dispose());
-    const owner = 'py/on-attach-animation';
+    const owner = 'py/0';
     const childRoot = `prefab/${owner}/units/only`;
-    commitAuthority(harness.runtime, () => harness.runtime.authority.createNode({
-      name: owner,
-      parentName: null,
-      prefabId: outer.id,
-      transformMode: 'live',
-      transform: IDENTITY,
-      visible: true,
-      state: { prefabId: null },
-    }), { sourceTickDelta: 1 });
+    commitAuthority(harness.runtime, () => harness.runtime.authority.createNode(
+      authorityNode(0, outer.id, { prefabId: null }),
+    ), { sourceTickDelta: 1 });
     await harness.runtime.whenReady();
     harness.runtime.start();
 
     commitAuthority(harness.runtime, () => harness.runtime.authority.setNodeState({
-      name: owner,
+      nodeId: 0,
       state: { prefabId: validChild.id },
     }), { sourceTickDelta: 1 });
     await harness.runtime.whenReady();
@@ -781,7 +776,7 @@ test('dynamic Prefab onAttach animation commands replay after adoption and roll 
 
     assert.throws(() => commitAuthority(harness.runtime, () =>
       harness.runtime.authority.setNodeState({
-        name: owner,
+        nodeId: 0,
         state: { prefabId: invalidChild.id },
       }), { sourceTickDelta: 1 }), { code: 'display-resource-missing' });
     assert.strictEqual(authority.state, baselineState);
@@ -841,13 +836,11 @@ test('dynamic replacement adoption failure restores the exact old animation play
       },
     });
     t.after(() => harness.runtime.dispose());
-    const owner = 'py/adoption-animation';
+    const owner = 'py/0';
     const childRoot = `prefab/${owner}/units/only`;
-    commitAuthority(harness.runtime, () => harness.runtime.authority.createNode({
-      name: owner, parentName: null, prefabId: outer.id,
-      transformMode: 'live', transform: IDENTITY, visible: true,
-      state: { prefabId: oldChild.id },
-    }), { sourceTickDelta: 1 });
+    commitAuthority(harness.runtime, () => harness.runtime.authority.createNode(
+      authorityNode(0, outer.id, { prefabId: oldChild.id }),
+    ), { sourceTickDelta: 1 });
     await harness.runtime.whenReady();
     harness.runtime.start();
     const oldRoot = harness.runtime._nodeIndex.require(childRoot);
@@ -871,7 +864,7 @@ test('dynamic replacement adoption failure restores the exact old animation play
     try {
       assert.throws(() => commitAuthority(harness.runtime, () =>
         harness.runtime.authority.setNodeState({
-          name: owner, state: { prefabId: newChild.id },
+          nodeId: 0, state: { prefabId: newChild.id },
         }), { sourceTickDelta: 1 }), (error) => {
         caught = error;
         return error === failure;
@@ -936,10 +929,8 @@ test('non-loop animations hold the last keyframe and stop requesting frames', as
   const fire = walkAnimation({ frames: [4, 5], loop: false });
   const harness = await animationHarness({ resources: [ATLAS, fire] });
   t.after(() => harness.runtime.dispose());
-  commitAuthority(harness.runtime, () => harness.runtime.authority.createNode({
-    name: 'py/walk', parentName: null, prefabId: 'target.animated',
-    transformMode: 'live', transform: IDENTITY, visible: true, state: {},
-  }), { sourceTickDelta: 1 });
+  commitAuthority(harness.runtime, () => harness.runtime.authority.createNode(authorityNode()),
+    { sourceTickDelta: 1 });
   await harness.runtime.whenReady();
   harness.runtime.start();
 
@@ -959,10 +950,8 @@ test('non-loop animations hold the last keyframe and stop requesting frames', as
 test('loop animations keep the frame loop scheduled; stop returns to idle', async (t) => {
   const harness = await animationHarness();
   t.after(() => harness.runtime.dispose());
-  commitAuthority(harness.runtime, () => harness.runtime.authority.createNode({
-    name: 'py/walk', parentName: null, prefabId: 'target.animated',
-    transformMode: 'live', transform: IDENTITY, visible: true, state: {},
-  }), { sourceTickDelta: 1 });
+  commitAuthority(harness.runtime, () => harness.runtime.authority.createNode(authorityNode()),
+    { sourceTickDelta: 1 });
   await harness.runtime.whenReady();
   harness.runtime.start();
   harness.frames.step(16);
@@ -983,10 +972,8 @@ test('set keeps phase, play restarts, and declarative patches re-apply', async (
   const idle = walkAnimation({ id: 'anim.unit.idle', frames: [3], fps: 10, loop: true });
   const harness = await animationHarness({ resources: [ATLAS, walkAnimation(), fire, idle] });
   t.after(() => harness.runtime.dispose());
-  commitAuthority(harness.runtime, () => harness.runtime.authority.createNode({
-    name: 'py/walk', parentName: null, prefabId: 'target.animated',
-    transformMode: 'live', transform: IDENTITY, visible: true, state: {},
-  }), { sourceTickDelta: 1 });
+  commitAuthority(harness.runtime, () => harness.runtime.authority.createNode(authorityNode()),
+    { sourceTickDelta: 1 });
   await harness.runtime.whenReady();
   harness.runtime.start();
   const player = playerComponent(harness);
@@ -1050,33 +1037,32 @@ test('switching clips clears overrides and batching ownership from targets the n
     });
     const harness = await animationHarness({ prefab, resources: [ATLAS, first, second] });
     t.after(() => harness.runtime.dispose());
-    commitAuthority(harness.runtime, () => harness.runtime.authority.createNode({
-      name: 'py/walk', parentName: null, prefabId: prefab.id,
-      transformMode: 'live', transform: IDENTITY, visible: true, state: {},
-    }), { sourceTickDelta: 1 });
+    commitAuthority(harness.runtime, () => harness.runtime.authority.createNode(
+      authorityNode(0, prefab.id),
+    ), { sourceTickDelta: 1 });
     await harness.runtime.whenReady();
     harness.runtime.start();
     harness.frames.step(16);
 
-    const body = harness.runtime._nodeIndex.require('prefab/py/walk/body');
+    const body = harness.runtime._nodeIndex.require('prefab/py/0/body');
     const firstSprite = body.getComponent('first');
     const secondSprite = body.getComponent('second');
     assert.equal(harness.runtime._renderSystem.effectiveProperties(firstSprite).frame, 1);
-    assert.equal(spriteBinding(harness, 'py/walk', 'first').patch.batchable, false);
-    assert.equal(spriteBinding(harness, 'py/walk', 'second').patch.batchable, true);
+    assert.equal(spriteBinding(harness, 'py/0', 'first').patch.batchable, false);
+    assert.equal(spriteBinding(harness, 'py/0', 'second').patch.batchable, true);
 
     playerComponent(harness).playAnimation('animator', second.id);
     harness.frames.step(0);
     assert.equal(harness.runtime._renderSystem.effectiveProperties(firstSprite).frame, 0,
       'the omitted target immediately exposes its base frame');
-    assert.equal(spriteBinding(harness, 'py/walk', 'first').patch.batchable, true);
+    assert.equal(spriteBinding(harness, 'py/0', 'first').patch.batchable, true);
     assert.equal(harness.runtime._renderSystem.effectiveProperties(secondSprite).frame, 3);
-    assert.equal(spriteBinding(harness, 'py/walk', 'second').patch.batchable, false);
+    assert.equal(spriteBinding(harness, 'py/0', 'second').patch.batchable, false);
 
     playerComponent(harness).stopAnimation('animator');
     harness.frames.step(0);
     assert.equal(harness.runtime._renderSystem.effectiveProperties(secondSprite).frame, 2);
-    assert.equal(spriteBinding(harness, 'py/walk', 'second').patch.batchable, true);
+    assert.equal(spriteBinding(harness, 'py/0', 'second').patch.batchable, true);
   });
 
 test('stop restores the newest base properties, not a start-time snapshot', async (t) => {
@@ -1087,10 +1073,9 @@ test('stop restores the newest base properties, not a start-time snapshot', asyn
   });
   const harness = await animationHarness({ prefab });
   t.after(() => harness.runtime.dispose());
-  commitAuthority(harness.runtime, () => harness.runtime.authority.createNode({
-    name: 'py/walk', parentName: null, prefabId: 'target.animated',
-    transformMode: 'live', transform: IDENTITY, visible: true, state: { frame: 2 },
-  }), { sourceTickDelta: 1 });
+  commitAuthority(harness.runtime, () => harness.runtime.authority.createNode(
+    authorityNode(0, 'target.animated', { frame: 2 }),
+  ), { sourceTickDelta: 1 });
   await harness.runtime.whenReady();
   harness.runtime.start();
   harness.frames.step(16);
@@ -1098,7 +1083,7 @@ test('stop restores the newest base properties, not a start-time snapshot', asyn
   assert.equal(effectiveFrame(harness), 1, 'override wins while playing');
 
   commitAuthority(harness.runtime, () => harness.runtime.authority.setNodeState({
-    name: 'py/walk', state: { frame: 3 },
+    nodeId: 0, state: { frame: 3 },
   }), { sourceTickDelta: 1 });
   harness.frames.step(0);
   assert.equal(effectiveFrame(harness), 1, 'base patch does not interrupt the override');
@@ -1112,10 +1097,8 @@ test('stop restores the newest base properties, not a start-time snapshot', asyn
 test('animation overrides drive batchable:false without touching base properties', async (t) => {
   const harness = await animationHarness();
   t.after(() => harness.runtime.dispose());
-  commitAuthority(harness.runtime, () => harness.runtime.authority.createNode({
-    name: 'py/walk', parentName: null, prefabId: 'target.animated',
-    transformMode: 'live', transform: IDENTITY, visible: true, state: {},
-  }), { sourceTickDelta: 1 });
+  commitAuthority(harness.runtime, () => harness.runtime.authority.createNode(authorityNode()),
+    { sourceTickDelta: 1 });
   await harness.runtime.whenReady();
 
   const binding = spriteBinding(harness);
@@ -1138,10 +1121,8 @@ test('animation overrides drive batchable:false without touching base properties
 test('disabled players clear overrides and re-enable from frame zero', async (t) => {
   const harness = await animationHarness();
   t.after(() => harness.runtime.dispose());
-  commitAuthority(harness.runtime, () => harness.runtime.authority.createNode({
-    name: 'py/walk', parentName: null, prefabId: 'target.animated',
-    transformMode: 'live', transform: IDENTITY, visible: true, state: {},
-  }), { sourceTickDelta: 1 });
+  commitAuthority(harness.runtime, () => harness.runtime.authority.createNode(authorityNode()),
+    { sourceTickDelta: 1 });
   await harness.runtime.whenReady();
   harness.runtime.start();
   harness.frames.step(16);
@@ -1163,10 +1144,8 @@ test('set and play commands cannot restart a disabled player', async (t) => {
   const fire = walkAnimation({ id: 'anim.unit.fire', frames: [5], loop: true });
   const harness = await animationHarness({ resources: [ATLAS, walkAnimation(), fire] });
   t.after(() => harness.runtime.dispose());
-  commitAuthority(harness.runtime, () => harness.runtime.authority.createNode({
-    name: 'py/walk', parentName: null, prefabId: 'target.animated',
-    transformMode: 'live', transform: IDENTITY, visible: true, state: {},
-  }), { sourceTickDelta: 1 });
+  commitAuthority(harness.runtime, () => harness.runtime.authority.createNode(authorityNode()),
+    { sourceTickDelta: 1 });
   await harness.runtime.whenReady();
   harness.runtime.start();
   harness.frames.step(16);
@@ -1200,11 +1179,9 @@ test('commit seal validates active clips against a changed target atlas', async 
   });
   const harness = await animationHarness({ prefab, resources: [ATLAS, smallAtlas, walkAnimation()] });
   t.after(() => harness.runtime.dispose());
-  commitAuthority(harness.runtime, () => harness.runtime.authority.createNode({
-    name: 'py/walk', parentName: null, prefabId: prefab.id,
-    transformMode: 'live', transform: IDENTITY, visible: true,
-    state: { textureResourceId: ATLAS.id },
-  }), { sourceTickDelta: 1 });
+  commitAuthority(harness.runtime, () => harness.runtime.authority.createNode(
+    authorityNode(0, prefab.id, { textureResourceId: ATLAS.id }),
+  ), { sourceTickDelta: 1 });
   await harness.runtime.whenReady();
   harness.runtime.start();
   harness.frames.step(16);
@@ -1217,7 +1194,7 @@ test('commit seal validates active clips against a changed target atlas', async 
   });
   harness.runtime.commitGate.begin(cursor);
   harness.runtime.authority.setNodeState({
-    name: 'py/walk', state: { textureResourceId: smallAtlas.id },
+    nodeId: 0, state: { textureResourceId: smallAtlas.id },
   });
   let failure = null;
   try { harness.runtime.commitGate.seal(cursor); } catch (error) { failure = error; }
@@ -1247,11 +1224,9 @@ test('commit seal validates declared targets for disabled and stopped players', 
         resources: [ATLAS, smallAtlas, walkAnimation()],
       });
       subtest.after(() => harness.runtime.dispose());
-      commitAuthority(harness.runtime, () => harness.runtime.authority.createNode({
-        name: 'py/walk', parentName: null, prefabId: prefab.id,
-        transformMode: 'live', transform: IDENTITY, visible: true,
-        state: { textureResourceId: ATLAS.id },
-      }), { sourceTickDelta: 1 });
+      commitAuthority(harness.runtime, () => harness.runtime.authority.createNode(
+        authorityNode(0, prefab.id, { textureResourceId: ATLAS.id }),
+      ), { sourceTickDelta: 1 });
       const player = playerComponent(harness);
       if (mode === 'disabled') player.setEnabled(false);
       else player.stopAnimation('animator');
@@ -1259,7 +1234,7 @@ test('commit seal validates declared targets for disabled and stopped players', 
       const previous = harness.runtime.summary().cursor;
       assert.throws(() => commitAuthority(harness.runtime, () =>
         harness.runtime.authority.setNodeState({
-          name: 'py/walk', state: { textureResourceId: smallAtlas.id },
+          nodeId: 0, state: { textureResourceId: smallAtlas.id },
         }), { sourceTickDelta: 1 }), { code: 'display-animation-frame-out-of-range' });
       assert.deepEqual(harness.runtime.summary().cursor, previous);
       assert.equal(harness.runtime._animationSystem._outputOwners.size, 0,
@@ -1275,10 +1250,8 @@ test('failed player re-enable rolls enabled back without acquiring an output', a
     resources: [ATLAS, smallAtlas, walkAnimation()],
   });
   t.after(() => harness.runtime.dispose());
-  commitAuthority(harness.runtime, () => harness.runtime.authority.createNode({
-    name: 'py/walk', parentName: null, prefabId: 'target.animated',
-    transformMode: 'live', transform: IDENTITY, visible: true, state: {},
-  }), { sourceTickDelta: 1 });
+  commitAuthority(harness.runtime, () => harness.runtime.authority.createNode(authorityNode()),
+    { sourceTickDelta: 1 });
   const player = playerComponent(harness);
   const sprite = spriteComponent(harness);
   player.setEnabled(false);
@@ -1315,17 +1288,17 @@ test('one state patch can switch the player and target atlas independent of prop
       resources: [ATLAS, smallAtlas, walkAnimation(), smallClip],
     });
     t.after(() => harness.runtime.dispose());
-    commitAuthority(harness.runtime, () => harness.runtime.authority.createNode({
-      name: 'py/walk', parentName: null, prefabId: prefab.id,
-      transformMode: 'live', transform: IDENTITY, visible: true,
-      state: { animationId: 'anim.unit.walk', textureResourceId: ATLAS.id },
-    }), { sourceTickDelta: 1 });
+    commitAuthority(harness.runtime, () => harness.runtime.authority.createNode(
+      authorityNode(0, prefab.id, {
+        animationId: 'anim.unit.walk', textureResourceId: ATLAS.id,
+      }),
+    ), { sourceTickDelta: 1 });
     await harness.runtime.whenReady();
     harness.runtime.start();
     harness.frames.step(16);
 
     commitAuthority(harness.runtime, () => harness.runtime.authority.setNodeState({
-      name: 'py/walk',
+      nodeId: 0,
       state: { animationId: smallClip.id, textureResourceId: smallAtlas.id },
     }), { sourceTickDelta: 1 });
     harness.frames.step(0);
@@ -1339,10 +1312,8 @@ test('declarative animationId patches follow the documented switch semantics', a
     target: { node: 'body', component: 'sprite' }, frames: [4, 5], fps: 10, loop: true });
   const harness = await animationHarness({ resources: [ATLAS, walkAnimation(), fire] });
   t.after(() => harness.runtime.dispose());
-  commitAuthority(harness.runtime, () => harness.runtime.authority.createNode({
-    name: 'py/walk', parentName: null, prefabId: 'target.animated',
-    transformMode: 'live', transform: IDENTITY, visible: true, state: {},
-  }), { sourceTickDelta: 1 });
+  commitAuthority(harness.runtime, () => harness.runtime.authority.createNode(authorityNode()),
+    { sourceTickDelta: 1 });
   await harness.runtime.whenReady();
   harness.runtime.start();
   const player = playerComponent(harness);
@@ -1351,13 +1322,13 @@ test('declarative animationId patches follow the documented switch semantics', a
   assert.equal(effectiveFrame(harness), 1);
 
   commitAuthority(harness.runtime, () => harness.runtime.authority.setNodeState({
-    name: 'py/walk', state: {},
+    nodeId: 0, state: {},
   }), { sourceTickDelta: 1 });
   harness.frames.step(0);
   assert.equal(effectiveFrame(harness), 1, 'same id patch does not restart');
 
   commitAuthority(harness.runtime, () => harness.runtime.authority.setNodeState({
-    name: 'py/walk', state: {},
+    nodeId: 0, state: {},
   }), { sourceTickDelta: 1 });
   harness.frames.step(100);
   void player;
@@ -1366,10 +1337,8 @@ test('declarative animationId patches follow the documented switch semantics', a
 test('prefab replacement adopts animation players exactly once', async (t) => {
   const harness = await animationHarness();
   t.after(() => harness.runtime.dispose());
-  commitAuthority(harness.runtime, () => harness.runtime.authority.createNode({
-    name: 'py/walk', parentName: null, prefabId: 'target.animated',
-    transformMode: 'live', transform: IDENTITY, visible: true, state: {},
-  }), { sourceTickDelta: 1 });
+  commitAuthority(harness.runtime, () => harness.runtime.authority.createNode(authorityNode()),
+    { sourceTickDelta: 1 });
   await harness.runtime.whenReady();
   harness.runtime.start();
   harness.frames.step(16);
@@ -1377,7 +1346,7 @@ test('prefab replacement adopts animation players exactly once', async (t) => {
   assert.equal(effectiveFrame(harness), 1);
 
   commitAuthority(harness.runtime, () => harness.runtime.authority.replaceNodePrefab({
-    name: 'py/walk', prefabId: 'target.animated', state: {},
+    nodeId: 0, prefabId: 'target.animated', state: {},
   }), { sourceTickDelta: 1 });
   await harness.runtime.whenReady();
   harness.frames.step(0);
@@ -1409,11 +1378,10 @@ test('replacement shadow preflights resolver animation targets before destroying
       resources: [ATLAS, walkAnimation(), badTarget],
     });
     t.after(() => harness.runtime.dispose());
-    commitAuthority(harness.runtime, () => harness.runtime.authority.createNode({
-      name: 'py/walk', parentName: null, prefabId: original.id,
-      transformMode: 'live', transform: IDENTITY, visible: true, state: {},
-    }), { sourceTickDelta: 1 });
-    const oldRoot = harness.runtime._nodeIndex.require('py/walk');
+    commitAuthority(harness.runtime, () => harness.runtime.authority.createNode(
+      authorityNode(0, original.id),
+    ), { sourceTickDelta: 1 });
+    const oldRoot = harness.runtime._nodeIndex.require('py/0');
     const oldPlayer = oldRoot.getComponent('animator');
     const previous = harness.runtime.summary().cursor;
     const cursor = Object.freeze({
@@ -1425,14 +1393,14 @@ test('replacement shadow preflights resolver animation targets before destroying
     let failure = null;
     try {
       harness.runtime.authority.replaceNodePrefab({
-        name: 'py/walk', prefabId: replacement.id, state: { animationId: badTarget.id },
+        nodeId: 0, prefabId: replacement.id, state: { animationId: badTarget.id },
       });
     } catch (error) { failure = error; }
     assert.equal(failure?.code, 'display-animation-target-missing');
-    assert.strictEqual(harness.runtime._nodeIndex.require('py/walk'), oldRoot);
+    assert.strictEqual(harness.runtime._nodeIndex.require('py/0'), oldRoot);
     assert.strictEqual(oldRoot.getComponent('animator'), oldPlayer);
     assert.equal(oldPlayer.disposed, false);
-    assert(harness.runtime._nodeIndex.get('prefab/py/walk/body'));
+    assert(harness.runtime._nodeIndex.get('prefab/py/0/body'));
     assert.equal(harness.runtime._animationSystem._players.size, 1,
       'the rejected shadow never registers a second player');
     harness.runtime.commitGate.fail(failure);
@@ -1441,26 +1409,23 @@ test('replacement shadow preflights resolver animation targets before destroying
 test('prefab dispose releases ownership and a fresh instance can reuse the output', async (t) => {
   const harness = await animationHarness();
   t.after(() => harness.runtime.dispose());
-  const create = () => commitAuthority(harness.runtime, () =>
-    harness.runtime.authority.createNode({
-      name: 'py/walk', parentName: null, prefabId: 'target.animated',
-      transformMode: 'live', transform: IDENTITY, visible: true, state: {},
-    }), { sourceTickDelta: 1 });
-  create();
+  const create = (nodeId) => commitAuthority(harness.runtime, () =>
+    harness.runtime.authority.createNode(authorityNode(nodeId)), { sourceTickDelta: 1 });
+  create(0);
   await harness.runtime.whenReady();
   harness.runtime.start();
   harness.frames.step(16);
 
   commitAuthority(harness.runtime, () => harness.runtime.authority.removeNode({
-    name: 'py/walk',
+    nodeId: 0,
   }), { sourceTickDelta: 1 });
   await harness.runtime.whenReady();
   harness.frames.step(0);
 
-  create();
+  create(1);
   await harness.runtime.whenReady();
   harness.frames.step(16);
-  assert.equal(effectiveFrame(harness), 0, 'a same-name instance starts cleanly');
+  assert.equal(effectiveFrame(harness, 'py/1'), 0, 'a fresh node ID starts cleanly');
   await harness.runtime.dispose();
   await harness.runtime.dispose();
 });
@@ -1468,10 +1433,8 @@ test('prefab dispose releases ownership and a fresh instance can reuse the outpu
 test('renderer rebuild keeps the player phase and remounts effective frames', async (t) => {
   const harness = await animationHarness();
   t.after(() => harness.runtime.dispose());
-  commitAuthority(harness.runtime, () => harness.runtime.authority.createNode({
-    name: 'py/walk', parentName: null, prefabId: 'target.animated',
-    transformMode: 'live', transform: IDENTITY, visible: true, state: {},
-  }), { sourceTickDelta: 1 });
+  commitAuthority(harness.runtime, () => harness.runtime.authority.createNode(authorityNode()),
+    { sourceTickDelta: 1 });
   await harness.runtime.whenReady();
   harness.runtime.start();
   harness.frames.step(16);
@@ -1512,14 +1475,13 @@ test('agent commands resolve players on the caller node only', async (t) => {
     registry.register({ ComponentClass: VisualBehaviour });
   } });
   t.after(() => harness.runtime.dispose());
-  commitAuthority(harness.runtime, () => harness.runtime.authority.createNode({
-    name: 'py/walk', parentName: null, prefabId: 'target.behaviour',
-    transformMode: 'live', transform: IDENTITY, visible: true, state: {},
-  }), { sourceTickDelta: 1 });
+  commitAuthority(harness.runtime, () => harness.runtime.authority.createNode(
+    authorityNode(0, 'target.behaviour'),
+  ), { sourceTickDelta: 1 });
   await harness.runtime.whenReady();
   harness.runtime.start();
-  const visual = harness.runtime._nodeIndex.require('py/walk').getComponent('visual');
-  const spriteOnBody = harness.runtime._nodeIndex.require('prefab/py/walk/body');
+  const visual = harness.runtime._nodeIndex.require('py/0').getComponent('visual');
+  const spriteOnBody = harness.runtime._nodeIndex.require('prefab/py/0/body');
 
   visual.setAnimation('animator', 'anim.unit.walk');
   harness.frames.step(16);
@@ -1556,16 +1518,14 @@ test('output conflicts between players fail closed and leave the owner running',
     resources: [ATLAS, walkAnimation(), walkAnimation({ id: 'anim.unit.other', frames: [3, 2] })],
   });
   t.after(() => harness.runtime.dispose());
-  commitAuthority(harness.runtime, () => harness.runtime.authority.createNode({
-    name: 'py/walk', parentName: null, prefabId: 'target.animated',
-    transformMode: 'live', transform: IDENTITY, visible: true, state: {},
-  }), { sourceTickDelta: 1 });
+  commitAuthority(harness.runtime, () => harness.runtime.authority.createNode(authorityNode()),
+    { sourceTickDelta: 1 });
   await harness.runtime.whenReady();
   harness.runtime.start();
   harness.frames.step(16);
   assert.equal(effectiveFrame(harness), 0);
 
-  const fx = harness.runtime._nodeIndex.require('py/walk').getComponent('fx');
+  const fx = harness.runtime._nodeIndex.require('py/0').getComponent('fx');
   assert.throws(() => fx.playAnimation('fx', 'anim.unit.other'),
     { code: 'display-animation-output-conflict' });
   harness.frames.step(100);
@@ -1587,10 +1547,9 @@ test('output conflicts between players fail closed and leave the owner running',
     resources: [ATLAS, walkAnimation(), missingTarget, missingComponent],
   });
   t.after(() => withBadTarget.runtime.dispose());
-  commitAuthority(withBadTarget.runtime, () => withBadTarget.runtime.authority.createNode({
-    name: 'py/walk', parentName: null, prefabId: 'target.animated',
-    transformMode: 'live', transform: IDENTITY, visible: true, state: {},
-  }), { sourceTickDelta: 1 });
+  commitAuthority(withBadTarget.runtime, () => withBadTarget.runtime.authority.createNode(
+    authorityNode(),
+  ), { sourceTickDelta: 1 });
   await withBadTarget.runtime.whenReady();
   withBadTarget.runtime.start();
   withBadTarget.frames.step(16);
@@ -1621,10 +1580,8 @@ test('components cannot override the final animation methods', () => {
 test('a stopped player keeps ownership semantics and animation kinds stay closed', async (t) => {
   const harness = await animationHarness();
   t.after(() => harness.runtime.dispose());
-  commitAuthority(harness.runtime, () => harness.runtime.authority.createNode({
-    name: 'py/walk', parentName: null, prefabId: 'target.animated',
-    transformMode: 'live', transform: IDENTITY, visible: true, state: {},
-  }), { sourceTickDelta: 1 });
+  commitAuthority(harness.runtime, () => harness.runtime.authority.createNode(authorityNode()),
+    { sourceTickDelta: 1 });
   await harness.runtime.whenReady();
   const player = playerComponent(harness);
   player.stopAnimation('animator');

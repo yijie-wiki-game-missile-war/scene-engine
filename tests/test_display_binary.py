@@ -1,15 +1,14 @@
 from __future__ import annotations
 
-import math
 import struct
 
 import numpy as np
 import pytest
 
-import scene_engine.display_binary as display_binary_module
 from scene_engine.display import (
     DisplayCatalogIdentity,
     DisplayCommand,
+    DisplayMatrixPool,
     DisplayNode,
     DisplayTransform,
     encode_display_checkpoint,
@@ -49,26 +48,32 @@ POSE = [
     1.25, -2.5, 3.75, 1.0,
 ]
 OPAQUE_MATRIX_BITS = (
-    0x7FC01234,
-    0x80000000,
-    0x7F800000,
-    0x3F800000,
-    0xBF800000,
-    0,
-    0,
-    0,
-    0,
-    0,
-    0,
-    0,
-    0,
-    0,
-    0,
-    0,
+    0x7F801234, 0xFF801234, 0x7FC01234, 0xFFC05678,
+    0x80000000, 0x7F800000, 0xFF800000, 0x3F800000,
+    0xBF800000, 0, 0, 0,
+    0, 0, 0, 0,
 )
 
 
-def checkpoint(*, transform: list = POSE, state: dict | None = None) -> dict:
+def _tensor_row(matrix: list[float]) -> list[list[float]]:
+    return np.asarray(matrix, dtype="<f4").reshape((4, 4)).tolist()
+
+
+def _assert_immutable_c_array(
+    value: object, *, dtype: str, shape: tuple[int, ...]
+) -> np.ndarray:
+    assert isinstance(value, np.ndarray)
+    assert value.dtype == np.dtype(dtype)
+    assert value.shape == shape
+    assert value.flags.c_contiguous
+    assert not value.flags.writeable
+    assert not value.flags.owndata
+    with pytest.raises(ValueError):
+        value.flags.writeable = True
+    return value
+
+
+def checkpoint(*, state: dict | None = None) -> dict:
     return {
         "schema": DISPLAY_CHECKPOINT_SCHEMA,
         "scene_name": "main",
@@ -76,22 +81,26 @@ def checkpoint(*, transform: list = POSE, state: dict | None = None) -> dict:
         "prefab_catalog_hash": HASH_B,
         "state_schema_hash": HASH_C,
         "last_command_seq": 7,
+        "matrix_pool_size": 3,
+        "matrix_pool": [
+            _tensor_row(POSE),
+            np.zeros((4, 4), "<f4").tolist(),
+            _tensor_row(IDENTITY),
+        ],
         "nodes": [
             {
-                "name": "py/root",
-                "parent_name": None,
+                "node_id": 0,
+                "parent_node_id": None,
                 "prefab_id": "world/root",
                 "transform_mode": "live",
-                "transform": transform,
                 "visible": True,
                 "state": {"mode": "ready"} if state is None else state,
             },
             {
-                "name": "py/child",
-                "parent_name": "py/root",
+                "node_id": 2,
+                "parent_node_id": 0,
                 "prefab_id": "world/child",
                 "transform_mode": "initial",
-                "transform": IDENTITY,
                 "visible": False,
                 "state": {},
             },
@@ -101,206 +110,111 @@ def checkpoint(*, transform: list = POSE, state: dict | None = None) -> dict:
 
 def command_stream() -> dict:
     variants = [
-        (
-            "node-create",
-            {
-                "parent_name": None,
-                "prefab_id": "world/root",
-                "transform_mode": "live",
-                "transform": POSE,
-                "visible": True,
-                "state": {"created": True},
-            },
-        ),
-        ("node-set-transform", {"transform": POSE}),
-        ("node-set-parent", {"parent_name": None}),
-        ("node-set-visible", {"visible": False}),
-        ("node-set-state", {"state": {"items": [1, 2]}}),
-        (
-            "node-replace-prefab",
-            {"prefab_id": "world/replacement", "state": {"mode": "other"}},
-        ),
-        ("node-remove", {}),
+        ("node-create", 0, {"parent_node_id": None, "prefab_id": "world/root", "transform_mode": "live", "visible": True, "state": {"created": True}}),
+        ("node-set-transform", 2, {}),
+        ("node-set-parent", 3, {"parent_node_id": 0}),
+        ("node-set-visible", 4, {"visible": False}),
+        ("node-set-state", 5, {"state": {"items": [1, 2]}}),
+        ("node-replace-prefab", 6, {"prefab_id": "world/replacement", "state": {"mode": "other"}}),
+        ("node-remove", 7, {}),
     ]
     base = 10
     return {
         "schema": DISPLAY_COMMAND_STREAM_SCHEMA,
         "base_command_seq": base,
         "last_command_seq": base + len(variants),
+        "matrix_pool_size": 8,
+        "dirty_node_ids": [0, 2],
+        "dirty_matrices": [_tensor_row(POSE), _tensor_row(IDENTITY)],
         "commands": [
             {
                 "schema": DISPLAY_COMMAND_SCHEMA,
                 "command_seq": base + index,
                 "source_tick": 20,
                 "kind": kind,
-                "name": f"py/node-{index}",
+                "node_id": node_id,
                 **fields,
             }
-            for index, (kind, fields) in enumerate(variants, 1)
+            for index, (kind, node_id, fields) in enumerate(variants, 1)
         ],
     }
 
 
-def test_binary_checkpoint_round_trips_semantics_and_seals_cursor() -> None:
+def test_binary_checkpoint_round_trips_full_pool_and_sparse_node_records() -> None:
     encoded = encode_display_checkpoint_binary(checkpoint(), 7)
 
     assert encoded.kind == DISPLAY_CHECKPOINT_KIND
     assert encoded.last_command_seq == 7
-    assert encoded.source_tick is None
-    assert encoded.base_command_seq is None
     assert bytes(encoded) == encoded.bytes
     assert encoded.bytes[:4] == DISPLAY_BINARY_CHECKPOINT_MAGIC
-    assert encoded.bytes[4] == DISPLAY_BINARY_VERSION == 2
+    assert encoded.bytes[4] == DISPLAY_BINARY_VERSION == 3
     assert encoded.bytes[5] == DISPLAY_BINARY_SCALAR_FLOAT32
-    assert struct.unpack_from("<H", encoded.bytes, 6)[0] == 0
-    assert struct.unpack_from("<Q", encoded.bytes, 8)[0] == 7
-    _parent_offset, matrix_offset = _first_checkpoint_node_offsets(encoded.bytes)
-    matrix = struct.unpack_from("<16f", encoded.bytes, matrix_offset)
-    assert len(matrix) == 16
-    assert (matrix[3], matrix[7], matrix[11], matrix[15]) == (0.0, 0.0, 0.0, 1.0)
-    assert matrix == pytest.approx(POSE, abs=1e-6)
+    assert struct.unpack_from("<QII", encoded.bytes, 8) == (7, 3, 2)
+    assert struct.unpack_from("<16f", encoded.bytes, 24) == pytest.approx(POSE)
 
     decoded = decode_display_checkpoint_binary(encoded.bytes, 7)
-    assert decoded["schema"] == DISPLAY_CHECKPOINT_SCHEMA
-    assert decoded["last_command_seq"] == 7
-    assert [node["name"] for node in decoded["nodes"]] == ["py/root", "py/child"]
-    assert decoded["nodes"][1]["parent_name"] == "py/root"
-    assert decoded["nodes"][1]["transform_mode"] == "initial"
-    assert decoded["nodes"][1]["visible"] is False
-    assert decoded["nodes"][0]["state"] == {"mode": "ready"}
-    assert decoded["nodes"][0]["transform"] == pytest.approx(POSE, abs=1e-6)
+    assert decoded["matrix_pool_size"] == 3
+    _assert_immutable_c_array(
+        decoded["matrix_pool"], dtype="<f4", shape=(3, 4, 4)
+    )
+    assert [node["node_id"] for node in decoded["nodes"]] == [0, 2]
+    assert decoded["nodes"][1]["parent_node_id"] == 0
+    assert "transform" not in decoded["nodes"][0]
+    assert encode_display_checkpoint_binary(decoded, 7).bytes == encoded.bytes
 
     with pytest.raises(WireError, match="cursor"):
         decode_display_checkpoint_binary(encoded.bytes, 8)
 
 
-def test_binary_matrix_round_trip_preserves_shear_and_float32_bits() -> None:
-    matrix = [(-0.0 if value == 0.0 else value) for value in POSE]
-    encoded = encode_display_checkpoint_binary(checkpoint(transform=matrix), 7)
-    _parent_offset, matrix_offset = _first_checkpoint_node_offsets(encoded.bytes)
-    bits = struct.unpack_from("<16I", encoded.bytes, matrix_offset)
-    assert all(bits[index] == 0x80000000 for index in (1, 2, 3, 6, 7, 11))
-
-    decoded = decode_display_checkpoint_binary(encoded.bytes, 7)
-    assert decoded["nodes"][0]["transform"] == pytest.approx(POSE, abs=1e-6)
-    assert all(
-        struct.pack("<f", decoded["nodes"][0]["transform"][index])
-        == b"\x00\x00\x00\x80"
-        for index in (1, 2, 3, 6, 7, 11)
-    )
-    assert encode_display_checkpoint_binary(decoded, 7).bytes == encoded.bytes
-
-
-def test_typed_stream_encoder_reads_the_resident_transform_buffer() -> None:
-    transform = DisplayTransform.from_matrix(POSE)
-    command = DisplayCommand.set_transform("py/root", transform)
-    stream, cursor = encode_display_command_stream(
-        base_command_seq=7,
-        source_tick=9,
-        commands=(command,),
-    )
-
-    assert command.fields["transform"] is transform
-    matrix_buffer = display_binary_module._encode_matrix(transform)
-    assert isinstance(matrix_buffer, np.ndarray)
-    assert matrix_buffer.flags.c_contiguous
-    assert not matrix_buffer.flags.writeable
-    assert matrix_buffer.nbytes == 64
-    assert matrix_buffer.tobytes() == transform.matrix_bytes
-    encoded = encode_display_command_stream_binary(stream, 9, cursor)
-    decoded = decode_display_command_stream_binary(encoded.bytes, 9, cursor)
-    assert decoded["commands"][0]["transform"] == pytest.approx(POSE, abs=1e-6)
-
-
-def test_typed_stream_encoder_transmits_opaque_matrix_bits_exactly() -> None:
+def test_checkpoint_tensor_preserves_opaque_float32_bits() -> None:
     raw = struct.pack("<16I", *OPAQUE_MATRIX_BITS)
-    transform = DisplayTransform(matrix_bytes=raw)
-    command = DisplayCommand.set_transform("py/root", transform)
-    stream, cursor = encode_display_command_stream(
-        base_command_seq=0,
-        source_tick=1,
-        commands=(command,),
-    )
-
-    encoded = encode_display_command_stream_binary(stream, 1, cursor)
-
-    assert bytes(display_binary_module._encode_matrix(transform)) == raw
-    assert encoded.bytes.endswith(raw)
-
-
-def test_typed_checkpoint_encoder_transmits_opaque_matrix_bits_exactly() -> None:
-    raw = struct.pack("<16I", *OPAQUE_MATRIX_BITS)
-    transform = DisplayTransform(matrix_bytes=raw)
-    checkpoint_seal = encode_display_checkpoint(
+    pool = DisplayMatrixPool()
+    node_id = pool.append(DisplayTransform(matrix_bytes=raw))
+    seal = encode_display_checkpoint(
         scene_name="main",
         catalog=DisplayCatalogIdentity(HASH_A, HASH_B, HASH_C),
         last_command_seq=0,
-        nodes=(
-            DisplayNode(
-                name="py/root",
-                parent_name=None,
-                prefab_id="world/root",
-                transform_mode="live",
-                transform=transform,
-                visible=True,
-                state={},
-            ),
-        ),
+        matrix_pool=pool,
+        nodes=(DisplayNode(node_id=node_id, parent_node_id=None, prefab_id="world/root", transform_mode="live", visible=True, state={}),),
     )
 
-    encoded = encode_display_checkpoint_binary(checkpoint_seal, 0)
-    _parent_offset, matrix_offset = _first_checkpoint_node_offsets(encoded.bytes)
-
-    assert checkpoint_seal.nodes[0].transform is transform
-    assert encoded.bytes[matrix_offset : matrix_offset + len(raw)] == raw
-
-
-def test_typed_outbound_stream_trusts_target_but_binary_decoder_validates_it() -> None:
-    command = DisplayCommand.set_transform("product-owned-target", DisplayTransform.identity())
-    stream, cursor = encode_display_command_stream(
-        base_command_seq=0,
-        source_tick=1,
-        commands=(command,),
+    encoded = encode_display_checkpoint_binary(seal, 0)
+    assert encoded.bytes[24:88] == raw
+    decoded = decode_display_checkpoint_binary(encoded.bytes, 0)
+    matrix_pool = _assert_immutable_c_array(
+        decoded["matrix_pool"], dtype="<f4", shape=(1, 4, 4)
     )
+    assert matrix_pool.view("<u4").reshape(-1).tolist() == list(OPAQUE_MATRIX_BITS)
+    assert matrix_pool.tobytes() == raw
+    assert encode_display_checkpoint_binary(decoded, 0).bytes == encoded.bytes
 
-    encoded = encode_display_command_stream_binary(stream, 1, cursor)
-    with pytest.raises(WireError, match="authority Node name"):
-        decode_display_command_stream_binary(encoded.bytes, 1, cursor)
 
-
-def test_binary_command_stream_round_trips_all_opcodes_and_seals_header_values() -> None:
+def test_binary_command_stream_round_trips_batch_then_all_command_opcodes() -> None:
     value = command_stream()
     encoded = encode_display_command_stream_binary(value, 20, 17)
 
     assert encoded.kind == DISPLAY_COMMAND_STREAM_KIND
     assert encoded.base_command_seq == 10
     assert encoded.source_tick == 20
-    assert encoded.last_command_seq == 17
     assert encoded.bytes[:4] == DISPLAY_BINARY_COMMAND_STREAM_MAGIC
-    assert struct.unpack_from("<Q", encoded.bytes, 8)[0] == 10
-    assert struct.unpack_from("<Q", encoded.bytes, 16)[0] == 20
-    assert struct.unpack_from("<I", encoded.bytes, 24)[0] == 7
+    assert struct.unpack_from("<QQIII", encoded.bytes, 8) == (10, 20, 7, 8, 2)
+    assert struct.unpack_from("<2I", encoded.bytes, 36) == (0, 2)
+    assert struct.unpack_from("<16f", encoded.bytes, 44) == pytest.approx(POSE)
 
     decoded = decode_display_command_stream_binary(encoded.bytes, 20, 17)
-    assert decoded["schema"] == DISPLAY_COMMAND_STREAM_SCHEMA
-    assert decoded["base_command_seq"] == 10
-    assert decoded["last_command_seq"] == 17
-    assert [command["kind"] for command in decoded["commands"]] == [
-        "node-create",
-        "node-set-transform",
-        "node-set-parent",
-        "node-set-visible",
-        "node-set-state",
-        "node-replace-prefab",
-        "node-remove",
-    ]
-    assert [command["command_seq"] for command in decoded["commands"]] == list(
-        range(11, 18)
+    dirty_node_ids = _assert_immutable_c_array(
+        decoded["dirty_node_ids"], dtype="<u4", shape=(2,)
     )
-    assert {command["source_tick"] for command in decoded["commands"]} == {20}
-    assert decoded["commands"][2]["parent_name"] is None
-    assert decoded["commands"][3]["visible"] is False
-    assert decoded["commands"][4]["state"] == {"items": [1, 2]}
+    np.testing.assert_array_equal(dirty_node_ids, np.asarray([0, 2], dtype="<u4"))
+    _assert_immutable_c_array(
+        decoded["dirty_matrices"], dtype="<f4", shape=(2, 4, 4)
+    )
+    assert [record["kind"] for record in decoded["commands"]] == [
+        "node-create", "node-set-transform", "node-set-parent",
+        "node-set-visible", "node-set-state", "node-replace-prefab", "node-remove",
+    ]
+    assert not any("transform" in record for record in decoded["commands"])
+    assert encode_display_command_stream_binary(decoded, 20, 17).bytes == encoded.bytes
 
     with pytest.raises(WireError, match="source tick"):
         decode_display_command_stream_binary(encoded.bytes, 21, 17)
@@ -308,14 +222,119 @@ def test_binary_command_stream_round_trips_all_opcodes_and_seals_header_values()
         decode_display_command_stream_binary(encoded.bytes, 20, 18)
 
 
+def test_command_stream_fixed_command_limit_precedes_command_traversal() -> None:
+    over_limit_count = 65_537
+    encoded = encode_display_command_stream_binary(command_stream(), 20, 17)
+    malformed = bytearray(encoded.bytes)
+    struct.pack_into("<I", malformed, 24, over_limit_count)
+
+    with pytest.raises(WireError, match="fixed limit of 65536"):
+        decode_display_command_stream_binary(
+            malformed,
+            20,
+            10 + over_limit_count,
+        )
+
+    oversized = command_stream()
+    oversized["commands"] = [None] * over_limit_count
+    oversized["last_command_seq"] = 10 + over_limit_count
+    with pytest.raises(ConfigurationError, match="fixed limit of 65536"):
+        encode_display_command_stream_binary(
+            oversized,
+            20,
+            10 + over_limit_count,
+        )
+
+
+def test_typed_stream_gathers_pool_rows_without_inline_matrix() -> None:
+    pool = DisplayMatrixPool()
+    node_id = pool.append(DisplayTransform.from_matrix(IDENTITY))
+    baseline = encode_display_checkpoint(
+        scene_name="main",
+        catalog=DisplayCatalogIdentity(HASH_A, HASH_B, HASH_C),
+        last_command_seq=0,
+        matrix_pool=pool,
+        nodes=(DisplayNode(node_id=node_id, parent_node_id=None, prefab_id="world/root", transform_mode="live", visible=True, state={}),),
+    )
+    baseline.confirm_published()
+    raw = struct.pack("<16I", *OPAQUE_MATRIX_BITS)
+    pool.set(node_id, DisplayTransform(matrix_bytes=raw))
+    stream, cursor = encode_display_command_stream(
+        base_command_seq=0,
+        source_tick=1,
+        matrix_pool=pool,
+        commands=(DisplayCommand.set_transform(node_id),),
+    )
+
+    encoded = encode_display_command_stream_binary(stream, 1, cursor)
+    assert encoded.bytes[40:104] == raw
+    decoded = decode_display_command_stream_binary(encoded.bytes, 1, cursor)
+    assert "transform" not in decoded["commands"][0]
+    dirty_matrices = _assert_immutable_c_array(
+        decoded["dirty_matrices"], dtype="<f4", shape=(1, 4, 4)
+    )
+    assert dirty_matrices.view("<u4").reshape(-1).tolist() == list(
+        OPAQUE_MATRIX_BITS
+    )
+    assert dirty_matrices.tobytes() == raw
+    assert encode_display_command_stream_binary(decoded, 1, cursor).bytes == encoded.bytes
+
+
+def test_empty_command_batch_round_trips_validated_record_and_binary() -> None:
+    pool = DisplayMatrixPool()
+    stream, _ = encode_display_command_stream(
+        base_command_seq=3, source_tick=4, matrix_pool=pool, commands=()
+    )
+    encoded = encode_display_command_stream_binary(stream.to_record(), 4, 3)
+    decoded = decode_display_command_stream_binary(encoded.bytes, 4, 3)
+    _assert_immutable_c_array(
+        decoded["dirty_node_ids"], dtype="<u4", shape=(0,)
+    )
+    _assert_immutable_c_array(
+        decoded["dirty_matrices"], dtype="<f4", shape=(0, 4, 4)
+    )
+    assert encode_display_command_stream_binary(decoded, 4, 3).bytes == encoded.bytes
+
+
+def test_empty_checkpoint_pool_decodes_to_exact_read_only_tensor_shape() -> None:
+    value = checkpoint()
+    value["matrix_pool_size"] = 0
+    value["matrix_pool"] = []
+    value["nodes"] = []
+    encoded = encode_display_checkpoint_binary(value, 7)
+
+    decoded = decode_display_checkpoint_binary(encoded.bytes, 7)
+
+    _assert_immutable_c_array(
+        decoded["matrix_pool"], dtype="<f4", shape=(0, 4, 4)
+    )
+    assert encode_display_checkpoint_binary(decoded, 7).bytes == encoded.bytes
+
+
+def test_raw_stream_rejects_out_of_pool_command_and_parent_ids() -> None:
+    value = command_stream()
+    value["matrix_pool_size"] = 7
+    with pytest.raises(ConfigurationError, match="outside"):
+        encode_display_command_stream_binary(value, 20, 17)
+
+    value = command_stream()
+    value["commands"][2]["parent_node_id"] = 8
+    with pytest.raises(ConfigurationError, match="outside"):
+        encode_display_command_stream_binary(value, 20, 17)
+
+
+def test_dirty_ids_must_be_sorted_unique_and_exact_matrix_targets() -> None:
+    for dirty_ids in ([2, 0], [0, 0], [0]):
+        value = command_stream()
+        value["dirty_node_ids"] = dirty_ids
+        value["dirty_matrices"] = [_tensor_row(POSE) for _ in dirty_ids]
+        with pytest.raises(ConfigurationError, match="dirty"):
+            encode_display_command_stream_binary(value, 20, 17)
+
+
 @pytest.mark.parametrize(
     ("offset", "replacement", "match"),
-    [
-        (0, b"NOPE", "magic"),
-        (4, b"\x01", "version"),
-        (5, b"\x02", "scalar"),
-        (6, b"\x01\x00", "flags"),
-    ],
+    [(0, b"NOPE", "magic"), (4, b"\x01", "version"), (5, b"\x02", "scalar"), (6, b"\x01\x00", "flags")],
 )
 def test_binary_header_and_framing_corruption_fail_closed(
     offset: int, replacement: bytes, match: str
@@ -332,124 +351,55 @@ def test_binary_header_and_framing_corruption_fail_closed(
         decode_display_checkpoint_binary(valid + b"\x00", 7)
 
 
-def test_binary_checkpoint_rejects_parent_cycles_but_accepts_opaque_matrices() -> None:
+def test_checkpoint_rejects_nonzero_inactive_tombstone_and_bad_parent() -> None:
+    value = checkpoint()
+    value["matrix_pool"][1][0][0] = 1.0
+    with pytest.raises(ConfigurationError, match="tombstone"):
+        encode_display_checkpoint_binary(value, 7)
+
     raw = bytearray(encode_display_checkpoint_binary(checkpoint(), 7).bytes)
-    parent_offset, matrix_offset = _first_checkpoint_node_offsets(raw)
-
-    invalid_parent = bytearray(raw)
-    struct.pack_into("<I", invalid_parent, parent_offset, 0)
+    first_record = _first_checkpoint_record_offset(raw)
+    struct.pack_into("<I", raw, first_record + 4, 0)
     with pytest.raises(WireError, match="earlier"):
-        decode_display_checkpoint_binary(invalid_parent, 7)
-
-    nonfinite = bytearray(raw)
-    struct.pack_into("<I", nonfinite, matrix_offset, 0x7FC00000)
-    assert math.isnan(
-        decode_display_checkpoint_binary(nonfinite, 7)["nodes"][0]["transform"][0]
-    )
-
-    shear = bytearray(raw)
-    struct.pack_into("<f", shear, matrix_offset + 4 * 4, 0.5)
-    assert decode_display_checkpoint_binary(shear, 7)["nodes"][0]["transform"][4] == 0.5
-
-    reflection = bytearray(raw)
-    for component in range(3):
-        offset = matrix_offset + component * 4
-        before = struct.unpack_from("<f", reflection, offset)[0]
-        struct.pack_into("<f", reflection, offset, -before)
-    assert decode_display_checkpoint_binary(reflection, 7)["nodes"][0][
-        "transform"
-    ][0] == -POSE[0]
+        decode_display_checkpoint_binary(raw, 7)
 
 
-def test_binary_state_json_and_float32_quantization_fail_closed() -> None:
+def test_binary_state_json_depth_and_duplicate_keys_fail_closed() -> None:
     deeply_nested = checkpoint(state={"outer": {"inner": 1}})
     encoded = encode_display_checkpoint_binary(deeply_nested, 7)
     with pytest.raises(WireError, match="state JSON"):
         decode_display_checkpoint_binary(encoded.bytes, 7, maximum_json_depth=1)
     with pytest.raises(ConfigurationError, match="canonical JSON"):
-        encode_display_checkpoint_binary(
-            deeply_nested,
-            7,
-            maximum_json_depth=1,
-        )
+        encode_display_checkpoint_binary(deeply_nested, 7, maximum_json_depth=1)
 
     duplicate = _replace_first_state(encoded.bytes, b'{"x":1,"x":2}')
     with pytest.raises(WireError, match="duplicate"):
         decode_display_checkpoint_binary(duplicate, 7)
 
-    unsafe = _replace_first_state(encoded.bytes, b'{"x":9007199254740992}')
-    with pytest.raises(WireError, match="unsafe"):
-        decode_display_checkpoint_binary(unsafe, 7)
 
-    with pytest.raises(ConfigurationError, match="float32"):
-        encode_display_checkpoint_binary(
-            checkpoint(
-                transform=[*IDENTITY[:12], 1e100, 0.0, 0.0, 1.0]
-            ),
-            7,
-        )
-    singular = [
-        0.0, 0.0, 0.0, 0.0,
-        0.0, 1.0, 0.0, 0.0,
-        0.0, 0.0, 1.0, 0.0,
-        0.0, 0.0, 0.0, 1.0,
-    ]
-    encoded_singular = encode_display_checkpoint_binary(
-        checkpoint(transform=singular),
-        7,
-    )
-    assert decode_display_checkpoint_binary(encoded_singular.bytes, 7)["nodes"][0][
-        "transform"
-    ] == singular
-    with pytest.raises(ConfigurationError, match="sixteen-value matrix"):
-        encode_display_checkpoint_binary(
-            checkpoint(
-                transform={
-                    "position": [0.0, 0.0, 0.0],
-                    "rotationXyzw": [0.1, 0.2, 0.3, 0.9],
-                    "scale": [1e-42, 1.0, 1.0],
-                }
-            ),
-            7,
-        )
-
-
-def test_binary_encoder_accepts_only_current_semantic_record_versions() -> None:
+def test_binary_encoder_accepts_only_current_semantic_schema_versions() -> None:
     old = checkpoint()
-    old["schema"] = "scene-engine-display-checkpoint@4"
+    old["schema"] = "scene-engine-display-checkpoint@5"
     with pytest.raises(ConfigurationError, match="schema"):
         encode_display_checkpoint_binary(old, 7)
 
     commands = command_stream()
-    commands["commands"][0]["schema"] = "scene-engine-node-command@4"
-    with pytest.raises(ConfigurationError, match="fields"):
+    commands["commands"][0]["schema"] = "scene-engine-node-command@5"
+    with pytest.raises(ConfigurationError, match="schema"):
         encode_display_command_stream_binary(commands, 20, 17)
 
-def _first_checkpoint_node_offsets(raw: bytes | bytearray) -> tuple[int, int]:
-    cursor = 8 + 8
+
+def _first_checkpoint_record_offset(raw: bytes | bytearray) -> int:
+    pool_size = struct.unpack_from("<I", raw, 16)[0]
+    cursor = 24 + pool_size * 64
     scene_length = struct.unpack_from("<H", raw, cursor)[0]
-    cursor += 2 + scene_length + 32 * 3
-    node_count = struct.unpack_from("<I", raw, cursor)[0]
-    assert node_count >= 1
-    cursor += 4
-    name_length = struct.unpack_from("<H", raw, cursor)[0]
-    cursor += 2 + name_length
-    parent_offset = cursor
-    cursor += 4
-    prefab_length = struct.unpack_from("<H", raw, cursor)[0]
-    cursor += 2 + prefab_length
-    cursor += 1
-    return parent_offset, cursor
+    return cursor + 2 + scene_length + 32 * 3
 
 
 def _replace_first_state(raw: bytes, replacement: bytes) -> bytes:
-    _parent_offset, matrix_offset = _first_checkpoint_node_offsets(raw)
-    length_offset = matrix_offset + 16 * 4
-    original_length = struct.unpack_from("<I", raw, length_offset)[0]
-    state_offset = length_offset + 4
-    return (
-        raw[:length_offset]
-        + struct.pack("<I", len(replacement))
-        + replacement
-        + raw[state_offset + original_length :]
-    )
+    cursor = _first_checkpoint_record_offset(raw) + 8
+    prefab_length = struct.unpack_from("<H", raw, cursor)[0]
+    cursor += 2 + prefab_length + 1
+    original_length = struct.unpack_from("<I", raw, cursor)[0]
+    state_offset = cursor + 4
+    return raw[:cursor] + struct.pack("<I", len(replacement)) + replacement + raw[state_offset + original_length :]

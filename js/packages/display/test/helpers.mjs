@@ -39,6 +39,57 @@ export const IDENTITY = matrixTransform();
 
 export function matrixPosition(matrix) { return matrix.slice(12, 15); }
 
+function ownedMatrixTensor(matrix) { return new Float32Array(matrix); }
+
+function createNumericAuthorityTestAdapter(authority) {
+  let poolSize = 0;
+  authority.installNodeMatrixPool({ poolSize, matrices: new Float32Array() });
+
+  const stage = (nodeId, matrix, nextPoolSize) => {
+    authority.applyNodeTransformBatch({
+      poolSize: nextPoolSize,
+      nodeIds: new Uint32Array([nodeId]),
+      matrices: ownedMatrixTensor(matrix),
+    });
+    poolSize = nextPoolSize;
+  };
+
+  return {
+    installNodeMatrixPool: (record) => authority.installNodeMatrixPool(record),
+    applyNodeTransformBatch(record) {
+      authority.applyNodeTransformBatch(record);
+      poolSize = record.poolSize;
+    },
+    createNode(command) {
+      const { transform = IDENTITY, ...record } = command;
+      if (!Number.isSafeInteger(record.nodeId) || record.nodeId !== poolSize) {
+        throw new Error(`test authority node IDs must append densely: ${record.nodeId}`);
+      }
+      stage(record.nodeId, transform, poolSize + 1);
+      const result = authority.createNode(record);
+      authority._assertMatrixPoolSettled();
+      return result;
+    },
+    setNodeTransform(command) {
+      const { transform, ...record } = command;
+      if (transform === undefined) {
+        throw new Error('test setNodeTransform requires a matrix');
+      }
+      stage(record.nodeId, transform, poolSize);
+      const result = authority.setNodeTransform(record);
+      authority._assertMatrixPoolSettled();
+      return result;
+    },
+    setNodeParent: (record) => authority.setNodeParent(record),
+    setNodeVisible: (record) => authority.setNodeVisible(record),
+    setNodeState: (record) => authority.setNodeState(record),
+    replaceNodePrefab: (record) => authority.replaceNodePrefab(record),
+    removeNode: (record) => authority.removeNode(record),
+    _assertMatrixPoolSettled: () => authority._assertMatrixPoolSettled(),
+    _release: () => authority._release(),
+  };
+}
+
 export const RENDERER_PROFILE = Object.freeze({
   drawMode: 'requested',
   maximumPixelRatio: 1,
@@ -85,7 +136,7 @@ export function emptyPrefab({ id = 'target.test.item', gameplayType = 'test.item
 
 export async function createHarness({ prefabEntries = null, resources = [], sceneNodes = [],
   prefabInstances = [], backendFactory = null, onHealth = null, configureComponents = null,
-  bootstrapAuthority = null, runtimeOptions = {},
+  bootstrapAuthority = null, runtimeOptions = {}, rawAuthority = false,
 } = {}) {
   const componentRegistry = createComponentRegistry();
   configureComponents?.(componentRegistry);
@@ -131,6 +182,9 @@ export async function createHarness({ prefabEntries = null, resources = [], scen
     ...runtimeOptions,
   });
   const installReturn = runtime.installScene({ sceneName: 'main' });
+  if (!rawAuthority) {
+    runtime.authority = Object.freeze(createNumericAuthorityTestAdapter(runtime.authority));
+  }
   bootstrapAuthority?.(runtime.authority);
   runtime.activate();
   return { runtime, frames, fakeBackends, componentRegistry, resourceRegistry,

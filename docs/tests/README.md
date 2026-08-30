@@ -7,7 +7,7 @@
 
 | 类别 | 默认门禁中的小规模 smoke | 显式 runner |
 | --- | --- | --- |
-| Python Matrix4 操作与常驻成本 | `test_display.py` 与 `test_display_binary.py` 验证唯一只读 NumPy owner、公开 API 和 exact 64-byte 编码。 | `benchmark_python_display_transform.py` 参数化操作次数、编码命令数和常驻 Transform 数。 |
+| Python Matrix4 操作与常驻成本 | `test_display.py` 与 `test_display_binary.py` 验证连续 NumPy 矩阵池、节点 ID、dirty tensor 和 exact binary32 编码。 | `benchmark_python_display_transform.py` 参数化操作次数、编码命令数和常驻矩阵池行数。 |
 | 显示引擎功能与性能 | `display-runtime-foundation.test.mjs`；`display-runtime-scale.test.mjs` 调用 12-binding deterministic smoke。 | `benchmark_display_runtime_scale.mjs` 运行 10k/30k/50k bindings；`benchmark_display_browser.mjs` 在真实 Chrome/WebGL 中运行。 |
 | 通讯性能 | `test_python_js_communication_e2e.py` 运行 32-root Python↔JavaScript roundtrip，并以小规模 windowed CLI smoke 检查 pending/in-flight。 | `benchmark_python_js_communication.py` 参数化 roots、commits、update ratio 和 roundtrip/windowed profile。 |
 
@@ -24,10 +24,10 @@ Python 测试由 `uv run python -m pytest -q` 按 `pyproject.toml` 的 `tests/` 
 | --- | --- |
 | [`test_runtime.py`](../../tests/test_runtime.py) | 固定 60 Hz、tick 与 input 事务、commit/command cursor、会话幂等与隔离、checkpoint 缓存和全局保留、recorder 接入、fatal 边界、验证顺序与单次编码。 |
 | [`test_wire_v3.py`](../../tests/test_wire_v3.py) | Wire v3 packet、raw binary32 matrix Display attachment 布局、golden bytes、非法 corpus、大小与深度限制、安全整数、Display cursor 对齐、旧版本和旧布局拒绝。 |
-| [`test_display.py`](../../tests/test_display.py) | Python Display checkpoint、目录身份、parent-first baseline、受信任 mutation target 热路径、decoded-record 名称校验、单目标命令、严格序列、空 command seal、不可变编码、封闭字段、完整 state replacement、唯一 NumPy Matrix4 owner 的 shape/dtype/列主序/只读、输入隔离及 copy/pickle 不变量、任意 64-byte 位模式保留、现有 `matrix`/`matrix_bytes` API，以及 Matrix4 便利构造、self/parent 操作和点/向量转换。 |
-| [`test_display_binary.py`](../../tests/test_display_binary.py) | SDCP/SDCS v2 从常驻 NumPy Matrix4 精确编码 64-byte binary32、受信任 outbound target 与 binary decode 名称校验、全部 opcode、跨 header cursor/tick seal、层级索引、state JSON、negative-zero/非有限/反射/奇异位模式保留与结构失败关闭。 |
+| [`test_display.py`](../../tests/test_display.py) | Python Display checkpoint、目录身份、parent-first baseline、流内单调且不复用的 uint32 Node ID、连续 `(n,4,4)` NumPy 矩阵池、增长与零墓碑、版本化 dirty 发布确认、严格命令序列、不可变编码、完整 state replacement，以及 Matrix4 便利构造和点/向量转换。 |
+| [`test_display_binary.py`](../../tests/test_display_binary.py) | SDCP/SDCS v3 的 Node ID 表、只读连续且 bytes-backed 的完整/dirty NumPy matrix tensor 与 dirty ID、空 tensor shape、全部 opcode、固定 65,536 command/payload 上限、跨 header cursor/tick seal、parent-first 父 ID 校验、state JSON、含 signaling NaN 的 opaque binary32 位模式 re-encode 保留与结构失败关闭。 |
 | [`test_json_tree_v1.py`](../../tests/test_json_tree_v1.py) | JSON Tree set/unset/append、写入前完整验证、canonical path 顺序、数值与危险键限制、容量边界和数组原始索引语义。 |
-| [`test_recording_v3.py`](../../tests/test_recording_v3.py) | packet-log 精确 packet bytes、command cursor 索引、INCOMPLETE/seal 生命周期、stream progression、周期 checkpoint anchor 和损坏记录拒绝。 |
+| [`test_recording_v3.py`](../../tests/test_recording_v3.py) | packet-log 精确 packet bytes、command cursor 索引、每包 Display payload 单次解码、INCOMPLETE/seal 生命周期、stream/MatrixPool progression、周期 checkpoint 的 pool/active-ID 一致性、稀疏增长放大防护和损坏记录拒绝。 |
 | [`test_catalog_identity.py`](../../tests/test_catalog_identity.py) | Python 加载 JavaScript 构建的 Display catalog identity，严格校验封闭字段和小写 SHA-256。 |
 | [`test_import_surface.py`](../../tests/test_import_surface.py) | Python 根包公开导出、版本和当前模块集合，防止旧模块或额外 API 回流。 |
 | [`test_python_js_communication_e2e.py`](../../tests/test_python_js_communication_e2e.py) | 32 roots checkpoint、多次 transform commit、exact Wire/ACK bytes、长度帧本地 Node 子进程、canonical JavaScript catalog identity、Client/Display cursor、最终 World 与 Transform digest；另以小规模 windowed CLI smoke 检查 in-flight/pending 峰值和最终归零。 |
@@ -39,9 +39,9 @@ Python 测试由 `uv run python -m pytest -q` 按 `pyproject.toml` 的 `tests/` 
 | 测试项目 | 覆盖范围 |
 | --- | --- |
 | [`client.test.mjs`](../../js/packages/client/test/client.test.mjs) | 精确公共导出与版本、Python Wire fixtures 逐字节同源、shear Matrix4 所有权、WorldState、checkpoint/session 原子替换、commit gate、ACK、observer、显式 DisplayView、input、JSON patch 和失败关闭。 |
-| [`display-binary.test.mjs`](../../js/packages/client/test/display-binary.test.mjs) | 与 Python 一致的 SDCP/SDCS v2 matrix binary codec、全部 opcode、float32 Matrix4 直解码、owned buffer 及损坏 header、层级、矩阵、长度和 trailing bytes 拒绝。 |
+| [`display-binary.test.mjs`](../../js/packages/client/test/display-binary.test.mjs) | 与 Python 一致的 SDCP/SDCS v3 Node ID 与 matrix tensor codec、全部 opcode、固定 65,536 command/payload 上限、单 owned `Float32Array`、dirty ID 对齐，以及损坏 header、父 ID、矩阵、长度和 trailing bytes 拒绝。 |
 | [`client-display-failure.test.mjs`](../../js/packages/client/test/client-display-failure.test.mjs) | Canonical Wire fixture 与 canonical Display catalog 的真实安装/提交、Client 与真实 DisplayRuntime 的同步屏障、异步清理拒绝观察、部分命令或 world 溢出提交失败、terminal 状态和无 ACK 保证。 |
-| [`packet-log.test.mjs`](../../js/packages/client/test/packet-log.test.mjs) | packet-log 字段与 cursor 校验、通过唯一 Authority 路径 Replay、seek 新建 session、损坏记录和旧 manifest 拒绝。 |
+| [`packet-log.test.mjs`](../../js/packages/client/test/packet-log.test.mjs) | packet-log 字段、cursor 与 MatrixPool 生命周期校验、通过唯一 Authority 路径 Replay、seek 新建 session、周期 checkpoint 分叉/稀疏增长放大、损坏记录和旧 manifest 拒绝。 |
 
 ## JavaScript Display
 
@@ -50,6 +50,7 @@ Python 测试由 `uv run python -m pytest -q` 按 `pyproject.toml` 的 `tests/` 
 | 测试项目 | 覆盖范围 |
 | --- | --- |
 | [`public.test.mjs`](../../js/packages/display/test/public.test.mjs) | Display 根包精确公开导出和内部 Authority mutation 类型隔离。 |
+| [`authority-matrix-pool.test.mjs`](../../js/packages/display/test/authority-matrix-pool.test.mjs) | Authority 连续矩阵池的安装、几何增长、ID 行绑定、dirty batch 暂存与按命令序列消费、墓碑归零和失败关闭。 |
 | [`display-transform.test.mjs`](../../js/packages/display/test/display-transform.test.mjs) | 公共不可变 Matrix4 便利 API、float32 canonicalization、self/parent 乘法次序、shear 保留、点/向量及完整 affine inverse。 |
 | [`node-core.test.mjs`](../../js/packages/display/test/node-core.test.mjs) | Node 名称语法、float32 Matrix4 规范化、真实 NodeGraph `parentWorld*local`、shear、派生 world 溢出拒绝、NodeIndex、dirty-root 合并、最大深度、Billboard 和 LookAt。 |
 | [`node-graph-forest-audit.test.mjs`](../../js/packages/display/test/node-graph-forest-audit.test.mjs) | forest detach/restore 的封闭性、兄弟顺序、身份、dirty 状态和失败前零写入。 |
@@ -82,17 +83,18 @@ Python 测试由 `uv run python -m pytest -q` 按 `pyproject.toml` 的 `tests/` 
 ## Python Matrix4 性能
 
 [`benchmark_python_display_transform.py`](../../scripts/benchmark_python_display_transform.py) 显式测量 Python
-`DisplayTransform` 的 NumPy 常驻表示、矩阵操作和 binary command 编码，不进入默认门禁。例如：
+`DisplayTransform` 的 NumPy Matrix4 操作、`DisplayMatrixPool` 的连续常驻表示和 binary dirty-batch 编码，不进入默认门禁。例如：
 
 ```bash
 uv run python scripts/benchmark_python_display_transform.py --iterations 100000 --repeats 7 --encode-commands 10000 --encode-repeats 7 --resident-count 100000
 ```
 
 runner 报告 `environment`，identity、`from_trs`、composed、translate、rotate、scale、point、vector、inverse、
-`matrix` 和 `matrix_bytes` 操作的 best/p50/p95，encoding payload 与时延、fresh-process startup、tracemalloc
-resident 以及 correctness。启动项包含子进程创建、根包 import、identity 与公开 accessor；内存项是 warm process
-中、包含 list 的可追踪分配，不是 RSS。`matrix_bytes` 项测量公开临时序列化 accessor；binary encoder 则从唯一常驻
-数组 owner 写出 exact 64 bytes。时间和内存字段只用于本机观测，不构成跨机器硬门槛，correctness 失败仍使该次
+`matrix` 和 `matrix_bytes` 操作的 best/p50/p95，矩阵池 set/gather、dirty tensor encoding payload 与时延、
+fresh-process startup、tracemalloc resident 以及 correctness。启动项包含子进程创建、根包 import、identity 与公开
+accessor；内存当前值在初始 checkpoint 发布并 GC 后读取，表示 warm process 中矩阵池容量的稳态可追踪分配，peak
+包含初始发布的瞬时 bookkeeping，两者都不是 RSS。binary encoder 一次读取 dirty ID 表和连续
+`(m,4,4)` 张量。时间和内存字段只用于本机观测，不构成跨机器硬门槛，correctness 失败仍使该次
 runner 失败。
 
 ## 显示引擎功能与性能
@@ -153,9 +155,9 @@ catalog builder 分别是
 [`python_js_communication_peer.mjs`](../../scripts/support/python_js_communication_peer.mjs) 和
 [`communication_catalog.mjs`](../../scripts/support/communication_catalog.mjs)：
 
-Benchmark World 直接持有每个 root 的 `DisplayTransform` 及其唯一常驻 NumPy Matrix4；step 只为本次实际更新的 root
-生成一个新 Transform，checkpoint/commit 与最终 digest 都复用同一个 matrix owner，不把 position → Matrix4 重构
-时间混入 publication build。binary encoder 直接读取常驻 owner；`matrix_bytes` 仅是需要 bytes 的公开临时序列化。
+Benchmark World 持有一个覆盖所有 root 的 `DisplayMatrixPool`；step 只写本次实际更新的 Node ID。checkpoint 直接发送
+完整 `(n,4,4)` pool，commit 一次发送排序后的 dirty ID 表和对应 `(m,4,4)` 连续张量；Python 与 JavaScript 最终
+digest 都按 `u32le nodeId + 16*f32le` 计算，不把 position → Matrix4 重构时间混入 publication build。
 
 ```bash
 uv run python scripts/benchmark_python_js_communication.py --roots 10000 --commits 200 --update-ratio 0.01 --profile roundtrip

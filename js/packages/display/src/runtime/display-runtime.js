@@ -21,7 +21,7 @@ import { PrefabInstantiator } from './prefab-instantiator.js';
 import { Scene } from './scene.js';
 import { SceneLoader } from './scene-loader.js';
 
-export const DISPLAY_RUNTIME_SCHEMA = 'scene-engine-display-node@5';
+export const DISPLAY_RUNTIME_SCHEMA = 'scene-engine-display-node@6';
 export const DISPLAY_SUMMARY_SCHEMA = 'scene-engine-display-summary@1';
 const ZERO_CURSOR = Object.freeze({ commitSeq: 0, sourceTick: 0, lastCommandSeq: 0 });
 const DISPLAY_OPTION_KEYS = Object.freeze({
@@ -242,6 +242,7 @@ export class DisplayRuntime {
     if (this._health !== 'initializing') fail('display-unhealthy');
     // Bootstrap property patches do not pass through a commit gate. Validate and
     // reconcile their final animation bindings before the runtime becomes drawable.
+    this.authority._assertMatrixPoolSettled();
     this._animationSystem.validateAndApplyPendingChanges();
     this._cursor = normalizeCursor(cursor);
     this._scene.activate();
@@ -377,6 +378,7 @@ export class DisplayRuntime {
         try { cleanupErrors.push(...prefabInstantiator.dispose('runtime-disposed')); } catch (error) {
           cleanupErrors.push(error);
         }
+        try { this.authority._release(); } catch (error) { cleanupErrors.push(error); }
         // Animation players must drop ownership and transient overrides before the
         // RenderSystem and its backend disappear.
         try { this._animationSystem.clear(); } catch (error) { cleanupErrors.push(error); }
@@ -446,6 +448,7 @@ export class DisplayRuntime {
     // Cross-component animation/resource validity belongs to the synchronous ACK
     // barrier. This sees the transaction's final properties, independent of resolver
     // patch order, and applies player ownership only after every candidate validates.
+    this.authority._assertMatrixPoolSettled();
     this._animationSystem.validateAndApplyPendingChanges();
     this._nodeGraph.flushWorldTransforms();
     this._cursor = next;

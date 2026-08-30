@@ -12,7 +12,7 @@ import {
   encodeDisplayCommandStream,
   parseDisplayCheckpoint,
   parseDisplayCommandStream,
-  takeOwnedDisplayMatrix,
+  takeOwnedDisplayMatrixTensor,
 } from '../src/display.js';
 import { readEnginePacket } from '../src/wire.js';
 
@@ -20,6 +20,8 @@ const HASH_A = '01'.repeat(32);
 const HASH_B = 'a5'.repeat(32);
 const HASH_C = 'ff'.repeat(32);
 const PYTHON_FIXTURES = fileURLToPath(new URL('../../../../fixtures/wire-v3/', import.meta.url));
+const MATRIX_LENGTH = 16;
+const MATRIX_BYTES = MATRIX_LENGTH * 4;
 
 function matrix(x = 0) {
   return new Float32Array([
@@ -39,19 +41,28 @@ function shearMatrix(x = 0) {
   ]);
 }
 
-function baselineNode(name, parentName = null, value = matrix()) {
+function matrixPool(size, entries) {
+  const result = new Float32Array(size * MATRIX_LENGTH);
+  for (const [id, value] of entries) result.set(value, id * MATRIX_LENGTH);
+  return result;
+}
+
+function baselineNode(nodeId, parentNodeId = null) {
   return {
-    name,
-    parent_name: parentName,
+    node_id: nodeId,
+    parent_node_id: parentNodeId,
     prefab_id: 'unit.example',
     transform_mode: 'live',
-    transform: value,
     visible: true,
     state: { mode: 'idle', nested: { value: 3 } },
   };
 }
 
-function checkpoint(nodes = [baselineNode('py/root')]) {
+function checkpoint({
+  nodes = [baselineNode(0)],
+  poolSize = 1,
+  matrices = matrixPool(poolSize, [[0, matrix()]]),
+} = {}) {
   return {
     schema: DISPLAY_CHECKPOINT_SCHEMA,
     scene_name: 'main',
@@ -59,6 +70,8 @@ function checkpoint(nodes = [baselineNode('py/root')]) {
     prefab_catalog_hash: HASH_B,
     state_schema_hash: HASH_C,
     last_command_seq: 7,
+    matrix_pool_size: poolSize,
+    matrix_pool: matrices,
     nodes,
   };
 }
@@ -69,26 +82,25 @@ function command(kind, commandSeq, fields = {}) {
     command_seq: commandSeq,
     source_tick: 12,
     kind,
-    name: fields.name ?? 'py/root',
+    node_id: fields.node_id ?? 0,
     ...fields,
   };
 }
 
-function stream(commands) {
+function stream(commands, {
+  poolSize = 3,
+  dirtyNodeIds = new Uint32Array(),
+  dirtyMatrices = new Float32Array(),
+} = {}) {
   return {
     schema: DISPLAY_COMMAND_STREAM_SCHEMA,
     base_command_seq: 7,
     last_command_seq: 7 + commands.length,
+    matrix_pool_size: poolSize,
+    dirty_node_ids: dirtyNodeIds,
+    dirty_matrices: dirtyMatrices,
     commands,
   };
-}
-
-function checkpointMatrixOffset() {
-  const sceneBytes = new TextEncoder().encode('main').byteLength;
-  const nameBytes = new TextEncoder().encode('py/root').byteLength;
-  const prefabBytes = new TextEncoder().encode('unit.example').byteLength;
-  return 8 + 8 + 2 + sceneBytes + (3 * 32) + 4
-    + 2 + nameBytes + 4 + 2 + prefabBytes + 1;
 }
 
 function parsedCheckpointToRecord(value) {
@@ -99,123 +111,164 @@ function parsedCheckpointToRecord(value) {
     prefab_catalog_hash: value.prefabCatalogHash,
     state_schema_hash: value.stateSchemaHash,
     last_command_seq: value.lastCommandSeq,
+    matrix_pool_size: value.matrixPoolSize,
+    matrix_pool: value.matrixPool,
     nodes: value.nodes.map((node) => ({
-      name: node.name,
-      parent_name: node.parentName,
+      node_id: node.nodeId,
+      parent_node_id: node.parentNodeId,
       prefab_id: node.prefabId,
       transform_mode: node.transformMode,
-      transform: node.transform,
       visible: node.visible,
       state: node.state,
     })),
   };
 }
 
-function parsedCommandToRecord(commandValue) {
+function parsedCommandToRecord(value) {
   const common = {
     schema: NODE_COMMAND_SCHEMA,
-    command_seq: commandValue.commandSeq,
-    source_tick: commandValue.sourceTick,
-    kind: commandValue.kind,
-    name: commandValue.name,
+    command_seq: value.commandSeq,
+    source_tick: value.sourceTick,
+    kind: value.kind,
+    node_id: value.nodeId,
   };
-  switch (commandValue.kind) {
+  switch (value.kind) {
     case 'node-create':
       return {
         ...common,
-        parent_name: commandValue.parentName,
-        prefab_id: commandValue.prefabId,
-        transform_mode: commandValue.transformMode,
-        transform: commandValue.transform,
-        visible: commandValue.visible,
-        state: commandValue.state,
+        parent_node_id: value.parentNodeId,
+        prefab_id: value.prefabId,
+        transform_mode: value.transformMode,
+        visible: value.visible,
+        state: value.state,
       };
-    case 'node-set-transform':
-      return { ...common, transform: commandValue.transform };
     case 'node-set-parent':
-      return { ...common, parent_name: commandValue.parentName };
+      return { ...common, parent_node_id: value.parentNodeId };
     case 'node-set-visible':
-      return { ...common, visible: commandValue.visible };
+      return { ...common, visible: value.visible };
     case 'node-set-state':
-      return { ...common, state: commandValue.state };
+      return { ...common, state: value.state };
     case 'node-replace-prefab':
-      return { ...common, prefab_id: commandValue.prefabId, state: commandValue.state };
+      return { ...common, prefab_id: value.prefabId, state: value.state };
+    case 'node-set-transform':
     case 'node-remove':
       return common;
     default:
-      throw new Error(`unexpected command kind: ${commandValue.kind}`);
+      throw new Error(`unexpected command kind: ${value.kind}`);
   }
+}
+
+function parsedStreamToRecord(value) {
+  return {
+    schema: DISPLAY_COMMAND_STREAM_SCHEMA,
+    base_command_seq: value.baseCommandSeq,
+    last_command_seq: value.lastCommandSeq,
+    matrix_pool_size: value.matrixPoolSize,
+    dirty_node_ids: value.dirtyNodeIds,
+    dirty_matrices: value.dirtyMatrices,
+    commands: value.commands.map(parsedCommandToRecord),
+  };
 }
 
 function rawAttachment(packet, kind) {
   return packet.attachments.find((attachment) => attachment.kind === kind).value;
 }
 
-test('binary Display v2 checkpoint preserves a shear matrix as owned Float32Array bytes', () => {
-  const source = shearMatrix(17.75);
-  const bytes = encodeDisplayCheckpoint(checkpoint([
-    baselineNode('py/root', null, source),
-    { ...baselineNode('py/root/child', 'py/root'), transform_mode: 'initial', visible: false },
-  ]));
+test('binary Display v3 checkpoint decodes one owned pool tensor and ID metadata', () => {
+  const source = matrixPool(3, [[0, shearMatrix(17.75)], [2, matrix(4)]]);
+  const bytes = encodeDisplayCheckpoint(checkpoint({
+    poolSize: 3,
+    matrices: source,
+    nodes: [baselineNode(0), { ...baselineNode(2, 0), transform_mode: 'initial', visible: false }],
+  }));
   assert.equal(new TextDecoder().decode(bytes.subarray(0, 4)), 'SDCP');
-  assert.equal(bytes[4], 2);
+  assert.equal(bytes[4], 3);
 
   const parsed = parseDisplayCheckpoint(bytes, { header: { last_command_seq: 7 } });
-  assert.equal(parsed.schema, 'scene-engine-display-checkpoint@5');
-  assert.equal(parsed.sceneCatalogHash, HASH_A);
-  assert.equal(parsed.prefabCatalogHash, HASH_B);
-  assert.equal(parsed.stateSchemaHash, HASH_C);
-  assert.equal(parsed.nodes[1].parentName, 'py/root');
+  assert.equal(parsed.schema, 'scene-engine-display-checkpoint@6');
+  assert.equal(parsed.matrixPoolSize, 3);
+  assert.ok(parsed.matrixPool instanceof Float32Array);
+  assert.equal(parsed.matrixPool.length, 3 * MATRIX_LENGTH);
+  assert.deepEqual(parsed.matrixPool, source);
+  assert.notStrictEqual(parsed.matrixPool, source);
+  assert.notStrictEqual(parsed.matrixPool.buffer, bytes.buffer);
+  assert.deepEqual(parsed.nodes.map(({ nodeId, parentNodeId }) => [nodeId, parentNodeId]), [
+    [0, null], [2, 0],
+  ]);
   assert.equal(parsed.nodes[1].transformMode, 'initial');
   assert.equal(parsed.nodes[1].visible, false);
+  assert.equal('transform' in parsed.nodes[0], false);
   assert.deepEqual(parsed.nodes[0].state, { mode: 'idle', nested: { value: 3 } });
-  assert.ok(parsed.nodes[0].transform instanceof Float32Array);
-  assert.deepEqual(parsed.nodes[0].transform, source);
-  assert.notStrictEqual(parsed.nodes[0].transform, source);
-  assert.notStrictEqual(parsed.nodes[0].transform.buffer, bytes.buffer);
-  assert.notStrictEqual(parsed.nodes[0].transform.buffer, parsed.nodes[1].transform.buffer);
+  assert.deepEqual(encodeDisplayCheckpoint(parsedCheckpointToRecord(parsed)), bytes);
 
-  const encodedAgain = encodeDisplayCheckpoint(parsedCheckpointToRecord(parsed));
-  assert.deepEqual(encodedAgain, bytes, 'canonical matrix payload round-trips exact bytes');
-
-  const first = parsed.nodes[0].transform[0];
+  const first = parsed.matrixPool[0];
   bytes.fill(0);
-  assert.equal(parsed.nodes[0].transform[0], first, 'packet mutation cannot alias parsed matrix');
+  assert.equal(parsed.matrixPool[0], first, 'packet mutation cannot alias the decoded tensor');
 });
 
-test('binary Display command stream covers every opcode without matrix decomposition', () => {
-  const source = shearMatrix(2);
+test('binary Display v3 command stream carries sorted dirty IDs and one contiguous tensor', () => {
   const commands = [
     command('node-create', 8, {
-      name: 'py/new', parent_name: null, prefab_id: 'unit.example', transform_mode: 'live',
-      transform: shearMatrix(1), visible: true, state: { created: true },
+      node_id: 2,
+      parent_node_id: null,
+      prefab_id: 'unit.example',
+      transform_mode: 'live',
+      visible: true,
+      state: { created: true },
     }),
-    command('node-set-transform', 9, { transform: source }),
-    command('node-set-parent', 10, { parent_name: 'py/new' }),
-    command('node-set-visible', 11, { visible: false }),
-    command('node-set-state', 12, { state: { mode: 'active' } }),
-    command('node-replace-prefab', 13, { prefab_id: 'unit.replacement', state: { level: 2 } }),
-    command('node-remove', 14),
+    command('node-set-transform', 9, { node_id: 0 }),
+    command('node-set-parent', 10, { node_id: 0, parent_node_id: 2 }),
+    command('node-set-visible', 11, { node_id: 0, visible: false }),
+    command('node-set-state', 12, { node_id: 0, state: { mode: 'active' } }),
+    command('node-replace-prefab', 13, {
+      node_id: 0, prefab_id: 'unit.replacement', state: { level: 2 },
+    }),
+    command('node-remove', 14, { node_id: 0 }),
   ];
-  const bytes = encodeDisplayCommandStream(stream(commands), { sourceTick: 12 });
-  assert.equal(new TextDecoder().decode(bytes.subarray(0, 4)), 'SDCS');
-  assert.equal(bytes[4], 2);
+  const dirtyNodeIds = new Uint32Array([0, 2]);
+  const dirtyMatrices = new Float32Array([...shearMatrix(2), ...matrix(1)]);
+  const bytes = encodeDisplayCommandStream(stream(commands, {
+    poolSize: 3, dirtyNodeIds, dirtyMatrices,
+  }), { sourceTick: 12 });
   const parsed = parseDisplayCommandStream(bytes, {
     header: { source_tick: 12, last_command_seq: 14 },
     baseCommandSeq: 7,
   });
-  assert.equal(parsed.schema, 'scene-engine-display-command-stream@5');
+
+  assert.equal(parsed.schema, 'scene-engine-display-command-stream@6');
   assert.deepEqual(parsed.commands.map(({ kind }) => kind), commands.map(({ kind }) => kind));
   assert.deepEqual(parsed.commands.map(({ commandSeq }) => commandSeq), [8, 9, 10, 11, 12, 13, 14]);
-  assert.ok(parsed.commands.every(({ sourceTick }) => sourceTick === 12));
-  assert.equal(parsed.commands[0].parentName, null);
-  assert.ok(parsed.commands[0].transform instanceof Float32Array);
-  assert.deepEqual(parsed.commands[1].transform, source);
-  assert.notStrictEqual(parsed.commands[1].transform, source);
-  assert.equal(parsed.commands[2].parentName, 'py/new');
-  assert.equal(parsed.commands[3].visible, false);
-  assert.deepEqual(parsed.commands[4].state, { mode: 'active' });
-  assert.equal(parsed.commands[5].prefabId, 'unit.replacement');
+  assert.deepEqual([...parsed.dirtyNodeIds], [0, 2]);
+  assert.deepEqual(parsed.dirtyMatrices, dirtyMatrices);
+  assert.notStrictEqual(parsed.dirtyMatrices.buffer, bytes.buffer);
+  assert.equal(parsed.commands[0].parentNodeId, null);
+  assert.equal(parsed.commands[2].parentNodeId, 2);
+  assert.equal('transform' in parsed.commands[1], false);
+  assert.deepEqual(encodeDisplayCommandStream(parsedStreamToRecord(parsed), {
+    sourceTick: 12,
+  }), bytes);
+});
+
+test('command stream fixed command limit precedes command traversal', () => {
+  const overLimitCount = 65_537;
+  const encoded = encodeDisplayCommandStream(stream([]), { sourceTick: 12 });
+  const malformed = encoded.slice();
+  new DataView(malformed.buffer, malformed.byteOffset, malformed.byteLength)
+    .setUint32(24, overLimitCount, true);
+
+  assert.throws(() => parseDisplayCommandStream(malformed, {
+    header: { source_tick: 12, last_command_seq: 7 + overLimitCount },
+    baseCommandSeq: 7,
+  }), (error) => (
+    error instanceof DisplayRecordError && error.code === 'display-command-count-limit'
+  ));
+
+  assert.throws(() => encodeDisplayCommandStream(
+    stream(new Array(overLimitCount).fill(null)),
+    { sourceTick: 12 },
+  ), (error) => (
+    error instanceof DisplayRecordError && error.code === 'display-command-count-limit'
+  ));
 });
 
 test('canonical Python binary fixtures re-encode to exact Display bytes', async () => {
@@ -226,11 +279,8 @@ test('canonical Python binary fixtures re-encode to exact Display bytes', async 
   const parsedCheckpoint = parseDisplayCheckpoint(checkpointBytes, {
     header: checkpointPacketValue.header,
   });
-  assert.equal(parsedCheckpoint.nodes[0].transform[4], 0.25);
-  assert.deepEqual(
-    encodeDisplayCheckpoint(parsedCheckpointToRecord(parsedCheckpoint)),
-    checkpointBytes,
-  );
+  assert.equal(parsedCheckpoint.matrixPool[4], 0.25);
+  assert.deepEqual(encodeDisplayCheckpoint(parsedCheckpointToRecord(parsedCheckpoint)), checkpointBytes);
 
   const commitPacketValue = readEnginePacket(new Uint8Array(
     await readFile(`${PYTHON_FIXTURES}/commit-tick.bin`),
@@ -240,66 +290,77 @@ test('canonical Python binary fixtures re-encode to exact Display bytes', async 
     header: commitPacketValue.header,
     baseCommandSeq: parsedCheckpoint.lastCommandSeq,
   });
-  const transformCommand = parsedStream.commands.find(
-    ({ kind }) => kind === 'node-set-transform',
-  );
-  assert.equal(transformCommand.transform[4], 0.25);
-  assert.equal(transformCommand.transform[12], 1.5);
-  assert.deepEqual(encodeDisplayCommandStream({
-    schema: DISPLAY_COMMAND_STREAM_SCHEMA,
-    base_command_seq: parsedStream.baseCommandSeq,
-    last_command_seq: parsedStream.lastCommandSeq,
-    commands: parsedStream.commands.map(parsedCommandToRecord),
-  }, { sourceTick: commitPacketValue.header.source_tick }), commandBytes);
+  const transformCommand = parsedStream.commands.find(({ kind }) => kind === 'node-set-transform');
+  const dirtyIndex = parsedStream.dirtyNodeIds.indexOf(transformCommand.nodeId);
+  assert.equal(parsedStream.dirtyMatrices[(dirtyIndex * MATRIX_LENGTH) + 4], 0.25);
+  assert.equal(parsedStream.dirtyMatrices[(dirtyIndex * MATRIX_LENGTH) + 12], 1.5);
+  assert.deepEqual(encodeDisplayCommandStream(parsedStreamToRecord(parsedStream), {
+    sourceTick: commitPacketValue.header.source_tick,
+  }), commandBytes);
 });
 
-test('matrix codec canonicalizes negative zero and rejects legacy TRS or ordinary arrays', () => {
+test('matrix tensor codec canonicalizes negative zero and enforces active/tombstone rows', () => {
   const negativeZero = matrix();
   for (const index of [1, 2, 3, 4, 6, 7, 8, 9, 11, 12]) negativeZero[index] = -0;
-  const bytes = encodeDisplayCheckpoint(checkpoint([baselineNode('py/root', null, negativeZero)]));
-  const offset = checkpointMatrixOffset();
+  const bytes = encodeDisplayCheckpoint(checkpoint({ matrices: negativeZero }));
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const matrixOffset = 8 + 8 + 4 + 4;
   for (const index of [1, 2, 3, 4, 6, 7, 8, 9, 11, 12]) {
-    assert.equal(view.getUint32(offset + (index * 4), true), 0);
+    assert.equal(view.getUint32(matrixOffset + (index * 4), true), 0);
   }
   const parsed = parseDisplayCheckpoint(bytes, { header: { last_command_seq: 7 } });
-  for (const value of parsed.nodes[0].transform) {
-    if (value === 0) assert.equal(Object.is(value, -0), false);
-  }
+  for (const value of parsed.matrixPool) if (value === 0) assert.equal(Object.is(value, -0), false);
 
-  const legacyTrs = {
-    position: [0, 0, 0], rotationXyzw: [0, 0, 0, 1], scale: [1, 1, 1],
-  };
-  for (const invalid of [legacyTrs, [...matrix()]]) {
-    assert.throws(
-      () => encodeDisplayCheckpoint(checkpoint([baselineNode('py/root', null, invalid)])),
-      (error) => error.code === 'display-transform-matrix-invalid',
-    );
-  }
+  assert.throws(() => encodeDisplayCheckpoint(checkpoint({
+    matrices: [...matrix()],
+  })), (error) => error.code === 'display-matrix-pool-invalid');
+  assert.throws(() => encodeDisplayCheckpoint(checkpoint({
+    poolSize: 2,
+    matrices: matrixPool(2, [[0, matrix()], [1, matrix()]]),
+  })), (error) => error.code === 'display-matrix-pool-tombstone-invalid');
+  const negativeZeroTombstone = matrixPool(2, [[0, matrix()]]);
+  negativeZeroTombstone[MATRIX_LENGTH] = -0;
+  assert.throws(() => encodeDisplayCheckpoint(checkpoint({
+    poolSize: 2,
+    matrices: negativeZeroTombstone,
+  })), (error) => error.code === 'display-matrix-pool-tombstone-invalid');
+
+  const invalidTombstoneBits = encodeDisplayCheckpoint(checkpoint({
+    poolSize: 2,
+    matrices: matrixPool(2, [[0, matrix()]]),
+  }));
+  new DataView(invalidTombstoneBits.buffer).setUint32(
+    (8 + 8 + 4 + 4) + MATRIX_BYTES,
+    0x80000000,
+    true,
+  );
+  assert.throws(() => parseDisplayCheckpoint(invalidTombstoneBits, {
+    header: { last_command_seq: 7 },
+  }), (error) => error.code === 'display-matrix-pool-tombstone-invalid');
+  const reflected = matrix(); reflected[0] = -1;
+  assert.throws(() => encodeDisplayCheckpoint(checkpoint({ matrices: reflected })),
+    (error) => error.code === 'display-transform-matrix-invalid');
   assert.throws(() => encodeDisplayCommandStream({
-    ...stream([]), schema: 'scene-engine-display-command-stream@4',
+    ...stream([]), schema: 'scene-engine-display-command-stream@5',
   }, { sourceTick: 12 }), (error) => error.code === 'display-command-stream-schema-invalid');
 });
 
-test('owned matrix transfer rejects arbitrary and already-consumed values', () => {
+test('owned matrix tensor transfer rejects arbitrary and already-consumed values', () => {
   const bytes = encodeDisplayCheckpoint(checkpoint());
   const parsed = parseDisplayCheckpoint(bytes, { header: { last_command_seq: 7 } });
-  const owned = parsed.nodes[0].transform;
-  assert.strictEqual(takeOwnedDisplayMatrix(owned), owned);
-  assert.throws(() => takeOwnedDisplayMatrix(owned),
+  const owned = parsed.matrixPool;
+  assert.strictEqual(takeOwnedDisplayMatrixTensor(owned), owned);
+  assert.throws(() => takeOwnedDisplayMatrixTensor(owned),
     (error) => error.code === 'display-transform-ownership-invalid');
-  assert.throws(() => takeOwnedDisplayMatrix(matrix()),
+  assert.throws(() => takeOwnedDisplayMatrixTensor(matrix()),
     (error) => error.code === 'display-transform-ownership-invalid');
-  assert.throws(() => takeOwnedDisplayMatrix({
-    position: [0, 0, 0], rotationXyzw: [0, 0, 0, 1], scale: [1, 1, 1],
-  }), (error) => error.code === 'display-transform-ownership-invalid');
 });
 
-test('binary Display parsers reject headers, topology, malformed matrices, and framing corruption', () => {
+test('binary parsers reject malformed pool IDs, tensors, records, and framing', () => {
   const valid = encodeDisplayCheckpoint(checkpoint());
   for (const [offset, value, code] of [
     [0, 0, 'display-checkpoint-magic-invalid'],
-    [4, 1, 'display-checkpoint-version-invalid'],
+    [4, 2, 'display-checkpoint-version-invalid'],
     [5, 2, 'display-checkpoint-scalar-invalid'],
     [6, 1, 'display-checkpoint-flags-invalid'],
   ]) {
@@ -314,39 +375,16 @@ test('binary Display parsers reject headers, topology, malformed matrices, and f
   assert.throws(() => parseDisplayCheckpoint(cursorMismatch, { header: { last_command_seq: 7 } }),
     (error) => error.code === 'display-checkpoint-command-cursor-mismatch');
 
-  const sceneBytes = new TextEncoder().encode('main').byteLength;
-  const countOffset = 8 + 8 + 2 + sceneBytes + (3 * 32);
-  const excessiveCount = valid.slice();
-  new DataView(excessiveCount.buffer).setUint32(countOffset, 0xffffffff, true);
-  assert.throws(() => parseDisplayCheckpoint(excessiveCount, { header: { last_command_seq: 7 } }),
-    (error) => error.code === 'display-checkpoint-nodes-invalid');
-  const nodeStart = countOffset + 4;
-  const nameBytes = new TextEncoder().encode('py/root').byteLength;
-  const parentOffset = nodeStart + 2 + nameBytes;
-  const invalidParent = valid.slice();
-  new DataView(invalidParent.buffer).setUint32(parentOffset, 0, true);
-  assert.throws(() => parseDisplayCheckpoint(invalidParent, { header: { last_command_seq: 7 } }),
-    (error) => error.code === 'display-checkpoint-parent-order-invalid');
-
-  const prefabBytes = new TextEncoder().encode('unit.example').byteLength;
-  const flagsOffset = parentOffset + 4 + 2 + prefabBytes;
-  const invalidFlags = valid.slice();
-  invalidFlags[flagsOffset] = 0x80;
-  assert.throws(() => parseDisplayCheckpoint(invalidFlags, { header: { last_command_seq: 7 } }),
-    (error) => error.code === 'display-checkpoint-node-flags-invalid');
-
-  const matrixOffset = flagsOffset + 1;
-  for (const [index, value] of [
-    [0, Number.NaN],
-    [3, 0.25],
-    [0, -1],
-    [0, 0],
-  ]) {
-    const malformed = valid.slice();
-    new DataView(malformed.buffer).setFloat32(matrixOffset + (index * 4), value, true);
-    assert.throws(() => parseDisplayCheckpoint(malformed, { header: { last_command_seq: 7 } }),
-      (error) => error.code === 'display-transform-matrix-invalid');
-  }
+  const invalidLastRow = encodeDisplayCheckpoint(checkpoint({
+    poolSize: 2,
+    matrices: matrixPool(2, [[0, matrix()], [1, matrix(5)]]),
+    nodes: [baselineNode(0), baselineNode(1, 0)],
+  }));
+  const invalidLastRowView = new DataView(invalidLastRow.buffer);
+  invalidLastRowView.setFloat32((8 + 8 + 4 + 4) + MATRIX_BYTES + 12, 0.5, true);
+  assert.throws(() => parseDisplayCheckpoint(invalidLastRow, {
+    header: { last_command_seq: 7 },
+  }), (error) => error.code === 'display-transform-matrix-invalid');
 
   assert.throws(() => parseDisplayCheckpoint(valid.subarray(0, valid.length - 1),
     { header: { last_command_seq: 7 } }));
@@ -354,20 +392,73 @@ test('binary Display parsers reject headers, topology, malformed matrices, and f
   assert.throws(() => parseDisplayCheckpoint(trailing, { header: { last_command_seq: 7 } }),
     (error) => error.code === 'display-checkpoint-trailing-bytes');
 
-  const commandBytes = encodeDisplayCommandStream(stream([command('node-remove', 8)]),
-    { sourceTick: 12 });
+  const transformCommand = command('node-set-transform', 8, { node_id: 0 });
+  const commandBytes = encodeDisplayCommandStream(stream([transformCommand], {
+    poolSize: 1,
+    dirtyNodeIds: new Uint32Array([0]),
+    dirtyMatrices: matrix(3),
+  }), { sourceTick: 12 });
+  const parseCommand = (bytes) => parseDisplayCommandStream(bytes, {
+    header: { source_tick: 12, last_command_seq: 8 }, baseCommandSeq: 7,
+  });
+
+  const unalignedOwner = new Uint8Array(commandBytes.length + 3);
+  unalignedOwner.set(commandBytes, 1);
+  const unaligned = parseCommand(unalignedOwner.subarray(1, 1 + commandBytes.length));
+  assert.deepEqual(Array.from(unaligned.dirtyNodeIds), [0]);
+  assert.deepEqual(Array.from(unaligned.dirtyMatrices), Array.from(matrix(3)));
+
+  const matrixOffset = 36 + 4;
+  for (const signalingNaN of [0x7f801234, 0xff801234]) {
+    const invalidMatrixBits = commandBytes.slice();
+    new DataView(invalidMatrixBits.buffer).setUint32(matrixOffset + (12 * 4), signalingNaN, true);
+    assert.throws(() => parseCommand(invalidMatrixBits),
+      (error) => error.code === 'display-transform-matrix-invalid');
+  }
+
   const tickMismatch = commandBytes.slice();
   new DataView(tickMismatch.buffer).setBigUint64(16, 13n, true);
-  assert.throws(() => parseDisplayCommandStream(tickMismatch, {
-    header: { source_tick: 12, last_command_seq: 8 }, baseCommandSeq: 7,
-  }), (error) => error.code === 'display-command-source-tick-mismatch');
+  assert.throws(() => parseCommand(tickMismatch),
+    (error) => error.code === 'display-command-source-tick-mismatch');
   const excessiveCommands = commandBytes.slice();
   new DataView(excessiveCommands.buffer).setUint32(24, 0xffffffff, true);
-  assert.throws(() => parseDisplayCommandStream(excessiveCommands, {
-    header: { source_tick: 12, last_command_seq: 8 }, baseCommandSeq: 7,
-  }), (error) => error.code === 'display-command-list-invalid');
-  const invalidOpcode = commandBytes.slice(); invalidOpcode[28] = 99;
-  assert.throws(() => parseDisplayCommandStream(invalidOpcode, {
-    header: { source_tick: 12, last_command_seq: 8 }, baseCommandSeq: 7,
-  }), (error) => error.code === 'display-command-kind-invalid');
+  assert.throws(() => parseCommand(excessiveCommands),
+    (error) => error.code === 'display-command-count-limit');
+  const outOfRangeId = commandBytes.slice();
+  new DataView(outOfRangeId.buffer).setUint32(36, 1, true);
+  assert.throws(() => parseCommand(outOfRangeId),
+    (error) => error.code === 'display-transform-dirty-id-invalid');
+
+  assert.throws(() => encodeDisplayCommandStream(stream([transformCommand], {
+    poolSize: 2,
+    dirtyNodeIds: new Uint32Array([1, 0]),
+    dirtyMatrices: new Float32Array([...matrix(1), ...matrix(2)]),
+  }), { sourceTick: 12 }), (error) => error.code === 'display-transform-dirty-id-order-invalid');
+  assert.throws(() => encodeDisplayCommandStream(stream([transformCommand], {
+    poolSize: 2,
+    dirtyNodeIds: new Uint32Array([0, 1]),
+    dirtyMatrices: new Float32Array([...matrix(1), ...matrix(2)]),
+  }), { sourceTick: 12 }), (error) => error.code === 'display-transform-dirty-target-mismatch');
+
+  const selfParent = command('node-set-parent', 8, {
+    node_id: 0,
+    parent_node_id: 0,
+  });
+  assert.throws(() => encodeDisplayCommandStream(stream([selfParent]), {
+    sourceTick: 12,
+  }), (error) => error.code === 'display-parent-node-id-invalid');
+
+  const validParent = encodeDisplayCommandStream(stream([
+    command('node-set-parent', 8, { node_id: 0, parent_node_id: 1 }),
+  ]), { sourceTick: 12 });
+  const selfParentBytes = validParent.slice();
+  new DataView(selfParentBytes.buffer).setUint32(36 + 1 + 4, 0, true);
+  assert.throws(() => parseCommand(selfParentBytes),
+    (error) => error.code === 'display-parent-node-id-invalid');
+
+  const commandOffset = 36 + 4 + MATRIX_BYTES;
+  const invalidOpcode = commandBytes.slice(); invalidOpcode[commandOffset] = 99;
+  assert.throws(() => parseCommand(invalidOpcode),
+    (error) => error.code === 'display-command-kind-invalid');
+  assert.throws(() => parseCommand(commandBytes.subarray(0, commandBytes.length - 1)));
 });

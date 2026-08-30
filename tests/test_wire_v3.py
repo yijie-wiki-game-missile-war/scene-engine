@@ -6,12 +6,14 @@ import math
 import json
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from scene_engine.display import (
     DISPLAY_CODEC,
     DisplayCatalogIdentity,
     DisplayCommand,
+    DisplayMatrixPool,
     DisplayNode,
     DisplayTransform,
     encode_display_checkpoint,
@@ -47,21 +49,37 @@ from scene_engine.wire import (
 
 def display_node() -> DisplayNode:
     return DisplayNode(
-        name="py/aircraft-17",
-        parent_name=None,
+        node_id=0,
+        parent_node_id=None,
         prefab_id="flight.aircraft",
         transform_mode="live",
-        transform=DisplayTransform.identity(),
         visible=True,
         state={"animation": "idle"},
     )
 
 
+def published_pool() -> DisplayMatrixPool:
+    pool = DisplayMatrixPool()
+    pool.append(DisplayTransform.identity())
+    baseline = encode_display_checkpoint(
+        scene_name="main",
+        catalog=DisplayCatalogIdentity("a" * 64, "b" * 64, "c" * 64),
+        last_command_seq=0,
+        matrix_pool=pool,
+        nodes=(display_node(),),
+    )
+    baseline.confirm_published()
+    return pool
+
+
 def test_wire_v3_checkpoint_contains_world_and_binary_display_baseline_only() -> None:
+    pool = DisplayMatrixPool()
+    pool.append(DisplayTransform.identity())
     display = encode_display_checkpoint(
         scene_name="main",
         catalog=DisplayCatalogIdentity("a" * 64, "b" * 64, "c" * 64),
         last_command_seq=0,
+        matrix_pool=pool,
         nodes=(display_node(),),
     )
     raw = encode_checkpoint(
@@ -79,7 +97,7 @@ def test_wire_v3_checkpoint_contains_world_and_binary_display_baseline_only() ->
     assert raw[4] == WIRE_MAJOR_VERSION == 3
     assert packet.kind is PacketKind.CHECKPOINT
     assert packet.header["schema"] == WIRE_SCHEMA == "scene-engine-wire@3"
-    assert packet.header["display_codec"] == DISPLAY_CODEC == "scene-engine-display-node@5"
+    assert packet.header["display_codec"] == DISPLAY_CODEC == "scene-engine-display-node@6"
     assert [item.kind for item in packet.attachments] == [
         AttachmentKind.WORLD_SNAPSHOT,
         AttachmentKind.DISPLAY_CHECKPOINT,
@@ -118,8 +136,8 @@ def test_frozen_wire_v3_golden_packets_round_trip_exact_bytes() -> None:
     } == identity
 
 
-def test_frozen_display_v5_corpus_validates_and_malformed_records_fail() -> None:
-    root = FIXTURES / "display-v5"
+def test_frozen_display_v6_corpus_validates_and_malformed_records_fail() -> None:
+    root = FIXTURES / "display-v6"
     checkpoint_value = json.loads((root / "checkpoint.json").read_text())
     command_value = json.loads((root / "command-tick.json").read_text())
     nodes = validate_display_checkpoint(checkpoint_value)
@@ -128,11 +146,13 @@ def test_frozen_display_v5_corpus_validates_and_malformed_records_fail() -> None
         expected_source_tick=1,
         expected_last_command_seq=7,
     )
-    assert len(nodes) == 2
-    assert nodes[0].transform.matrix[4] == 0.25
+    assert len(nodes) == 3
+    assert np.asarray(checkpoint_value["matrix_pool"], dtype="<f4").shape == (3, 4, 4)
     assert len(commands) == 7
-    assert commands[1].fields["transform"].matrix[4] == 0.25
-    assert commands[1].fields["transform"].matrix[12] == 1.5
+    dirty = np.asarray(command_value["dirty_matrices"], dtype="<f4").reshape((-1, 16))
+    assert dirty[0, 4] == 0.25
+    assert dirty[0, 12] == 1.5
+    assert commands[1].fields == {}
     for name in ("command-sequence-gap.json", "command-source-tick.json"):
         malformed = json.loads((root / name).read_text())
         with pytest.raises(ConfigurationError):
@@ -153,10 +173,12 @@ def test_frozen_wire_v3_malformed_corpus_fails_closed() -> None:
 
 
 def test_wire_v3_commit_always_contains_a_binary_command_stream_seal() -> None:
+    pool = published_pool()
     stream, cursor = encode_display_command_stream(
         base_command_seq=0,
         source_tick=1,
-        commands=(DisplayCommand.set_visible("py/aircraft-17", False),),
+        matrix_pool=pool,
+        commands=(DisplayCommand.set_visible(0, False),),
     )
     raw = encode_commit(
         stream_id="stream-1",
@@ -181,14 +203,17 @@ def test_wire_v3_commit_always_contains_a_binary_command_stream_seal() -> None:
         expected_source_tick=1,
         expected_last_command_seq=1,
     )
-    assert decoded["commands"][0]["name"] == "py/aircraft-17"
+    assert decoded["commands"][0]["node_id"] == 0
 
 
 def test_validated_stream_fast_path_is_byte_exact_and_plain_data_stays_fail_closed() -> None:
+    pool = published_pool()
+    pool.set(0, DisplayTransform.identity())
     stream, cursor = encode_display_command_stream(
         base_command_seq=0,
         source_tick=1,
-        commands=(DisplayCommand.set_transform("py/aircraft-17", DisplayTransform.identity()),),
+        matrix_pool=pool,
+        commands=(DisplayCommand.set_transform(0),),
     )
     plain_stream = stream.to_record()
 
@@ -213,10 +238,12 @@ def test_validated_stream_fast_path_is_byte_exact_and_plain_data_stays_fail_clos
 
 
 def test_wire_v2_major_is_rejected_without_a_compatibility_decoder() -> None:
+    pool = DisplayMatrixPool()
     display = encode_display_checkpoint(
         scene_name="main",
         catalog=DisplayCatalogIdentity("a" * 64, "b" * 64, "c" * 64),
         last_command_seq=0,
+        matrix_pool=pool,
         nodes=(),
     )
     raw = bytearray(
@@ -237,10 +264,12 @@ def test_wire_v2_major_is_rejected_without_a_compatibility_decoder() -> None:
 
 
 def test_old_json_display_attachment_layout_is_rejected() -> None:
+    pool = DisplayMatrixPool()
     display = encode_display_checkpoint(
         scene_name="main",
         catalog=DisplayCatalogIdentity("a" * 64, "b" * 64, "c" * 64),
         last_command_seq=0,
+        matrix_pool=pool,
         nodes=(),
     )
     raw = bytearray(
@@ -324,10 +353,12 @@ def test_input_json_depth_limit_applies_to_encode_and_decode() -> None:
 
 
 def test_display_stream_cursor_and_tick_must_match_packet_header() -> None:
+    pool = published_pool()
     stream, cursor = encode_display_command_stream(
         base_command_seq=0,
         source_tick=1,
-        commands=(DisplayCommand.set_visible("py/aircraft-17", False),),
+        matrix_pool=pool,
+        commands=(DisplayCommand.set_visible(0, False),),
     )
     raw = encode_commit(
         stream_id="stream-1",
@@ -362,9 +393,11 @@ def test_display_stream_cursor_and_tick_must_match_packet_header() -> None:
 def test_removed_event_attachment_kind_fails_closed() -> None:
     assert {int(kind) for kind in AttachmentKind} == {1, 2, 3, 4, 6, 7}
     assert "events" not in inspect.signature(encode_commit).parameters
+    pool = DisplayMatrixPool()
     stream, cursor = encode_display_command_stream(
         base_command_seq=0,
         source_tick=1,
+        matrix_pool=pool,
         commands=(),
     )
     raw = bytearray(

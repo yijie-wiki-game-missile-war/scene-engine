@@ -6,12 +6,12 @@ fallback runtime.
 ## Release tuple
 
 ```text
-scene-engine Python                 0.14.0
-@scene-engine/client               0.12.0
-@scene-engine/display              0.11.0
+scene-engine Python                 0.15.0
+@scene-engine/client               0.13.0
+@scene-engine/display              0.12.0
 @scene-engine/renderer-three       0.12.0
 wire                               scene-engine-wire@3
-display                            scene-engine-display-node@5
+display                            scene-engine-display-node@6
 scene definition                   scene-engine-scene-definition@2
 prefab definition                  scene-engine-prefab-definition@4
 catalog manifest                   scene-engine-display-catalog-manifest@2
@@ -26,7 +26,7 @@ One `DisplayRuntime` owns:
 
 - one active Scene;
 - one NodeIndex and one NodeGraph;
-- one local 4x4 matrix per Node;
+- one authority-root Matrix4 pool indexed by stream-stable ID, plus browser-owned matrices for Scene/Prefab Nodes;
 - one ComponentScheduler;
 - one RenderSystem;
 - one AnimationSystem;
@@ -44,17 +44,20 @@ Every Node local Transform is exactly one 16-value column-major Matrix4:
 ]
 ```
 
-Python's hot-path owner is `DisplayTransform`: it retains one private NumPy `ndarray` with shape `(4, 4)`, dtype `<f4`,
-Fortran-contiguous column-major layout and `writeable=False`. It has no persistent byte or TRS sidecar.
+Python's hot-path owner is `DisplayMatrixPool`: it retains one contiguous NumPy `ndarray` with shape `(n,4,4)`, dtype `<f4`
+and axes `[node,column,row]`. A row is selected directly by `node_id` and already has the exact column-major byte order used on
+Wire. `DisplayTransform` remains the immutable value/convenience type used to author or snapshot one row; neither type has a
+persistent byte or TRS sidecar.
 `DisplayTransform(matrix_bytes=...)` copies exactly 64 immutable input bytes into that owner without interpreting their sixteen
 binary32 bit patterns. `DisplayTransform.from_matrix(...)` exists for numeric authoring and converts exactly sixteen
 column-major values to little-endian float32; neither path canonicalizes negative zero or checks finite, affine or determinant
 rules.
 
-The browser Client is the first semantic boundary. It reads the payload into an owned Float32Array, canonicalizes negative zero,
+The browser Client is the first semantic boundary. It reads each matrix tensor into one owned Float32Array, canonicalizes negative zero,
 requires finite affine entries (`m[3]=m[7]=m[11]=0`, `m[15]=1`) and requires the upper-left 3x3 determinant to be positive and
-nonzero. Shear is legal; reflections and singular matrices are not. Display repeats the check defensively and stores one
-private Float32Array local matrix. Public views return immutable copies, never the mutable owner.
+nonzero. Shear is legal; reflections and singular matrices are not. Display repeats the check defensively and stores authority
+rows in one shared pool. Each authority Node resolves its local row by ID; public views return immutable copies, never the
+mutable owner.
 
 NodeGraph owns one Float64Array world matrix per Node. A root copies its local matrix; a child computes exactly
 `parentWorld * localMatrix`. There is no position/quaternion/scale cache, decomposition or TRS hierarchy path. The wider world
@@ -82,7 +85,8 @@ Product and display-authoring code does not need to hand-write sixteen values. P
 ```python
 pose = DisplayTransform.from_trs(position=(10, 0, 2), scale=(2, 2, 2))
 pose = pose.translated_self((0, 0, 4)).rotated_parent((0, 1, 0), math.pi / 2)
-command = DisplayCommand.set_transform("py/ship", pose)
+pool.set(ship_id, pose)
+command = DisplayCommand.set_transform(ship_id)
 ```
 
 ```js
@@ -124,22 +128,24 @@ but includes rotation, scale and shear; it is intentionally not named `transform
 Inverse conversion uses the complete affine inverse rather than an orthogonal-only shortcut. Returned vectors are immutable
 finite triples and are not quantized to float32.
 
-Canonical names are immutable lowercase paths under exactly:
+Wire authority identity is a stable `uint32 node_id`, used directly as the Python and browser authority-matrix-pool row. IDs
+allocate monotonically and are not reused inside a stream; removal leaves a zero tombstone until the next stream. Display maps
+an authority ID to the internal canonical name `py/<decimal-id>`, but this string never crosses Wire.
+
+Browser-local canonical names are immutable lowercase paths under exactly:
 
 ```text
 sys/ scene/ py/ prefab/
 ```
 
-Names are at most 192 UTF-8 bytes; maximum tree depth is 128. Python supplies complete `py/` names and never addresses
-Prefab-local names. Checkpoint Nodes and structural parent names validate this syntax in Python. Post-checkpoint mutation
-constructors trust their product-owned target string to avoid repeating path and UTF-8 validation for every update; Client
-validates each decoded target before entering the Display commit gate. A nested materialization prefixes `prefab/` exactly
+Names are at most 192 UTF-8 bytes; maximum tree depth is 128. Python never addresses a canonical name or Prefab-local path;
+checkpoint Nodes and structural commands carry numeric node/parent IDs. A nested materialization prefixes `prefab/` exactly
 once, followed by the outer owner and accumulated
-instance/local path, for example `prefab/py/island/1/tiles/tile-q0-r0/body`; it never constructs
+instance/local path, for example `prefab/py/0/tiles/tile-q0-r0/body`; it never constructs
 `prefab/prefab/...`.
 
-The materialization ledger records definition-instance provenance, source keys and owned ordinary Nodes/Components. NodeIndex
-and NodeGraph remain the only runtime hierarchy and Transform owner; the ledger is package-private bookkeeping for diff,
+The materialization ledger records definition-instance provenance, source keys and owned ordinary Nodes/Components. NodeIndex,
+NodeGraph and the one authority MatrixPool remain the only runtime hierarchy/Transform owners; the ledger is package-private bookkeeping for diff,
 animation scope, rollback and disposal, not a second tree or a caller-visible child-Prefab object.
 
 ## Catalog and identity
@@ -290,15 +296,15 @@ cannot restore the projection, the commit gate fails closed and a fresh checkpoi
 contract still does not promise rollback across multiple Authority commands.
 
 Outer `replaceNodePrefab` replaces the complete materialization ledger for that authority target while preserving the outer
-authority Node's name, parent and authority-owned children according to the existing replacement contract. Old and new
+authority Node's numeric ID, derived internal name, parent and authority-owned children according to the existing replacement contract. Old and new
 Prefab-local canonical names are never simultaneously present in NodeIndex.
 
 ## Authority boundary
 
-Python owns each `py/` root's:
+Python owns each authority root's:
 
 ```text
-name / existence / parent / local Transform / visibility / prefabId / complete state
+nodeId / existence / parentNodeId / MatrixPool row / visibility / prefabId / complete state
 ```
 
 This is deliberately the outer boundary. Python does not publish commands for definition-owned child instances, does not know
@@ -306,9 +312,12 @@ their Prefab-local paths and cannot address them through `prefab/...` names. `se
 the registered synchronous resolvers derive all nested desired instances and child complete states inside the same Display
 operation.
 
-The Authority surface contains only single-target operations:
+The Authority surface installs one full matrix pool for a checkpoint, applies one dirty batch per commit, and otherwise contains
+only ID-targeted operations:
 
 ```text
+installNodeMatrixPool
+applyNodeTransformBatch
 createNode
 setNodeTransform
 setNodeParent
@@ -318,7 +327,7 @@ replaceNodePrefab
 removeNode
 ```
 
-`null` parent means `sys/authority-root`; a non-null parent must be an existing `py/` root. `setNodeState` is complete replacement,
+`null` parent means `sys/authority-root`; a non-null parent ID must be an existing authority root. `setNodeState` is complete replacement,
 not merge patch, including when it causes nested add/remove/replace operations.
 
 Checkpoint bootstrap may create authority roots after `installScene` and before `activate`. Once activated, every Authority call
@@ -396,10 +405,12 @@ Three backend keeps defensive validation, but an invalid business record must no
 
 ## Checkpoint, commit and summary
 
-A checkpoint carries Scene name, three catalog hashes, command cursor and parent-first authority roots. Client creates a fresh
-session, verifies catalog identity, installs the Scene, bootstraps roots, activates and starts it, then swaps the session.
+A checkpoint carries Scene name, three catalog hashes, command cursor, the complete matrix pool and parent-first authority-root
+metadata. Client creates a fresh session, verifies catalog identity, installs the Scene and pool, bootstraps roots by ID,
+activates and starts it, then swaps the session.
 
-A commit closes the draw gate, applies every command, flushes transforms and seals the exact cursor. JavaScript run-to-completion
+A commit closes the draw gate, stages the one dirty matrix batch and applies every command in order; create/set-transform
+consumes its row at that command's sequence position. It then flushes transforms and seals the exact cursor. JavaScript run-to-completion
 prevents RAF from observing a partial transaction. The seal is not cross-command rollback; any command failure invalidates the
 whole projection and emits no ACK.
 

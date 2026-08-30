@@ -28,6 +28,8 @@ export const IDENTITY = IDENTITY_MATRIX;
 export const GEOMETRY_PREFAB_ID = 'foundation/geometry';
 export const NESTED_PREFAB_ID = 'foundation/nested';
 
+const authorityMatrixPoolSizes = new WeakMap();
+
 const PROFILE = Object.freeze({
   drawMode: 'requested',
   maximumPixelRatio: 1,
@@ -165,28 +167,61 @@ export function transformAt(position, {
 }
 
 export function createAuthorityNode({
-  name,
+  nodeId,
   prefabId = GEOMETRY_PREFAB_ID,
-  parentName = null,
-  transform = IDENTITY,
+  parentNodeId = null,
   visible = true,
   state = {},
 }) {
   return {
-    name,
-    parentName,
+    nodeId,
+    parentNodeId,
     prefabId,
     transformMode: 'live',
-    transform,
     visible,
     state,
   };
+}
+
+export function authorityNodeName(nodeId) { return `py/${nodeId}`; }
+
+function installEmptyAuthorityMatrixPool(runtime) {
+  runtime.authority.installNodeMatrixPool({
+    poolSize: 0,
+    matrices: new Float32Array(),
+  });
+  authorityMatrixPoolSizes.set(runtime, 0);
+}
+
+function stageAuthorityMatrices(runtime, matrixRows) {
+  const currentPoolSize = authorityMatrixPoolSizes.get(runtime);
+  if (currentPoolSize === undefined) throw new Error('test authority matrix pool is not installed');
+  const rows = [...matrixRows].sort(([left], [right]) => left - right);
+  const nodeIds = new Uint32Array(rows.length);
+  const matrices = new Float32Array(rows.length * 16);
+  let previous = -1;
+  for (let index = 0; index < rows.length; index += 1) {
+    const [nodeId, matrix] = rows[index];
+    if (!Number.isSafeInteger(nodeId) || nodeId < 0 || nodeId <= previous) {
+      throw new Error(`invalid test authority matrix row: ${nodeId}`);
+    }
+    if (matrix.length !== 16) throw new Error('test authority matrix must contain 16 values');
+    nodeIds[index] = nodeId;
+    matrices.set(matrix, index * 16);
+    previous = nodeId;
+  }
+  const poolSize = rows.length === 0
+    ? currentPoolSize
+    : Math.max(currentPoolSize, nodeIds.at(-1) + 1);
+  runtime.authority.applyNodeTransformBatch({ poolSize, nodeIds, matrices });
+  authorityMatrixPoolSizes.set(runtime, poolSize);
 }
 
 /** Apply one Authority transaction through the same begin/apply/seal boundary as Client. */
 export function commitAuthority(runtime, mutate, {
   sourceTickDelta = 1,
   commandCount = 1,
+  matrixRows = [],
 } = {}) {
   const previous = runtime.summary().cursor;
   const cursor = Object.freeze({
@@ -196,6 +231,7 @@ export function commitAuthority(runtime, mutate, {
   });
   runtime.commitGate.begin(cursor);
   try {
+    stageAuthorityMatrices(runtime, matrixRows);
     const result = mutate(cursor);
     runtime.commitGate.seal(cursor);
     return result;
@@ -263,6 +299,7 @@ export async function createFoundationHarness() {
     onHealth: (event) => health.push(event),
   });
   runtime.installScene({ sceneName: 'main' });
+  installEmptyAuthorityMatrixPool(runtime);
   runtime.activate();
   runtime.start();
   await runtime.whenReady();

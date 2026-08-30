@@ -89,6 +89,7 @@ function rebuildRecords(bytes, limits) {
   const records = [];
   let cursor = 0;
   let previous = null;
+  let matrixPoolState = null;
   while (cursor < bytes.byteLength) {
     if (cursor + PREFIX_BYTES > bytes.byteLength) fail('packet-log-prefix-truncated');
     const view = new DataView(bytes.buffer, bytes.byteOffset + cursor, PREFIX_BYTES);
@@ -107,18 +108,24 @@ function rebuildRecords(bytes, limits) {
     }
     validateProgression(previous, packet);
     const header = packet.header;
+    let displayPayload;
     if (packet.kind === 'engine.checkpoint') {
-      parseDisplayCheckpoint(attachment(packet, 'display_checkpoint').value, {
+      displayPayload = parseDisplayCheckpoint(attachment(packet, 'display_checkpoint').value, {
         header,
         maximumJsonDepth: limits.maximumJsonDepth,
       });
     } else {
-      parseDisplayCommandStream(attachment(packet, 'display_command_stream').value, {
+      displayPayload = parseDisplayCommandStream(attachment(packet, 'display_command_stream').value, {
         header,
         baseCommandSeq: previous.header.last_command_seq,
         maximumJsonDepth: limits.maximumJsonDepth,
       });
     }
+    matrixPoolState = advanceMatrixPoolState(
+      matrixPoolState,
+      packet.kind,
+      displayPayload,
+    );
     const entry = Object.freeze({
       stream_id: header.stream_id,
       commit_seq: header.commit_seq,
@@ -137,6 +144,66 @@ function rebuildRecords(bytes, limits) {
     fail('packet-log-initial-checkpoint-required');
   }
   return records;
+}
+
+function advanceMatrixPoolState(previous, packetKind, payload) {
+  if (packetKind === 'engine.checkpoint') {
+    const activeNodeIds = new Set(payload.nodes.map(({ nodeId }) => nodeId));
+    if (previous === null) {
+      // IDs below poolSize but outside activeNodeIds are historical zero tombstones.
+      return { poolSize: payload.matrixPoolSize, activeNodeIds };
+    }
+    if (payload.matrixPoolSize !== previous.poolSize
+        || !setsEqual(activeNodeIds, previous.activeNodeIds)) {
+      fail('packet-log-periodic-checkpoint-matrix-pool-mismatch');
+    }
+    return previous;
+  }
+  if (previous === null || payload.matrixPoolSize < previous.poolSize) {
+    fail('packet-log-matrix-pool-lifecycle-invalid');
+  }
+
+  const growth = payload.matrixPoolSize - previous.poolSize;
+  const createdNodeIds = payload.commands
+    .filter(({ kind }) => kind === 'node-create')
+    .map(({ nodeId }) => nodeId)
+    .sort((left, right) => left - right);
+  if (createdNodeIds.length !== growth
+      || growth > payload.dirtyNodeIds.length
+      || createdNodeIds.some((nodeId, index) => nodeId !== previous.poolSize + index)) {
+    fail('packet-log-matrix-pool-lifecycle-invalid');
+  }
+  const dirtyNodeIds = new Set(payload.dirtyNodeIds);
+  if (createdNodeIds.some((nodeId) => !dirtyNodeIds.has(nodeId))) {
+    fail('packet-log-matrix-pool-lifecycle-invalid');
+  }
+
+  const activeNodeIds = new Set(previous.activeNodeIds);
+  for (const command of payload.commands) {
+    if (command.kind === 'node-create') {
+      if (command.nodeId < previous.poolSize || activeNodeIds.has(command.nodeId)
+          || (command.parentNodeId !== null
+            && !activeNodeIds.has(command.parentNodeId))) {
+        fail('packet-log-matrix-pool-lifecycle-invalid');
+      }
+      activeNodeIds.add(command.nodeId);
+      continue;
+    }
+    if (!activeNodeIds.has(command.nodeId)) {
+      fail('packet-log-matrix-pool-lifecycle-invalid');
+    }
+    if (command.kind === 'node-set-parent'
+        && command.parentNodeId !== null
+        && !activeNodeIds.has(command.parentNodeId)) {
+      fail('packet-log-matrix-pool-lifecycle-invalid');
+    }
+    if (command.kind === 'node-remove') activeNodeIds.delete(command.nodeId);
+  }
+  return { poolSize: payload.matrixPoolSize, activeNodeIds };
+}
+
+function setsEqual(left, right) {
+  return left.size === right.size && [...left].every((value) => right.has(value));
 }
 
 function validateProgression(previous, packet) {

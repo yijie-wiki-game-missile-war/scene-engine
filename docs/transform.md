@@ -1,9 +1,9 @@
 # Transform encoding
 
 `scene-engine-transform@1` freezes the shared fixed-point matrix vectors used to verify product rule-space transform helpers.
-It is separate from the Display Node's column-major float32 Matrix4: rule space uses scaled decimal integers, while Python
-keeps the Display matrix in one read-only little-endian float32 NumPy array, transports its exact IEEE-754 bit patterns as
-64 column-major bytes, and leaves matrix-semantic validation to Client.
+It is separate from the Display authority root's column-major float32 Matrix4: rule space uses scaled decimal integers, while
+Python keeps authority matrices in one little-endian float32 NumPy pool, transports checkpoint/dirty rows as contiguous
+`(n,4,4)` / `(m,4,4)` tensors, and leaves matrix-semantic validation to Client.
 
 A rule matrix contains exactly sixteen canonical base-10 integer strings in column-major order and acts on column vectors.
 Scale is `1_000_000`; indices 3, 7, and 11 are zero, index 15 is `1000000`, and translation is at 12–14. Each magnitude is at

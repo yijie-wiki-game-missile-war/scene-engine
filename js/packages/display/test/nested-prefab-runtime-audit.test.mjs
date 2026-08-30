@@ -192,10 +192,10 @@ function emptyDefinition(id, gameplayType) {
   });
 }
 
-function authorityCommand({ name, parentName, prefabId }) {
+function authorityCommand({ nodeId, parentNodeId, prefabId }) {
   return {
-    name,
-    parentName,
+    nodeId,
+    parentNodeId,
     prefabId,
     transformMode: 'live',
     transform: IDENTITY,
@@ -236,13 +236,12 @@ test('nested child depth rejection leaves no detached NodeIndex entry', async ()
       // ordinary authority roots leave the final owner at depth 128, where its
       // nested child must be rejected at depth 129.
       for (let index = 0; index < 125; index += 1) {
-        const name = `py/p${String(index).padStart(3, '0')}`;
         authority.createNode(authorityCommand({
-          name,
-          parentName: deepestParent,
+          nodeId: index,
+          parentNodeId: deepestParent,
           prefabId: empty.id,
         }));
-        deepestParent = name;
+        deepestParent = index;
       }
     },
   });
@@ -253,8 +252,8 @@ test('nested child depth rejection leaves no detached NodeIndex entry', async ()
   let caught = null;
   try {
     runtime.authority.createNode(authorityCommand({
-      name: 'py/depth-target',
-      parentName: deepestParent,
+      nodeId: 125,
+      parentNodeId: deepestParent,
       prefabId: owner.id,
     }));
   } catch (error) {
@@ -262,8 +261,8 @@ test('nested child depth rejection leaves no detached NodeIndex entry', async ()
   }
 
   assert.equal(caught?.code, 'display-node-depth-limit');
-  assert.equal(runtime._nodeIndex.get('py/depth-target'), null);
-  assert.equal(runtime._nodeIndex.get('prefab/py/depth-target/child'), null);
+  assert.equal(runtime._nodeIndex.get('py/125'), null);
+  assert.equal(runtime._nodeIndex.get('prefab/py/125/child'), null);
   assert.equal(runtime._nodeIndex.size, baselineSize);
   runtime.commitGate.fail(caught);
   await runtime.dispose();
@@ -300,13 +299,12 @@ test('an empty dynamic slot uses its actual graph height at the authority depth 
       prefabEntries: [empty, child, owner],
       bootstrapAuthority(authority) {
         for (let index = 0; index < 125; index += 1) {
-          const name = `py/h${String(index).padStart(3, '0')}`;
           authority.createNode(authorityCommand({
-            name,
-            parentName: deepestParent,
+            nodeId: index,
+            parentNodeId: deepestParent,
             prefabId: empty.id,
           }));
-          deepestParent = name;
+          deepestParent = index;
         }
       },
     });
@@ -314,15 +312,15 @@ test('an empty dynamic slot uses its actual graph height at the authority depth 
 
     commitAuthority(runtime, () => runtime.authority.createNode({
       ...authorityCommand({
-        name: 'py/actual-height-target',
-        parentName: deepestParent,
+        nodeId: 125,
+        parentNodeId: deepestParent,
         prefabId: owner.id,
       }),
       state: { withChild: false },
     }), { sourceTickDelta: 1 });
 
-    assert.notEqual(runtime._nodeIndex.get('py/actual-height-target'), null);
-    assert.equal(runtime._nodeIndex.get('prefab/py/actual-height-target/children/only'), null);
+    assert.notEqual(runtime._nodeIndex.get('py/125'), null);
+    assert.equal(runtime._nodeIndex.get('prefab/py/125/children/only'), null);
   });
 
 test('a dynamic slot key cannot reserve the exact path of an ordinary local Node', () => {
@@ -407,15 +405,15 @@ test('a newly attached nested fixed billboard sees the transaction final retaine
     });
     const { runtime } = await createHarness({ prefabEntries: [owner, child] });
     t.after(() => runtime.dispose());
-    const ownerName = 'py/final-parent-pose';
+    const ownerName = 'py/0';
     commitAuthority(runtime, () => runtime.authority.createNode({
-      ...authorityCommand({ name: ownerName, parentName: null, prefabId: owner.id }),
+      ...authorityCommand({ nodeId: 0, parentNodeId: null, prefabId: owner.id }),
       state: { show: false, mountTransform: IDENTITY },
     }), { sourceTickDelta: 1 });
 
     const halfSqrt = Math.SQRT1_2;
     commitAuthority(runtime, () => runtime.authority.setNodeState({
-      name: ownerName,
+      nodeId: 0,
       state: {
         show: true,
         mountTransform: matrixTransform({
@@ -427,7 +425,7 @@ test('a newly attached nested fixed billboard sees the transaction final retaine
     }), { sourceTickDelta: 1 });
 
     const world = runtime.currentView().getWorldTransform(
-      'prefab/py/final-parent-pose/children/only',
+      'prefab/py/0/children/only',
     );
     for (const index of [1, 2, 4, 6, 8, 9]) assert.ok(Math.abs(world[index]) < 1e-6);
     for (const index of [0, 5, 10, 15]) assert.ok(Math.abs(world[index] - 1) < 1e-6);
@@ -459,9 +457,9 @@ test('bulk dynamic removal visits the flat materialization ledger only linearly'
   });
   const { runtime } = await createHarness({ prefabEntries: [owner, child] });
   t.after(() => runtime.dispose());
-  const ownerName = 'py/bulk-remove';
+  const ownerName = 'py/0';
   commitAuthority(runtime, () => runtime.authority.createNode({
-    ...authorityCommand({ name: ownerName, parentName: null, prefabId: owner.id }),
+    ...authorityCommand({ nodeId: 0, parentNodeId: null, prefabId: owner.id }),
     state: { count: 64 },
   }), { sourceTickDelta: 1 });
   const baselineNodeCount = runtime._nodeIndex.size;
@@ -491,7 +489,7 @@ test('bulk dynamic removal visits the flat materialization ledger only linearly'
 
   try {
     commitAuthority(runtime, () => runtime.authority.setNodeState({
-      name: ownerName,
+      nodeId: 0,
       state: { count: 0 },
     }), { sourceTickDelta: 1 });
   } finally {
@@ -506,7 +504,7 @@ test('bulk dynamic removal visits the flat materialization ledger only linearly'
 
 test('a nested replacement shadow cannot observe nodes removed by the same candidate',
   async (t) => {
-    const ownerName = 'py/candidate-isolation';
+    const ownerName = 'py/0';
     const removedNodeName = `prefab/${ownerName}/children/only/old-only`;
     const oldChild = definePrefab({
       schema: PREFAB_DEFINITION_SCHEMA,
@@ -564,13 +562,13 @@ test('a nested replacement shadow cannot observe nodes removed by the same candi
     t.after(() => runtime.dispose());
 
     commitAuthority(runtime, () => runtime.authority.createNode({
-      ...authorityCommand({ name: ownerName, parentName: null, prefabId: owner.id }),
+      ...authorityCommand({ nodeId: 0, parentNodeId: null, prefabId: owner.id }),
       state: { prefabId: oldChild.id },
     }), { sourceTickDelta: 1 });
     assert.notEqual(runtime._nodeIndex.get(removedNodeName), null);
 
     commitAuthority(runtime, () => runtime.authority.setNodeState({
-      name: ownerName,
+      nodeId: 0,
       state: { prefabId: newChild.id },
     }), { sourceTickDelta: 1 });
 
@@ -579,7 +577,7 @@ test('a nested replacement shadow cannot observe nodes removed by the same candi
   });
 
 test('an addition shadow hides every sibling removed by the same candidate', async (t) => {
-  const ownerName = 'py/candidate-remove-add';
+  const ownerName = 'py/0';
   const removedNodeName = `prefab/${ownerName}/children/old/old-only`;
   const oldChild = definePrefab({
     schema: PREFAB_DEFINITION_SCHEMA,
@@ -633,13 +631,13 @@ test('an addition shadow hides every sibling removed by the same candidate', asy
   t.after(() => runtime.dispose());
 
   commitAuthority(runtime, () => runtime.authority.createNode({
-    ...authorityCommand({ name: ownerName, parentName: null, prefabId: owner.id }),
+    ...authorityCommand({ nodeId: 0, parentNodeId: null, prefabId: owner.id }),
     state: { next: false },
   }), { sourceTickDelta: 1 });
   assert.notEqual(runtime._nodeIndex.get(removedNodeName), null);
 
   commitAuthority(runtime, () => runtime.authority.setNodeState({
-    name: ownerName,
+    nodeId: 0,
     state: { next: true },
   }), { sourceTickDelta: 1 });
 
@@ -648,7 +646,7 @@ test('an addition shadow hides every sibling removed by the same candidate', asy
 });
 
 test('addition attach hooks see siblings added by the same complete candidate', async (t) => {
-  const ownerName = 'py/candidate-added-siblings';
+  const ownerName = 'py/0';
   const requiredNodeName = `prefab/${ownerName}/children/bravo`;
   const probeChild = definePrefab({
     schema: PREFAB_DEFINITION_SCHEMA,
@@ -700,12 +698,12 @@ test('addition attach hooks see siblings added by the same complete candidate', 
   t.after(() => runtime.dispose());
 
   commitAuthority(runtime, () => runtime.authority.createNode({
-    ...authorityCommand({ name: ownerName, parentName: null, prefabId: owner.id }),
+    ...authorityCommand({ nodeId: 0, parentNodeId: null, prefabId: owner.id }),
     state: { show: false },
   }), { sourceTickDelta: 1 });
 
   commitAuthority(runtime, () => runtime.authority.setNodeState({
-    name: ownerName,
+    nodeId: 0,
     state: { show: true },
   }), { sourceTickDelta: 1 });
 
@@ -744,11 +742,11 @@ test('a partial live NodeIndex registration failure rolls an adopted subtree ful
     });
     const { runtime } = await createHarness({ prefabEntries: [owner, child] });
     t.after(() => runtime.dispose());
-    const ownerName = 'py/partial-adopt';
+    const ownerName = 'py/0';
     const childRootName = `prefab/${ownerName}/children/only`;
     const childBodyName = `${childRootName}/body`;
     commitAuthority(runtime, () => runtime.authority.createNode({
-      ...authorityCommand({ name: ownerName, parentName: null, prefabId: owner.id }),
+      ...authorityCommand({ nodeId: 0, parentNodeId: null, prefabId: owner.id }),
       state: { show: false },
     }), { sourceTickDelta: 1 });
     const baselineSize = runtime._nodeIndex.size;
@@ -766,7 +764,7 @@ test('a partial live NodeIndex registration failure rolls an adopted subtree ful
     runtime.commitGate.begin(cursor);
     let caught = null;
     try {
-      runtime.authority.setNodeState({ name: ownerName, state: { show: true } });
+      runtime.authority.setNodeState({ nodeId: 0, state: { show: true } });
     } catch (error) {
       caught = error;
     } finally {
@@ -822,9 +820,9 @@ test('component preparation failure disposes components already created on the s
       },
     });
     t.after(() => runtime.dispose());
-    const ownerName = 'py/component-preparation';
+    const ownerName = 'py/0';
     commitAuthority(runtime, () => runtime.authority.createNode({
-      ...authorityCommand({ name: ownerName, parentName: null, prefabId: owner.id }),
+      ...authorityCommand({ nodeId: 0, parentNodeId: null, prefabId: owner.id }),
       state: { show: false },
     }), { sourceTickDelta: 1 });
     const baselineSize = runtime._nodeIndex.size;
@@ -837,7 +835,7 @@ test('component preparation failure disposes components already created on the s
     runtime.commitGate.begin(cursor);
     let caught = null;
     try {
-      runtime.authority.setNodeState({ name: ownerName, state: { show: true } });
+      runtime.authority.setNodeState({ nodeId: 0, state: { show: true } });
     } catch (error) {
       caught = error;
     } finally {
@@ -854,7 +852,7 @@ test('component preparation failure disposes components already created on the s
 
 test('a child attach hook reads the retained parent final properties, visibility, and children',
   async (t) => {
-    const ownerName = 'py/candidate-retained-parent';
+    const ownerName = 'py/0';
     const parentNodeName = `prefab/${ownerName}/mount`;
     const expectedChildName = `prefab/${ownerName}/children/only`;
     const child = definePrefab({
@@ -915,11 +913,11 @@ test('a child attach hook reads the retained parent final properties, visibility
     t.after(() => runtime.dispose());
 
     commitAuthority(runtime, () => runtime.authority.createNode({
-      ...authorityCommand({ name: ownerName, parentName: null, prefabId: owner.id }),
+      ...authorityCommand({ nodeId: 0, parentNodeId: null, prefabId: owner.id }),
       state: { show: false, parentVisible: true, value: 1 },
     }), { sourceTickDelta: 1 });
     commitAuthority(runtime, () => runtime.authority.setNodeState({
-      name: ownerName,
+      nodeId: 0,
       state: { show: true, parentVisible: false, value: 42 },
     }), { sourceTickDelta: 1 });
 
@@ -999,7 +997,7 @@ test('a second sibling attach failure preserves every retained live baseline', a
     configureComponents: registerRetainedCandidateProbes,
   });
   t.after(() => runtime.dispose());
-  const ownerName = 'py/candidate-retained-rollback';
+  const ownerName = 'py/0';
   const mountName = `prefab/${ownerName}/mount`;
   const initialState = {
     show: false,
@@ -1008,7 +1006,7 @@ test('a second sibling attach failure preserves every retained live baseline', a
     value: 1,
   };
   commitAuthority(runtime, () => runtime.authority.createNode({
-    ...authorityCommand({ name: ownerName, parentName: null, prefabId: owner.id }),
+    ...authorityCommand({ nodeId: 0, parentNodeId: null, prefabId: owner.id }),
     state: initialState,
   }), { sourceTickDelta: 1 });
 
@@ -1038,7 +1036,7 @@ test('a second sibling attach failure preserves every retained live baseline', a
   let caught = null;
   try {
     runtime.authority.setNodeState({
-      name: ownerName,
+      nodeId: 0,
       state: {
         show: true,
         mountTransform: changedTransform,
@@ -1128,12 +1126,12 @@ test('multiple removed siblings regain exact order and identity after a later pa
       configureComponents: registerRetainedCandidateProbes,
     });
     t.after(() => runtime.dispose());
-    const ownerName = 'py/removal-forest';
+    const ownerName = 'py/0';
     const mountName = `prefab/${ownerName}/mount`;
     const childName = (key) => `prefab/${ownerName}/children/${key}`;
     const initialKeys = ['alpha', 'bravo', 'charlie', 'delta'];
     commitAuthority(runtime, () => runtime.authority.createNode({
-      ...authorityCommand({ name: ownerName, parentName: null, prefabId: owner.id }),
+      ...authorityCommand({ nodeId: 0, parentNodeId: null, prefabId: owner.id }),
       state: {
         keys: initialKeys,
         mountTransform: IDENTITY,
@@ -1181,7 +1179,7 @@ test('multiple removed siblings regain exact order and identity after a later pa
     let caught = null;
     try {
       runtime.authority.setNodeState({
-        name: ownerName,
+        nodeId: 0,
         state: {
           keys: ['alpha', 'delta', 'echo'],
           mountTransform: changedTransform,

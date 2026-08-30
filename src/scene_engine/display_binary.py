@@ -19,7 +19,8 @@ from .display import (
     DisplayCatalogIdentity,
     DisplayCommand,
     DisplayNode,
-    DisplayTransform,
+    MAXIMUM_NODE_ID,
+    NULL_NODE_ID,
     ValidatedDisplayCheckpoint,
     ValidatedDisplayCommandStream,
 )
@@ -29,7 +30,7 @@ from .json_tree import MAXIMUM_SAFE_INTEGER, validate_json_value
 
 DISPLAY_BINARY_CHECKPOINT_MAGIC = b"SDCP"
 DISPLAY_BINARY_COMMAND_STREAM_MAGIC = b"SDCS"
-DISPLAY_BINARY_VERSION = 2
+DISPLAY_BINARY_VERSION = 3
 DISPLAY_BINARY_SCALAR_FLOAT32 = 1
 
 DISPLAY_CHECKPOINT_KIND = "display_checkpoint"
@@ -42,10 +43,10 @@ _U32 = struct.Struct("<I")
 _U64 = struct.Struct("<Q")
 _MATRIX4_F32 = struct.Struct("<16f")
 
-_NULL_PARENT_INDEX = 0xFFFFFFFF
-_NULL_STRING_LENGTH = 0xFFFF
-_MAXIMUM_U16_STRING_BYTES = _NULL_STRING_LENGTH - 1
+_NULL_NODE_ID = NULL_NODE_ID
+_MAXIMUM_U16_STRING_BYTES = 0xFFFE
 _MAXIMUM_U32 = 0xFFFFFFFF
+_MAXIMUM_COMMANDS_PER_PAYLOAD = 65_536
 
 _NODE_FLAG_VISIBLE = 1 << 0
 _NODE_FLAG_LIVE = 1 << 1
@@ -62,15 +63,11 @@ _OPCODE_BY_KIND = {
 }
 _KIND_BY_OPCODE = {value: key for key, value in _OPCODE_BY_KIND.items()}
 
-_AUTHORITY_NAME = re.compile(
-    r"^py/[a-z0-9][a-z0-9._-]*(?:/[a-z0-9][a-z0-9._-]*)*$"
-)
 _SCENE_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _PREFAB_ID = re.compile(
     r"^[a-z0-9][a-z0-9._@-]*(?:/[a-z0-9][a-z0-9._@-]*)*$"
 )
 
-_MAXIMUM_NODE_NAME_BYTES = 192
 _MAXIMUM_PREFAB_ID_BYTES = 192
 _MAXIMUM_SCENE_NAME_BYTES = 96
 
@@ -107,11 +104,10 @@ class EncodedDisplayPayload:
 
 @dataclass(frozen=True, slots=True)
 class _EncodedCheckpointNode:
-    name: str
-    parent_name: str | None
+    node_id: int
+    parent_node_id: int | None
     prefab_id: str
     flags: int
-    matrix: np.ndarray
     state: bytes
 
 
@@ -127,7 +123,7 @@ def encode_display_checkpoint_binary(
     last_command_seq = _safe_integer(
         expected_last_command_seq, "expected_last_command_seq", ConfigurationError
     )
-    scene_name, catalog, nodes = _checkpoint_semantics(
+    scene_name, catalog, matrix_pool, nodes = _checkpoint_semantics(
         value,
         expected_last_command_seq=last_command_seq,
         maximum_json_depth=maximum_json_depth,
@@ -141,6 +137,9 @@ def encode_display_checkpoint_binary(
             0,
         ),
         _U64.pack(last_command_seq),
+        _U32.pack(len(matrix_pool)),
+        _U32.pack(len(nodes)),
+        matrix_pool,
         _encode_string(
             scene_name,
             "scene_name",
@@ -150,25 +149,15 @@ def encode_display_checkpoint_binary(
         bytes.fromhex(catalog.prefab_catalog_hash),
         bytes.fromhex(catalog.state_schema_hash),
     ]
-    if len(nodes) > _MAXIMUM_U32:
-        raise ConfigurationError("display checkpoint Node count exceeds uint32")
-    chunks.append(_U32.pack(len(nodes)))
-
-    indices: dict[str, int] = {}
-    for index, node in enumerate(nodes):
+    for node in nodes:
+        chunks.append(_U32.pack(node.node_id))
         chunks.append(
-            _encode_string(
-                node.name,
-                "name",
-                maximum_bytes=_MAXIMUM_NODE_NAME_BYTES,
+            _U32.pack(
+                _NULL_NODE_ID
+                if node.parent_node_id is None
+                else node.parent_node_id
             )
         )
-        parent_index = (
-            _NULL_PARENT_INDEX
-            if node.parent_name is None
-            else indices[node.parent_name]
-        )
-        chunks.append(_U32.pack(parent_index))
         chunks.append(
             _encode_string(
                 node.prefab_id,
@@ -177,9 +166,7 @@ def encode_display_checkpoint_binary(
             )
         )
         chunks.append(_U8.pack(node.flags))
-        chunks.append(node.matrix)
         chunks.append(node.state)
-        indices[node.name] = index
 
     return EncodedDisplayPayload(
         bytes=b"".join(chunks),
@@ -209,6 +196,11 @@ def decode_display_checkpoint_binary(
     _safe_integer(encoded_last_command_seq, "last_command_seq", WireError)
     if encoded_last_command_seq != last_command_seq:
         reader.fail("command cursor does not match the packet header")
+    matrix_pool_size = reader.u32("matrix pool size")
+    node_count = reader.u32("active Node count")
+    if node_count > matrix_pool_size:
+        reader.fail("active Node count exceeds matrix pool size")
+    matrix_pool = reader.matrix_tensor(matrix_pool_size, "matrix pool")
     scene_name = reader.string(
         "scene_name", maximum_bytes=_MAXIMUM_SCENE_NAME_BYTES
     )
@@ -218,27 +210,28 @@ def decode_display_checkpoint_binary(
         prefab_catalog_hash=reader.take(32, "prefab catalog hash").hex(),
         state_schema_hash=reader.take(32, "state schema hash").hex(),
     )
-    node_count = reader.u32("node count")
-    minimum_node_bytes = 2 + 4 + 2 + 1 + _MATRIX4_F32.size + 4
+    minimum_node_bytes = 4 + 4 + 2 + 1 + 4
     if node_count > reader.remaining // minimum_node_bytes:
         reader.fail("Node count exceeds the remaining payload")
 
     nodes: list[DisplayNode] = []
-    seen_names: set[str] = set()
-    depths: list[int] = []
-    for index in range(node_count):
-        name = reader.string("name", maximum_bytes=_MAXIMUM_NODE_NAME_BYTES)
-        if name in seen_names:
-            reader.fail("Node name is duplicated")
-        parent_index = reader.u32("parent index")
-        if parent_index == _NULL_PARENT_INDEX:
-            parent_name = None
+    seen_ids: set[int] = set()
+    depths: dict[int, int] = {}
+    for _index in range(node_count):
+        node_id = reader.node_id("node ID")
+        if node_id >= matrix_pool_size:
+            reader.fail("Node ID is outside matrix pool size")
+        if node_id in seen_ids:
+            reader.fail("Node ID is duplicated")
+        parent_raw = reader.u32("parent Node ID")
+        if parent_raw == _NULL_NODE_ID:
+            parent_node_id = None
             depth = 1
-        elif parent_index >= index:
-            reader.fail("parent index must refer to an earlier Node")
         else:
-            parent_name = nodes[parent_index].name
-            depth = depths[parent_index] + 1
+            parent_node_id = reader.validate_node_id(parent_raw, "parent Node ID")
+            if parent_node_id not in seen_ids:
+                reader.fail("parent Node ID must refer to an earlier Node")
+            depth = depths[parent_node_id] + 1
         if depth > 128:
             reader.fail("Node depth exceeds 128")
         prefab_id = reader.string(
@@ -249,24 +242,26 @@ def decode_display_checkpoint_binary(
             reader.fail("Node flags contain reserved bits")
         visible = bool(flags & _NODE_FLAG_VISIBLE)
         transform_mode = "live" if flags & _NODE_FLAG_LIVE else "initial"
-        transform = reader.matrix_transform()
         state = reader.state(maximum_json_depth=maximum_json_depth)
         try:
             nodes.append(
                 DisplayNode(
-                    name=name,
-                    parent_name=parent_name,
+                    node_id=node_id,
+                    parent_node_id=parent_node_id,
                     prefab_id=prefab_id,
                     transform_mode=transform_mode,
-                    transform=transform,
                     visible=visible,
                     state=state,
                 )
             )
         except ConfigurationError as exc:
             raise WireError("Display checkpoint Node is invalid") from exc
-        seen_names.add(name)
-        depths.append(depth)
+        seen_ids.add(node_id)
+        depths[node_id] = depth
+    bits = matrix_pool.view("<u4")
+    for node_id in range(matrix_pool_size):
+        if node_id not in seen_ids and np.any(bits[node_id] != 0):
+            reader.fail("inactive matrix pool row is not a zero tombstone")
     reader.finish()
 
     return {
@@ -276,6 +271,8 @@ def decode_display_checkpoint_binary(
         "prefab_catalog_hash": catalog.prefab_catalog_hash,
         "state_schema_hash": catalog.state_schema_hash,
         "last_command_seq": last_command_seq,
+        "matrix_pool_size": matrix_pool_size,
+        "matrix_pool": matrix_pool,
         "nodes": [node.to_record() for node in nodes],
     }
 
@@ -298,14 +295,30 @@ def encode_display_command_stream_binary(
         "expected_last_command_seq",
         ConfigurationError,
     )
-    base_command_seq, commands = _command_stream_semantics(
+    raw_commands: Any = None
+    if isinstance(value, ValidatedDisplayCommandStream):
+        raw_commands = value.commands
+    elif isinstance(value, Mapping):
+        raw_commands = value.get("commands")
+    if (
+        isinstance(raw_commands, (list, tuple))
+        and len(raw_commands) > _MAXIMUM_COMMANDS_PER_PAYLOAD
+    ):
+        raise ConfigurationError("display command count exceeds fixed limit of 65536")
+    (
+        base_command_seq,
+        matrix_pool_size,
+        dirty_node_ids,
+        dirty_matrices,
+        commands,
+    ) = _command_stream_semantics(
         value,
         expected_source_tick=source_tick,
         expected_last_command_seq=last_command_seq,
         maximum_json_depth=maximum_json_depth,
     )
-    if len(commands) > _MAXIMUM_U32:
-        raise ConfigurationError("display command count exceeds uint32")
+    if len(commands) > _MAXIMUM_COMMANDS_PER_PAYLOAD:
+        raise ConfigurationError("display command count exceeds fixed limit of 65536")
 
     chunks: list[bytes | np.ndarray] = [
         _COMMON_HEADER.pack(
@@ -317,25 +330,22 @@ def encode_display_command_stream_binary(
         _U64.pack(base_command_seq),
         _U64.pack(source_tick),
         _U32.pack(len(commands)),
+        _U32.pack(matrix_pool_size),
+        _U32.pack(len(dirty_node_ids)),
+        dirty_node_ids,
+        dirty_matrices,
     ]
     for command in commands:
         kind = command.kind
-        name = command.name
         chunks.append(_U8.pack(_OPCODE_BY_KIND[kind]))
-        chunks.append(
-            _encode_string(
-                name,
-                "name",
-                maximum_bytes=_MAXIMUM_NODE_NAME_BYTES,
-            )
-        )
+        chunks.append(_U32.pack(command.node_id))
         fields = command.fields
         if kind == "node-create":
             chunks.append(
-                _encode_nullable_string(
-                    fields["parent_name"],
-                    "parent_name",
-                    maximum_bytes=_MAXIMUM_NODE_NAME_BYTES,
+                _U32.pack(
+                    _NULL_NODE_ID
+                    if fields["parent_node_id"] is None
+                    else fields["parent_node_id"]
                 )
             )
             chunks.append(
@@ -350,18 +360,15 @@ def encode_display_command_stream_binary(
                     _node_flags(fields["visible"], fields["transform_mode"])
                 )
             )
-            chunks.append(_encode_matrix(fields["transform"]))
             chunks.append(
                 _encode_state(fields["state"], maximum_json_depth=maximum_json_depth)
             )
-        elif kind == "node-set-transform":
-            chunks.append(_encode_matrix(fields["transform"]))
         elif kind == "node-set-parent":
             chunks.append(
-                _encode_nullable_string(
-                    fields["parent_name"],
-                    "parent_name",
-                    maximum_bytes=_MAXIMUM_NODE_NAME_BYTES,
+                _U32.pack(
+                    _NULL_NODE_ID
+                    if fields["parent_node_id"] is None
+                    else fields["parent_node_id"]
                 )
             )
         elif kind == "node-set-visible":
@@ -417,11 +424,25 @@ def decode_display_command_stream_binary(
     if encoded_source_tick != source_tick:
         reader.fail("source tick does not match the packet header")
     command_count = reader.u32("command count")
+    if command_count > _MAXIMUM_COMMANDS_PER_PAYLOAD:
+        reader.fail("command count exceeds fixed limit of 65536")
     if base_command_seq + command_count > MAXIMUM_SAFE_INTEGER:
         reader.fail("command sequence exceeds the JavaScript safe integer range")
     if base_command_seq + command_count != last_command_seq:
         reader.fail("command stream cursor does not match the packet header")
-    if command_count > reader.remaining // 3:
+    matrix_pool_size = reader.u32("matrix pool size")
+    dirty_count = reader.u32("dirty matrix count")
+    if dirty_count > matrix_pool_size:
+        reader.fail("dirty matrix count exceeds matrix pool size")
+    dirty_node_ids = reader.uint32_vector(dirty_count, "dirty Node IDs")
+    if dirty_count and int(dirty_node_ids[-1]) > MAXIMUM_NODE_ID:
+        reader.fail("dirty Node ID is invalid")
+    if dirty_count > 1 and not np.all(dirty_node_ids[1:] > dirty_node_ids[:-1]):
+        reader.fail("dirty Node IDs must be unique and strictly sorted")
+    if dirty_count and int(dirty_node_ids[-1]) >= matrix_pool_size:
+        reader.fail("dirty Node ID is outside matrix pool size")
+    dirty_matrices = reader.matrix_tensor(dirty_count, "dirty matrices")
+    if command_count > reader.remaining // 5:
         reader.fail("command count exceeds the remaining payload")
 
     records: list[dict[str, Any]] = []
@@ -430,20 +451,26 @@ def decode_display_command_stream_binary(
         kind = _KIND_BY_OPCODE.get(opcode)
         if kind is None:
             reader.fail("command opcode is unknown")
-        name = reader.string("name", maximum_bytes=_MAXIMUM_NODE_NAME_BYTES)
-        _validate_authority_name(name, "name", WireError)
+        node_id = reader.node_id("command Node ID")
+        if node_id >= matrix_pool_size:
+            reader.fail("command Node ID is outside matrix pool size")
         sequence = base_command_seq + ordinal + 1
         common = {
             "schema": DISPLAY_COMMAND_SCHEMA,
             "command_seq": sequence,
             "source_tick": source_tick,
             "kind": kind,
-            "name": name,
+            "node_id": node_id,
         }
         if kind == "node-create":
-            parent_name = reader.nullable_string(
-                "parent_name", maximum_bytes=_MAXIMUM_NODE_NAME_BYTES
+            parent_raw = reader.u32("parent Node ID")
+            parent_node_id = (
+                None
+                if parent_raw == _NULL_NODE_ID
+                else reader.validate_node_id(parent_raw, "parent Node ID")
             )
+            if parent_node_id is not None and parent_node_id >= matrix_pool_size:
+                reader.fail("parent Node ID is outside matrix pool size")
             prefab_id = reader.string(
                 "prefab_id", maximum_bytes=_MAXIMUM_PREFAB_ID_BYTES
             )
@@ -452,43 +479,45 @@ def decode_display_command_stream_binary(
                 reader.fail("Node flags contain reserved bits")
             visible = bool(flags & _NODE_FLAG_VISIBLE)
             transform_mode = "live" if flags & _NODE_FLAG_LIVE else "initial"
-            transform = reader.matrix_transform()
             state = reader.state(maximum_json_depth=maximum_json_depth)
             try:
                 node = DisplayNode(
-                    name=name,
-                    parent_name=parent_name,
+                    node_id=node_id,
+                    parent_node_id=parent_node_id,
                     prefab_id=prefab_id,
                     transform_mode=transform_mode,
-                    transform=transform,
                     visible=visible,
                     state=state,
                 )
             except ConfigurationError as exc:
                 raise WireError("node-create command is invalid") from exc
             node_record = node.to_record()
-            node_record.pop("name")
+            node_record.pop("node_id")
             records.append({**common, **node_record})
         elif kind == "node-set-transform":
-            transform = reader.matrix_transform()
-            _validated_command_call(DisplayCommand.set_transform, name, transform)
-            records.append({**common, "transform": transform.to_record()})
+            _validated_command_call(DisplayCommand.set_transform, node_id)
+            records.append(common)
         elif kind == "node-set-parent":
-            parent_name = reader.nullable_string(
-                "parent_name", maximum_bytes=_MAXIMUM_NODE_NAME_BYTES
+            parent_raw = reader.u32("parent Node ID")
+            parent_node_id = (
+                None
+                if parent_raw == _NULL_NODE_ID
+                else reader.validate_node_id(parent_raw, "parent Node ID")
             )
-            _validated_command_call(DisplayCommand.set_parent, name, parent_name)
-            records.append({**common, "parent_name": parent_name})
+            if parent_node_id is not None and parent_node_id >= matrix_pool_size:
+                reader.fail("parent Node ID is outside matrix pool size")
+            _validated_command_call(DisplayCommand.set_parent, node_id, parent_node_id)
+            records.append({**common, "parent_node_id": parent_node_id})
         elif kind == "node-set-visible":
             visible_raw = reader.u8("visibility")
             if visible_raw not in (0, 1):
                 reader.fail("visibility must be zero or one")
             visible = bool(visible_raw)
-            _validated_command_call(DisplayCommand.set_visible, name, visible)
+            _validated_command_call(DisplayCommand.set_visible, node_id, visible)
             records.append({**common, "visible": visible})
         elif kind == "node-set-state":
             state = reader.state(maximum_json_depth=maximum_json_depth)
-            command = _validated_command_call(DisplayCommand.set_state, name, state)
+            command = _validated_command_call(DisplayCommand.set_state, node_id, state)
             records.append({**common, "state": _thaw(command.fields["state"])})
         elif kind == "node-replace-prefab":
             prefab_id = reader.string(
@@ -496,7 +525,7 @@ def decode_display_command_stream_binary(
             )
             state = reader.state(maximum_json_depth=maximum_json_depth)
             command = _validated_command_call(
-                DisplayCommand.replace_prefab, name, prefab_id, state
+                DisplayCommand.replace_prefab, node_id, prefab_id, state
             )
             records.append(
                 {
@@ -506,21 +535,42 @@ def decode_display_command_stream_binary(
                 }
             )
         else:
-            _validated_command_call(DisplayCommand.remove, name)
+            _validated_command_call(DisplayCommand.remove, node_id)
             records.append(common)
+    matrix_targets = sorted(
+        record["node_id"]
+        for record in records
+        if record["kind"] in {"node-create", "node-set-transform"}
+    )
+    if (
+        len(matrix_targets) != len(set(matrix_targets))
+        or len(matrix_targets) != dirty_count
+        or any(
+            target != int(dirty_node_id)
+            for target, dirty_node_id in zip(
+                matrix_targets, dirty_node_ids, strict=True
+            )
+        )
+    ):
+        reader.fail(
+            "dirty Node IDs do not exactly match create/set-transform commands"
+        )
     reader.finish()
 
     return {
         "schema": DISPLAY_COMMAND_STREAM_SCHEMA,
         "base_command_seq": base_command_seq,
         "last_command_seq": last_command_seq,
+        "matrix_pool_size": matrix_pool_size,
+        "dirty_node_ids": dirty_node_ids,
+        "dirty_matrices": dirty_matrices,
         "commands": records,
     }
 
 
 def _checkpoint_semantics(
     value: Any, *, expected_last_command_seq: int, maximum_json_depth: int
-) -> tuple[str, DisplayCatalogIdentity, tuple[_EncodedCheckpointNode, ...]]:
+) -> tuple[str, DisplayCatalogIdentity, np.ndarray, tuple[_EncodedCheckpointNode, ...]]:
     if isinstance(value, ValidatedDisplayCheckpoint):
         if (
             value.last_command_seq != expected_last_command_seq
@@ -530,13 +580,13 @@ def _checkpoint_semantics(
         return (
             value.scene_name,
             value.catalog,
+            value.matrix_pool,
             tuple(
                 _EncodedCheckpointNode(
-                    name=node.name,
-                    parent_name=node.parent_name,
+                    node_id=node.node_id,
+                    parent_node_id=node.parent_node_id,
                     prefab_id=node.prefab_id,
                     flags=_node_flags(node.visible, node.transform_mode),
-                    matrix=_encode_matrix(node.transform),
                     state=_encode_state(
                         node.state, maximum_json_depth=maximum_json_depth
                     ),
@@ -551,6 +601,8 @@ def _checkpoint_semantics(
         "prefab_catalog_hash",
         "state_schema_hash",
         "last_command_seq",
+        "matrix_pool_size",
+        "matrix_pool",
         "nodes",
     }
     if not isinstance(value, Mapping) or set(value) != fields:
@@ -566,56 +618,30 @@ def _checkpoint_semantics(
     last = _safe_integer(value["last_command_seq"], "last_command_seq", ConfigurationError)
     if last != expected_last_command_seq:
         raise ConfigurationError("display checkpoint command cursor is invalid")
-    records = value["nodes"]
-    if not isinstance(records, list):
-        raise ConfigurationError("display checkpoint nodes must be an array")
-    nodes: list[_EncodedCheckpointNode] = []
-    seen: set[str] = set()
-    depths: dict[str, int] = {}
-    node_fields = {
-        "name",
-        "parent_name",
-        "prefab_id",
-        "transform_mode",
-        "transform",
-        "visible",
-        "state",
-    }
-    for record in records:
-        if not isinstance(record, Mapping) or set(record) != node_fields:
-            raise ConfigurationError("display checkpoint Node fields are invalid")
-        name = _validate_authority_name(record["name"], "name", ConfigurationError)
-        parent_name = record["parent_name"]
-        if parent_name is not None:
-            parent_name = _validate_authority_name(
-                parent_name, "parent_name", ConfigurationError
-            )
-        prefab_id = _validate_prefab_id(record["prefab_id"], ConfigurationError)
-        if name in seen:
-            raise ConfigurationError("display checkpoint contains duplicate names")
-        if parent_name is not None and parent_name not in seen:
-            raise ConfigurationError("display checkpoint must be parent-before-child")
-        depth = 1 if parent_name is None else depths[parent_name] + 1
-        if depth > 128:
-            raise ConfigurationError("display checkpoint exceeds maximum Node depth")
-        flags = _node_flags(record["visible"], record["transform_mode"])
-        transform = DisplayTransform.from_record(record["transform"])
-        state = _encode_state(
-            record["state"], maximum_json_depth=maximum_json_depth
+    from .display import validate_display_checkpoint
+
+    semantic_nodes = validate_display_checkpoint(
+        dict(value), expected_last_command_seq=expected_last_command_seq
+    )
+    matrix_pool_size = _uint32(
+        value["matrix_pool_size"], "matrix_pool_size", ConfigurationError
+    )
+    matrix_pool = _semantic_matrix_tensor(
+        value["matrix_pool"], matrix_pool_size, "matrix_pool"
+    )
+    nodes = tuple(
+        _EncodedCheckpointNode(
+            node_id=node.node_id,
+            parent_node_id=node.parent_node_id,
+            prefab_id=_validate_prefab_id(node.prefab_id, ConfigurationError),
+            flags=_node_flags(node.visible, node.transform_mode),
+            state=_encode_state(
+                node.state, maximum_json_depth=maximum_json_depth
+            ),
         )
-        nodes.append(
-            _EncodedCheckpointNode(
-                name=name,
-                parent_name=parent_name,
-                prefab_id=prefab_id,
-                flags=flags,
-                matrix=_encode_matrix(transform),
-                state=state,
-            )
-        )
-        seen.add(name)
-        depths[name] = depth
-    return scene_name, catalog, tuple(nodes)
+        for node in semantic_nodes
+    )
+    return scene_name, catalog, matrix_pool, nodes
 
 
 def _command_stream_semantics(
@@ -624,7 +650,7 @@ def _command_stream_semantics(
     expected_source_tick: int,
     expected_last_command_seq: int,
     maximum_json_depth: int,
-) -> tuple[int, tuple[DisplayCommand, ...]]:
+) -> tuple[int, int, np.ndarray, np.ndarray, tuple[DisplayCommand, ...]]:
     if isinstance(value, ValidatedDisplayCommandStream):
         if (
             value.source_tick != expected_source_tick
@@ -634,9 +660,23 @@ def _command_stream_semantics(
             or value.maximum_json_depth > maximum_json_depth
         ):
             raise ConfigurationError("validated display command stream seal is invalid")
-        return value.base_command_seq, value.commands
+        return (
+            value.base_command_seq,
+            value.matrix_pool_size,
+            value.dirty_node_ids,
+            value.dirty_matrices,
+            value.commands,
+        )
 
-    fields = {"schema", "base_command_seq", "last_command_seq", "commands"}
+    fields = {
+        "schema",
+        "base_command_seq",
+        "last_command_seq",
+        "matrix_pool_size",
+        "dirty_node_ids",
+        "dirty_matrices",
+        "commands",
+    }
     if not isinstance(value, Mapping) or set(value) != fields:
         raise ConfigurationError("display command stream fields are invalid")
     if value["schema"] != DISPLAY_COMMAND_STREAM_SCHEMA:
@@ -645,88 +685,23 @@ def _command_stream_semantics(
     last = _safe_integer(value["last_command_seq"], "last_command_seq", ConfigurationError)
     if last != expected_last_command_seq or last < base:
         raise ConfigurationError("display command stream cursor is invalid")
-    records = value["commands"]
-    if not isinstance(records, (list, tuple)) or len(records) != last - base:
-        raise ConfigurationError("display command stream length is invalid")
+    from .display import validate_display_command_stream
 
-    commands: list[DisplayCommand] = []
-    for ordinal, record in enumerate(records):
-        command_seq = base + ordinal + 1
-        command = _command_from_semantic_record(
-            record,
-            expected_command_seq=command_seq,
-            expected_source_tick=expected_source_tick,
-        )
-        commands.append(command)
-    return base, tuple(commands)
-
-
-def _command_from_semantic_record(
-    value: Any, *, expected_command_seq: int, expected_source_tick: int
-) -> DisplayCommand:
-    common = {"schema", "command_seq", "source_tick", "kind", "name"}
-    fields_by_kind = {
-        "node-create": {
-            "parent_name",
-            "prefab_id",
-            "transform_mode",
-            "transform",
-            "visible",
-            "state",
-        },
-        "node-set-transform": {"transform"},
-        "node-set-parent": {"parent_name"},
-        "node-set-visible": {"visible"},
-        "node-set-state": {"state"},
-        "node-replace-prefab": {"prefab_id", "state"},
-        "node-remove": set(),
-    }
-    if not isinstance(value, Mapping) or not common.issubset(value):
-        raise ConfigurationError("display command record fields are invalid")
-    kind = value["kind"]
-    extra = fields_by_kind.get(kind)
-    if (
-        extra is None
-        or set(value) != common | extra
-        or value["schema"] != DISPLAY_COMMAND_SCHEMA
-    ):
-        raise ConfigurationError("display command record fields are invalid")
-    if (
-        _safe_integer(value["command_seq"], "command_seq", ConfigurationError)
-        != expected_command_seq
-    ):
-        raise ConfigurationError("display command sequence is invalid")
-    if (
-        _safe_integer(value["source_tick"], "source_tick", ConfigurationError)
-        != expected_source_tick
-    ):
-        raise ConfigurationError("display command source_tick is invalid")
-    name = _validate_authority_name(value["name"], "name", ConfigurationError)
-    if kind == "node-create":
-        return DisplayCommand.create_node(
-            DisplayNode(
-                name=name,
-                parent_name=value["parent_name"],
-                prefab_id=value["prefab_id"],
-                transform_mode=value["transform_mode"],
-                transform=value["transform"],
-                visible=value["visible"],
-                state=value["state"],
-            )
-        )
-    if kind == "node-set-transform":
-        return DisplayCommand.set_transform(name, value["transform"])
-    if kind == "node-set-parent":
-        return DisplayCommand.set_parent(name, value["parent_name"])
-    if kind == "node-set-visible":
-        return DisplayCommand.set_visible(name, value["visible"])
-    if kind == "node-set-state":
-        return DisplayCommand.set_state(name, value["state"])
-    if kind == "node-replace-prefab":
-        return DisplayCommand.replace_prefab(
-            name, value["prefab_id"], value["state"]
-        )
-    return DisplayCommand.remove(name)
+    commands = validate_display_command_stream(
+        dict(value),
+        expected_source_tick=expected_source_tick,
+        expected_last_command_seq=expected_last_command_seq,
+    )
+    matrix_pool_size = _uint32(
+        value["matrix_pool_size"], "matrix_pool_size", ConfigurationError
+    )
+    dirty_node_ids = _semantic_uint32_vector(
+        value["dirty_node_ids"], "dirty_node_ids"
+    )
+    dirty_matrices = _semantic_matrix_tensor(
+        value["dirty_matrices"], len(dirty_node_ids), "dirty_matrices"
+    )
+    return base, matrix_pool_size, dirty_node_ids, dirty_matrices, commands
 
 
 def _node_flags(visible: Any, transform_mode: Any) -> int:
@@ -735,12 +710,6 @@ def _node_flags(visible: Any, transform_mode: Any) -> int:
     if transform_mode not in {"initial", "live"}:
         raise ConfigurationError("transform_mode must be initial or live")
     return int(visible) | (_NODE_FLAG_LIVE if transform_mode == "live" else 0)
-
-
-def _encode_matrix(transform: DisplayTransform) -> np.ndarray:
-    if not isinstance(transform, DisplayTransform):
-        raise ConfigurationError("Display transform must be DisplayTransform")
-    return transform._matrix_buffer()
 
 
 def _encode_string(value: Any, field: str, *, maximum_bytes: int) -> bytes:
@@ -753,14 +722,6 @@ def _encode_string(value: Any, field: str, *, maximum_bytes: int) -> bytes:
     if len(encoded) > maximum_bytes or len(encoded) > _MAXIMUM_U16_STRING_BYTES:
         raise ConfigurationError(f"{field} exceeds its UTF-8 byte limit")
     return _U16.pack(len(encoded)) + encoded
-
-
-def _encode_nullable_string(
-    value: Any, field: str, *, maximum_bytes: int
-) -> bytes:
-    if value is None:
-        return _U16.pack(_NULL_STRING_LENGTH)
-    return _encode_string(value, field, maximum_bytes=maximum_bytes)
 
 
 def _encode_state(value: Any, *, maximum_json_depth: int) -> bytes:
@@ -831,14 +792,6 @@ class _Reader:
 
     def string(self, field: str, *, maximum_bytes: int) -> str:
         length = self.u16(f"{field} length")
-        if length == _NULL_STRING_LENGTH or length > maximum_bytes:
-            self.fail(f"{field} length is invalid")
-        return self._decode_string(self.take(length, field), field)
-
-    def nullable_string(self, field: str, *, maximum_bytes: int) -> str | None:
-        length = self.u16(f"{field} length")
-        if length == _NULL_STRING_LENGTH:
-            return None
         if length > maximum_bytes:
             self.fail(f"{field} length is invalid")
         return self._decode_string(self.take(length, field), field)
@@ -857,12 +810,41 @@ class _Reader:
         raw = self.take(length, "state")
         return _decode_state(raw, maximum_json_depth=maximum_json_depth, label=self.label)
 
-    def matrix_transform(self) -> DisplayTransform:
-        raw = self.take(_MATRIX4_F32.size, "matrix")
-        try:
-            return DisplayTransform(matrix_bytes=raw)
-        except ConfigurationError as exc:
-            raise WireError(f"{self.label}: {exc}") from exc
+    def validate_node_id(self, value: int, field: str) -> int:
+        if value > MAXIMUM_NODE_ID:
+            self.fail(f"{field} is invalid")
+        return value
+
+    def node_id(self, field: str) -> int:
+        return self.validate_node_id(self.u32(field), field)
+
+    def matrix_tensor(self, count: int, field: str) -> np.ndarray:
+        if count > self.remaining // _MATRIX4_F32.size:
+            self.fail(f"{field} is truncated")
+        start = self.cursor
+        self.cursor += count * _MATRIX4_F32.size
+        result = np.frombuffer(
+            self.data,
+            dtype="<f4",
+            count=count * 16,
+            offset=start,
+        ).reshape((count, 4, 4))
+        result.flags.writeable = False
+        return result
+
+    def uint32_vector(self, count: int, field: str) -> np.ndarray:
+        if count > self.remaining // _U32.size:
+            self.fail(f"{field} is truncated")
+        start = self.cursor
+        self.cursor += count * _U32.size
+        result = np.frombuffer(
+            self.data,
+            dtype="<u4",
+            count=count,
+            offset=start,
+        )
+        result.flags.writeable = False
+        return result
 
     def finish(self) -> None:
         if self.remaining != 0:
@@ -938,18 +920,75 @@ def _validate_scene_name(
     return value
 
 
-def _validate_authority_name(
+def _uint32(
     value: Any,
     field: str,
     error_type: type[ConfigurationError] | type[WireError],
-) -> str:
-    encoded_length = _utf8_length(value, field, error_type)
-    if (
-        encoded_length > _MAXIMUM_NODE_NAME_BYTES
-        or _AUTHORITY_NAME.fullmatch(value) is None
-    ):
-        _raise(error_type, f"{field} is not a valid authority Node name")
+) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= _MAXIMUM_U32:
+        _raise(error_type, f"{field} must fit uint32")
     return value
+
+
+def _node_id(
+    value: Any,
+    field: str,
+    error_type: type[ConfigurationError] | type[WireError],
+) -> int:
+    result = _uint32(value, field, error_type)
+    if result == _NULL_NODE_ID:
+        _raise(error_type, f"{field} is reserved")
+    return result
+
+
+def _semantic_matrix_tensor(value: Any, count: int, field: str) -> np.ndarray:
+    if (
+        isinstance(value, np.ndarray)
+        and value.shape == (count, 4, 4)
+        and value.dtype == np.dtype("<f4")
+        and value.flags.c_contiguous
+        and not value.flags.writeable
+    ):
+        return value
+    try:
+        result = np.asarray(value, dtype="<f4", order="C")
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ConfigurationError(f"{field} is invalid") from exc
+    if count == 0 and result.shape == (0,):
+        result = result.reshape((0, 4, 4))
+    if result.shape != (count, 4, 4):
+        raise ConfigurationError(f"{field} must have shape ({count}, 4, 4)")
+    result = result.copy(order="C")
+    result.flags.writeable = False
+    return result
+
+
+def _semantic_uint32_vector(value: Any, field: str) -> np.ndarray:
+    if isinstance(value, np.ndarray):
+        if (
+            value.ndim != 1
+            or value.dtype != np.dtype("<u4")
+            or not value.flags.c_contiguous
+        ):
+            raise ConfigurationError(
+                f"{field} must be a one-dimensional contiguous <u4 array"
+            )
+        if not value.flags.writeable:
+            return value
+        result = value.copy(order="C")
+        result.flags.writeable = False
+        return result
+    if not isinstance(value, list):
+        raise ConfigurationError(f"{field} must be an array")
+    result = np.asarray(
+        tuple(
+            _node_id(item, "dirty_node_id", ConfigurationError)
+            for item in value
+        ),
+        dtype="<u4",
+    )
+    result.flags.writeable = False
+    return result
 
 
 def _validate_prefab_id(

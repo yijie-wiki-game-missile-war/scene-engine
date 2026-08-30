@@ -21,6 +21,7 @@ from typing import Any, Iterable
 from scene_engine import (
     DisplayCatalogIdentity,
     DisplayCommand,
+    DisplayMatrixPool,
     DisplayNode,
     DisplayTransform,
     ManualClock,
@@ -44,16 +45,14 @@ WORLD_CODEC = "communication-world@1"
 CLIENT_ID = "python-js-communication"
 FRAME_HEADER = struct.Struct("<I")
 MATRIX4_F32 = struct.Struct("<16f")
-FLOAT32 = struct.Struct("<f")
-TRANSLATION_X_OFFSET = 12 * FLOAT32.size
 MAXIMUM_FRAME_BYTES = 64 * 1024 * 1024
 DEFAULT_TIMEOUT_SECONDS = 30.0
 PROFILE_ROUNDTRIP = "roundtrip"
 PROFILE_WINDOWED = "windowed"
 PROFILES = (PROFILE_ROUNDTRIP, PROFILE_WINDOWED)
-REPORT_SCHEMA = "scene-engine-python-js-communication@2"
-PEER_REPORT_SCHEMA = "scene-engine-python-js-communication-peer@2"
-TRANSFORM_DIGEST_ENCODING = "node-name-nul-le-f32-matrix16-nul"
+REPORT_SCHEMA = "scene-engine-python-js-communication@3"
+PEER_REPORT_SCHEMA = "scene-engine-python-js-communication-peer@3"
+TRANSFORM_DIGEST_ENCODING = "node-id-u32le-le-f32-matrix16"
 
 
 @dataclass
@@ -64,9 +63,13 @@ class CommunicationWorld:
     total_updates: int = 0
 
     def __post_init__(self) -> None:
-        self.transforms = [
-            display_transform(initial_position(index)) for index in range(self.roots)
-        ]
+        self.matrix_pool = DisplayMatrixPool()
+        node_ids = tuple(
+            self.matrix_pool.append(display_transform(initial_position(index)))
+            for index in range(self.roots)
+        )
+        if node_ids != tuple(range(self.roots)):
+            raise RuntimeError("communication MatrixPool allocated unexpected Node IDs")
         self.position_checksum = 0
 
 
@@ -98,14 +101,9 @@ class CommunicationProgram:
             for ordinal in range(self.updates_per_commit)
         )
         for index in indices:
-            old_x = int(
-                FLOAT32.unpack_from(
-                    world.transforms[index].matrix_bytes,
-                    TRANSLATION_X_OFFSET,
-                )[0]
-            )
+            old_x = int(world.matrix_pool.transform(index).matrix[12])
             position = updated_position(index, context.commit.source_tick)
-            world.transforms[index] = display_transform(position)
+            world.matrix_pool.set(index, display_transform(position))
             world.position_checksum += int(position[0]) - old_x
         world.total_updates += len(indices)
         return MutationResult.changed(indices)
@@ -121,13 +119,13 @@ class CommunicationProgram:
             world_snapshot(world),
             SCENE_NAME,
             self.catalog,
+            world.matrix_pool,
             tuple(
                 DisplayNode(
-                    name=root_name(index),
-                    parent_name=None,
+                    node_id=index,
+                    parent_node_id=None,
                     prefab_id=PREFAB_ID,
                     transform_mode="live",
-                    transform=world.transforms[index],
                     visible=True,
                     state={"index": index},
                 )
@@ -162,10 +160,9 @@ class CommunicationProgram:
                     },
                 ],
             },
+            world.matrix_pool,
             tuple(
-                DisplayCommand.set_transform(
-                    root_name(index), world.transforms[index]
-                )
+                DisplayCommand.set_transform(index)
                 for index in indices
             ),
         )
@@ -445,7 +442,7 @@ def run_benchmark(
             and last_packet.header["commit_seq"] == commits
         )
         exact_ack_bytes = len(ack_lengths) == commits + 1
-        expected_digest = transform_digest(world.transforms)
+        expected_digest = transform_digest(world.matrix_pool)
         elapsed_seconds = max(
             (communication_finished - communication_started) / 1_000_000_000,
             1e-12,
@@ -697,10 +694,6 @@ def display_transform(position: tuple[float, float, float]) -> DisplayTransform:
     )
 
 
-def root_name(index: int) -> str:
-    return f"py/communication-{index:06d}"
-
-
 def world_snapshot(world: CommunicationWorld) -> dict[str, int]:
     return {
         "tick": world.source_tick,
@@ -711,13 +704,12 @@ def world_snapshot(world: CommunicationWorld) -> dict[str, int]:
     }
 
 
-def transform_digest(transforms: list[DisplayTransform]) -> str:
+def transform_digest(matrix_pool: DisplayMatrixPool) -> str:
     digest = hashlib.sha256()
-    for index, transform in enumerate(transforms):
-        digest.update(root_name(index).encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(transform.matrix_bytes)
-        digest.update(b"\0")
+    matrices = matrix_pool.matrices
+    for node_id in range(matrix_pool.size):
+        digest.update(struct.pack("<I", node_id))
+        digest.update(matrices[node_id].tobytes(order="C"))
     return digest.hexdigest()
 
 

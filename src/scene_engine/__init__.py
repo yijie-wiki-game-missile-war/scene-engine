@@ -1,4 +1,4 @@
-"""Scene Engine 0.14: fixed-step world and Display command publication."""
+"""Scene Engine 0.15: fixed-step world and Display command publication."""
 
 from .clock import ManualClock, SystemMonotonicClock
 from .errors import (
@@ -16,6 +16,7 @@ from .errors import (
 from .display import (
     DisplayCatalogIdentity,
     DisplayCommand,
+    DisplayMatrixPool,
     DisplayNode,
     DisplayTransform,
 )
@@ -41,7 +42,7 @@ from .runtime import (
 )
 
 
-__version__ = "0.14.0"
+__version__ = "0.15.0"
 
 __all__ = [
     "CheckpointContext",
@@ -49,6 +50,7 @@ __all__ = [
     "ConfigurationError",
     "DisplayCatalogIdentity",
     "DisplayCommand",
+    "DisplayMatrixPool",
     "DisplayNode",
     "DisplayTransform",
     "EngineCommit",

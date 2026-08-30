@@ -14,12 +14,14 @@ from scene_engine.display import (
     DISPLAY_COMMAND_STREAM_SCHEMA,
     DisplayCatalogIdentity,
     DisplayCommand,
+    DisplayMatrixPool,
     DisplayNode,
     DisplayTransform,
     encode_display_checkpoint,
     encode_display_command_stream,
     validate_display_command_stream,
 )
+from scene_engine.display_binary import encode_display_command_stream_binary
 from scene_engine.errors import ConfigurationError
 
 
@@ -51,90 +53,231 @@ def transform(x: float = 0.0) -> DisplayTransform:
     )
 
 
-def node(name: str, *, parent_name: str | None = None) -> DisplayNode:
+def node(node_id: int, *, parent_node_id: int | None = None) -> DisplayNode:
     return DisplayNode(
-        name=name,
-        parent_name=parent_name,
+        node_id=node_id,
+        parent_node_id=parent_node_id,
         prefab_id="flight.aircraft/prefab@1",
         transform_mode="live",
-        transform=transform(),
         visible=True,
         state={"animation": {"state": "idle", "start_tick": 0}},
     )
 
 
-def test_checkpoint_is_a_typed_parent_first_seal_and_retains_nodes() -> None:
-    parent = node("py/carrier-3")
-    child = node("py/aircraft-17", parent_name="py/carrier-3")
+def test_checkpoint_is_a_typed_parent_first_full_pool_snapshot() -> None:
+    pool = DisplayMatrixPool()
+    parent_id = pool.append(transform())
+    child_id = pool.append(transform(4.0))
+    parent = node(parent_id)
+    child = node(child_id, parent_node_id=parent_id)
     result = encode_display_checkpoint(
         scene_name="main",
         catalog=DisplayCatalogIdentity(HASH_A, HASH_B, HASH_C),
         last_command_seq=41,
+        matrix_pool=pool,
         nodes=(parent, child),
     )
 
     assert result.scene_name == "main"
     assert result.last_command_seq == 41
+    assert result.matrix_pool_size == 2
+    assert result.matrix_pool.shape == (2, 4, 4)
+    assert result.matrix_pool.dtype == np.dtype("<f4")
+    assert result.matrix_pool.flags.c_contiguous
+    assert not result.matrix_pool.flags.writeable
     assert result.nodes == (parent, child)
     assert result.nodes[0] is parent
     record = result.to_record()
     assert record["schema"] == DISPLAY_CHECKPOINT_SCHEMA
-    assert [item["name"] for item in record["nodes"]] == [
-        "py/carrier-3",
-        "py/aircraft-17",
-    ]
-    assert record["nodes"][0]["transform"][12:15] == [0.0, 2.0, 3.0]
+    assert [item["node_id"] for item in record["nodes"]] == [0, 1]
+    assert "transform" not in record["nodes"][0]
+    assert np.asarray(record["matrix_pool"], dtype="<f4").shape == (2, 4, 4)
 
 
-def test_checkpoint_rejects_duplicate_missing_parent_and_invalid_authority_names() -> None:
+def test_checkpoint_rejects_duplicate_missing_parent_and_pool_mismatch() -> None:
     catalog = DisplayCatalogIdentity(HASH_A, HASH_B, HASH_C)
+    pool = DisplayMatrixPool()
+    pool.append(transform())
     with pytest.raises(ConfigurationError, match="duplicate"):
         encode_display_checkpoint(
             scene_name="main",
             catalog=catalog,
             last_command_seq=0,
-            nodes=(node("py/a"), node("py/a")),
+            matrix_pool=pool,
+            nodes=(node(0), node(0)),
         )
     with pytest.raises(ConfigurationError, match="parent-before-child"):
         encode_display_checkpoint(
             scene_name="main",
             catalog=catalog,
             last_command_seq=0,
-            nodes=(node("py/a", parent_name="py/missing"),),
+            matrix_pool=pool,
+            nodes=(node(0, parent_node_id=1),),
         )
-    with pytest.raises(ConfigurationError, match="py/"):
-        node("scene/main/a")
+    pool.append(transform())
+    with pytest.raises(ConfigurationError, match="exactly match"):
+        encode_display_checkpoint(
+            scene_name="main",
+            catalog=catalog,
+            last_command_seq=0,
+            matrix_pool=pool,
+            nodes=(node(0),),
+        )
 
 
-def test_command_stream_assigns_one_strict_sequence_per_single_target_record() -> None:
+def test_matrix_pool_is_contiguous_monotonic_and_retirement_never_reuses_ids() -> None:
+    pool = DisplayMatrixPool()
+    first = pool.append(transform(1.0))
+    second = pool.append(transform(2.0))
+
+    assert (first, second) == (0, 1)
+    assert len(pool) == pool.size == 2
+    matrices = pool.matrices
+    assert matrices.shape == (2, 4, 4)
+    assert matrices.dtype == np.dtype("<f4")
+    assert matrices.flags.c_contiguous
+    assert not matrices.flags.writeable
+    assert matrices[1].tobytes() == transform(2.0).matrix_bytes
+
+    checkpoint = encode_display_checkpoint(
+        scene_name="main",
+        catalog=DisplayCatalogIdentity(HASH_A, HASH_B, HASH_C),
+        last_command_seq=0,
+        matrix_pool=pool,
+        nodes=(node(first), node(second)),
+    )
+    checkpoint.confirm_published()
+    pool.retire(first)
+    assert np.array_equal(pool.matrices[first].view("<u4"), np.zeros((4, 4), "<u4"))
+    with pytest.raises(ConfigurationError, match="retired"):
+        pool.set(first, transform())
+    with pytest.raises(ConfigurationError, match="retired"):
+        pool.transform(first)
+    third = pool.append(transform(3.0))
+    assert third == 2
+    with pytest.raises(ConfigurationError, match="published"):
+        pool.retire(third)
+
+
+def test_matrix_pool_public_snapshot_cannot_bypass_dirty_tracking() -> None:
+    pool = DisplayMatrixPool()
+    node_id = pool.append(transform(1.0))
+    checkpoint = encode_display_checkpoint(
+        scene_name="main",
+        catalog=DisplayCatalogIdentity(HASH_A, HASH_B, HASH_C),
+        last_command_seq=0,
+        matrix_pool=pool,
+        nodes=(node(node_id),),
+    )
+    checkpoint.confirm_published()
+
+    exposed = pool.matrices
+    with pytest.raises(ValueError):
+        exposed.flags.writeable = True
+    assert pool.transform(node_id).matrix_bytes == transform(1.0).matrix_bytes
+    stream, _ = encode_display_command_stream(
+        base_command_seq=0,
+        source_tick=1,
+        matrix_pool=pool,
+        commands=(),
+    )
+    assert stream.dirty_node_ids.tolist() == []
+
+
+def test_command_stream_assigns_sequences_and_gathers_sorted_dirty_rows() -> None:
+    pool = DisplayMatrixPool()
+    existing_id = pool.append(transform())
+    checkpoint = encode_display_checkpoint(
+        scene_name="main",
+        catalog=DisplayCatalogIdentity(HASH_A, HASH_B, HASH_C),
+        last_command_seq=7,
+        matrix_pool=pool,
+        nodes=(node(existing_id),),
+    )
+    checkpoint.confirm_published()
+    created_id = pool.append(transform(8.0))
+    pool.set(existing_id, transform(9.0))
     commands = (
-        DisplayCommand.create_node(node("py/aircraft-17")),
-        DisplayCommand.set_transform("py/aircraft-17", transform(9.0)),
-        DisplayCommand.set_state("py/aircraft-17", {"animation": {"state": "move"}}),
-        DisplayCommand.remove("py/aircraft-17"),
+        DisplayCommand.create_node(node(created_id, parent_node_id=existing_id)),
+        DisplayCommand.set_transform(existing_id),
+        DisplayCommand.set_state(created_id, {"animation": {"state": "move"}}),
     )
     result, cursor = encode_display_command_stream(
         base_command_seq=7,
         source_tick=60,
+        matrix_pool=pool,
         commands=commands,
     )
 
-    assert result.base_command_seq == 7
-    assert result.last_command_seq == cursor == 11
+    assert result.last_command_seq == cursor == 10
     assert result.commands == commands
-    assert result.commands[1] is commands[1]
+    assert result.dirty_node_ids.tolist() == [existing_id, created_id]
+    assert result.dirty_matrices.shape == (2, 4, 4)
+    assert result.dirty_matrices[0].tobytes() == transform(9.0).matrix_bytes
+    assert result.dirty_matrices[1].tobytes() == transform(8.0).matrix_bytes
     records = result.to_record()["commands"]
-    assert [item["command_seq"] for item in records] == [8, 9, 10, 11]
+    assert [item["command_seq"] for item in records] == [8, 9, 10]
     assert {item["source_tick"] for item in records} == {60}
     assert all(item["schema"] == DISPLAY_COMMAND_SCHEMA for item in records)
-    assert all(isinstance(item["name"], str) for item in records)
-    assert not any("nodes" in item for item in records)
+    assert [item["node_id"] for item in records] == [created_id, existing_id, created_id]
+    assert not any("transform" in item for item in records)
+    assert result.maximum_json_depth == 2
+    encode_display_command_stream_binary(
+        result,
+        expected_source_tick=60,
+        expected_last_command_seq=cursor,
+        maximum_json_depth=2,
+    )
+    with pytest.raises(ConfigurationError, match="seal is invalid"):
+        encode_display_command_stream_binary(
+            result,
+            expected_source_tick=60,
+            expected_last_command_seq=cursor,
+            maximum_json_depth=1,
+        )
 
 
-def test_mutation_command_construction_trusts_target_but_decoded_records_validate_it() -> None:
-    target = "product-owned-target"
+def test_command_lifecycle_rejects_uncreated_set_transform_and_duplicate_remove() -> None:
+    pool = DisplayMatrixPool()
+    existing_id = pool.append(transform())
+    checkpoint = encode_display_checkpoint(
+        scene_name="main",
+        catalog=DisplayCatalogIdentity(HASH_A, HASH_B, HASH_C),
+        last_command_seq=0,
+        matrix_pool=pool,
+        nodes=(node(existing_id),),
+    )
+    checkpoint.confirm_published()
+    pending_id = pool.append(transform())
+    with pytest.raises(ConfigurationError, match="not active"):
+        encode_display_command_stream(
+            base_command_seq=0,
+            source_tick=1,
+            matrix_pool=pool,
+            commands=(DisplayCommand.set_transform(pending_id),),
+        )
+
+    pool.retire(existing_id)
+    removed, _ = encode_display_command_stream(
+        base_command_seq=0,
+        source_tick=1,
+        matrix_pool=pool,
+        commands=(DisplayCommand.create_node(node(pending_id)), DisplayCommand.remove(existing_id)),
+    )
+    removed.confirm_published()
+    with pytest.raises(ConfigurationError, match="not active"):
+        encode_display_command_stream(
+            base_command_seq=2,
+            source_tick=2,
+            matrix_pool=pool,
+            commands=(DisplayCommand.remove(existing_id),),
+        )
+
+
+def test_mutation_command_construction_uses_uint32_node_ids() -> None:
+    target = 17
     commands = (
-        DisplayCommand.set_transform(target, DisplayTransform.identity()),
+        DisplayCommand.set_transform(target),
         DisplayCommand.set_parent(target, None),
         DisplayCommand.set_visible(target, False),
         DisplayCommand.set_state(target, {}),
@@ -142,43 +285,42 @@ def test_mutation_command_construction_trusts_target_but_decoded_records_validat
         DisplayCommand.remove(target),
     )
 
-    assert {command.name for command in commands} == {target}
-    with pytest.raises(ConfigurationError, match="target name must be a string"):
+    assert {command.node_id for command in commands} == {target}
+    with pytest.raises(ConfigurationError, match="uint32"):
         DisplayCommand.remove([])  # type: ignore[arg-type]
-    record = commands[0].to_record(command_seq=1, source_tick=1)
-    with pytest.raises(ConfigurationError, match="Node prefix"):
-        validate_display_command_stream(
-            {
-                "schema": DISPLAY_COMMAND_STREAM_SCHEMA,
-                "base_command_seq": 0,
-                "last_command_seq": 1,
-                "commands": [record],
-            },
-            expected_source_tick=1,
-            expected_last_command_seq=1,
-        )
 
 
 def test_empty_command_stream_keeps_cursor_but_still_forms_a_commit_seal() -> None:
+    pool = DisplayMatrixPool()
     result, cursor = encode_display_command_stream(
         base_command_seq=12,
         source_tick=90,
+        matrix_pool=pool,
         commands=(),
     )
     assert result.to_record() == {
         "schema": DISPLAY_COMMAND_STREAM_SCHEMA,
         "base_command_seq": 12,
         "last_command_seq": 12,
+        "matrix_pool_size": 0,
+        "dirty_node_ids": [],
+        "dirty_matrices": [],
         "commands": [],
     }
     assert cursor == 12
+    assert validate_display_command_stream(
+        result.to_record(), expected_source_tick=90, expected_last_command_seq=12
+    ) == ()
 
 
 def test_encoded_command_stream_is_recursively_immutable() -> None:
+    pool = DisplayMatrixPool()
+    node_id = pool.append(transform())
     result, _ = encode_display_command_stream(
         base_command_seq=0,
         source_tick=1,
-        commands=(DisplayCommand.set_transform("py/a", transform()),),
+        matrix_pool=pool,
+        commands=(DisplayCommand.create_node(node(node_id)),),
     )
 
     with pytest.raises((AttributeError, TypeError)):
@@ -186,21 +328,21 @@ def test_encoded_command_stream_is_recursively_immutable() -> None:
     with pytest.raises(AttributeError):
         result.commands.append({})
     with pytest.raises(TypeError):
-        result.commands[0].fields["name"] = "py/b"
-    with pytest.raises(AttributeError):
-        result.commands[0].fields["transform"].matrix.append(4.0)
+        result.commands[0].fields["state"] = {}
+    with pytest.raises(ValueError, match="read-only"):
+        result.dirty_matrices[0, 0, 0] = 4.0
 
 
 def test_command_shapes_state_and_transform_are_closed_and_owned() -> None:
     state = {"selected": False, "parts": [1, 2]}
-    command = DisplayCommand.set_state("py/aircraft-17", state)
+    command = DisplayCommand.set_state(17, state)
     state["selected"] = True
     state["parts"].append(3)
     record = command.to_record(command_seq=1, source_tick=0)
     assert record["state"] == {"selected": False, "parts": [1, 2]}
 
     with pytest.raises(ConfigurationError, match="named constructor"):
-        DisplayCommand(kind="node-remove", name="py/a", visible=True)
+        DisplayCommand(kind="node-remove", node_id=0, visible=True)
     with pytest.raises(TypeError):
         DisplayTransform(
             position=(0, 0, 0),
@@ -218,14 +360,14 @@ def test_command_shapes_state_and_transform_are_closed_and_owned() -> None:
 
 
 def test_state_update_is_complete_replacement_not_a_merge_patch() -> None:
-    command = DisplayCommand.set_state("py/a", {"mode": "ready"})
+    command = DisplayCommand.set_state(0, {"mode": "ready"})
     record = command.to_record(command_seq=1, source_tick=2)
     assert set(record) == {
         "schema",
         "command_seq",
         "source_tick",
         "kind",
-        "name",
+        "node_id",
         "state",
     }
     assert record["state"] == {"mode": "ready"}
@@ -259,15 +401,65 @@ def test_matrix_pack_owns_binary32_bits_without_semantic_normalization() -> None
     assert all(bits[index] == 0x80000000 for index in (1, 3, 6, 11))
     assert all(bits[index] == 0 for index in (2, 7, 8, 9))
     assert value.to_record() == list(value.matrix)
-    command = DisplayCommand.set_transform("py/a", value)
+
+
+def test_failed_binary_encode_does_not_clear_dirty_snapshot() -> None:
+    pool = DisplayMatrixPool()
+    node_id = pool.append(transform())
     stream, _ = encode_display_command_stream(
         base_command_seq=0,
         source_tick=1,
-        commands=(command,),
+        matrix_pool=pool,
+        commands=(DisplayCommand.create_node(node(node_id)),),
     )
-    assert command.fields["transform"] is value
-    assert stream.commands[0] is command
-    assert stream.commands[0].fields["transform"] is value
+    with pytest.raises(ConfigurationError, match="invalid"):
+        encode_display_command_stream_binary(stream, 1, 2)
+    retry, _ = encode_display_command_stream(
+        base_command_seq=0,
+        source_tick=1,
+        matrix_pool=pool,
+        commands=(DisplayCommand.create_node(node(node_id)),),
+    )
+    assert retry.dirty_node_ids.tolist() == [node_id]
+    retry.confirm_published()
+    empty, _ = encode_display_command_stream(
+        base_command_seq=1,
+        source_tick=2,
+        matrix_pool=pool,
+        commands=(),
+    )
+    assert empty.dirty_node_ids.tolist() == []
+
+
+def test_stale_publish_token_cannot_clear_a_newer_pool_mutation() -> None:
+    pool = DisplayMatrixPool()
+    node_id = pool.append(transform())
+    baseline = encode_display_checkpoint(
+        scene_name="main",
+        catalog=DisplayCatalogIdentity(HASH_A, HASH_B, HASH_C),
+        last_command_seq=0,
+        matrix_pool=pool,
+        nodes=(node(node_id),),
+    )
+    baseline.confirm_published()
+    pool.set(node_id, transform(1.0))
+    stale, _ = encode_display_command_stream(
+        base_command_seq=0,
+        source_tick=1,
+        matrix_pool=pool,
+        commands=(DisplayCommand.set_transform(node_id),),
+    )
+    pool.set(node_id, transform(2.0))
+
+    with pytest.raises(ConfigurationError, match="changed after"):
+        stale.confirm_published()
+    retry, _ = encode_display_command_stream(
+        base_command_seq=0,
+        source_tick=1,
+        matrix_pool=pool,
+        commands=(DisplayCommand.set_transform(node_id),),
+    )
+    assert retry.dirty_matrices[0].tobytes() == transform(2.0).matrix_bytes
 
 
 def test_matrix_bytes_are_retained_exactly_without_semantic_validation() -> None:
@@ -298,6 +490,38 @@ def test_matrix_bytes_are_retained_exactly_without_semantic_validation() -> None
     assert value.matrix[1] == 0.0
     assert math.copysign(1.0, value.matrix[1]) == -1.0
     assert math.isinf(value.matrix[2])
+
+
+def test_matrix_pool_transform_returns_an_exact_detached_readonly_snapshot() -> None:
+    raw_bits = (
+        0x7F801234,
+        0x80000000,
+        0x3F800000,
+        0,
+        0,
+        0x3F800000,
+        0,
+        0,
+        0,
+        0,
+        0x3F800000,
+        0,
+        0,
+        0,
+        0,
+        0x3F800000,
+    )
+    pool = DisplayMatrixPool()
+    node_id = pool.append(DisplayTransform(matrix_bytes=struct.pack("<16I", *raw_bits)))
+
+    snapshot = pool.transform(node_id)
+    pool.set(node_id, transform(9.0))
+
+    assert struct.unpack("<16I", snapshot.matrix_bytes) == raw_bits
+    assert snapshot.matrix_bytes != pool.transform(node_id).matrix_bytes
+    assert snapshot._matrix.flags.f_contiguous
+    assert snapshot._matrix.flags.owndata
+    assert not snapshot._matrix.flags.writeable
 
 
 def test_matrix_has_one_owned_readonly_fortran_float32_representation() -> None:

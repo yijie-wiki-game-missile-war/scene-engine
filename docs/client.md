@@ -1,6 +1,6 @@
-# JavaScript Client 0.12
+# JavaScript Client 0.13
 
-`@scene-engine/client@0.12.0` is the only browser packet decoder, immutable WorldState owner, cumulative ACK barrier and Display
+`@scene-engine/client@0.13.0` is the only browser packet decoder, immutable WorldState owner, cumulative ACK barrier and Display
 session bridge. Its root exports:
 
 ```text
@@ -23,6 +23,7 @@ The constructor requires synchronous `createDisplaySession(metadata)`. The retur
 runtime
   catalogIdentity / installScene / activate / start / summary / currentView
 authorityPort
+  installNodeMatrixPool / applyNodeTransformBatch
   createNode / setNodeTransform / setNodeParent / setNodeVisible / setNodeState / replaceNodePrefab / removeNode
 commitGate
   begin / seal / fail
@@ -38,15 +39,21 @@ of them fails closed. Cleanup is deliberately different: `dispose` and error-pat
 Client observes it only to suppress an unhandled rejection and never waits for it before replacement, failure propagation, or
 ACK handling.
 
+`applyPacket` runs to completion. Reentry from a synchronous acceptance callback is rejected, poisons the Client and emits no ACK.
+Reentry attempted by the previous session's post-swap `dispose` cleanup is also rejected, but cleanup cannot roll back or poison the
+already completed replacement.
+
 ## Checkpoint
 
 Checkpoint processing:
 
-1. validates the packet, World snapshot and parent-first binary Display baseline, including every float32 matrix;
+1. validates the packet, World snapshot, numeric IDs and parent-first binary Display metadata, including every active float32
+   matrix row; for a later checkpoint in the same stream it also rejects pool shrinkage or resurrection of any historical
+   tombstone ID;
 2. creates a fresh candidate session;
 3. reads `runtime.catalogIdentity()` and compares all three SHA-256 values with the checkpoint;
 4. installs `sceneName` only after identity matches;
-5. creates every authority root parent-first;
+5. transfers the one owned full matrix tensor, then creates every authority root parent-first by ID;
 6. activates the exact cursor and starts the runtime;
 7. reads O(1) summary and builds ACK bytes;
 8. atomically swaps session, WorldState and cursors;
@@ -57,11 +64,15 @@ cannot partially install the wrong Scene.
 
 ## Commit
 
-Commit processing validates the complete command stream and next immutable World before it opens the Display gate. It then:
+Commit processing validates the complete command stream and next immutable World before it opens the Display gate. Pool size
+cannot shrink; every newly allocated suffix ID must have a dirty row and create command, so a small packet cannot request an
+unrelated large resident allocation. The SDCS codec also rejects more than `65,536` commands per payload before constructing
+the command list; the fixed protocol bound is deliberately not configurable through `EngineLimits`. It then:
 
 ```text
 commitGate.begin(cursor)
-  -> one AuthorityPort call per command
+  -> one applyNodeTransformBatch call to stage the sorted dirty IDs and contiguous matrix tensor
+  -> ordered AuthorityPort calls by nodeId; create/set-transform consumes its staged row at that sequence position
 commitGate.seal(cursor)
   -> publish WorldState and cursors
   -> runtime.summary()
@@ -100,7 +111,9 @@ Use:
 Replay feeds exact recorded Engine packet bytes through the same `applyPacket` and AuthorityPort path. The Client owns no second
 Node graph or Transform cache.
 
-The Client reads every local Matrix4 directly into an owned Float32Array and is the first semantic acceptance gate for Python's
-opaque 64-byte payload. It validates the finite affine/right-handed contract, canonicalizes negative zero, and passes that
-matrix to Authority without TRS decomposition. Packet storage is never aliased: mutating or releasing the input packet after
-`applyPacket` cannot alter an installed Node. Display then copies the value into its own private local matrix owner.
+The Client reads a checkpoint `(n,4,4)` tensor or commit `(m,4,4)` dirty tensor into exactly one owned Float32Array and is the
+first semantic acceptance gate for Python's opaque float32 payload. It validates each active/dirty row's finite
+affine/right-handed contract, canonicalizes negative zero, and transfers the tensor to Authority without TRS decomposition.
+Packet storage is never aliased: mutating or releasing the input packet after `applyPacket` cannot alter the installed matrix
+pool. A commit transfers one pool batch; create/set-transform consumes rows by ID without placing matrix bytes back in command
+objects, so command-observable order remains unchanged.

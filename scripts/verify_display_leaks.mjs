@@ -85,7 +85,9 @@ const RESOURCES = Object.freeze([
   }),
 ]);
 
-function commitAuthority(runtime, cursor, mutation) {
+const authorityMatrixPoolSizes = new WeakMap();
+
+function commitAuthority(runtime, cursor, mutation, { matrixRows = [] } = {}) {
   const next = Object.freeze({
     commitSeq: cursor.commitSeq + 1,
     sourceTick: cursor.sourceTick + 1,
@@ -93,6 +95,7 @@ function commitAuthority(runtime, cursor, mutation) {
   });
   runtime.commitGate.begin(next);
   try {
+    stageAuthorityMatrices(runtime, matrixRows);
     mutation();
     runtime.commitGate.seal(next);
     Object.assign(cursor, next);
@@ -100,6 +103,53 @@ function commitAuthority(runtime, cursor, mutation) {
     runtime.commitGate.fail(error);
     throw error;
   }
+}
+
+function installEmptyAuthorityMatrixPool(runtime) {
+  runtime.authority.installNodeMatrixPool({
+    poolSize: 0,
+    matrices: new Float32Array(),
+  });
+  authorityMatrixPoolSizes.set(runtime, 0);
+}
+
+function stageAuthorityMatrices(runtime, matrixRows) {
+  const currentPoolSize = authorityMatrixPoolSizes.get(runtime);
+  if (currentPoolSize === undefined) throw new Error('authority matrix pool is not installed');
+  const rows = [...matrixRows].sort(([left], [right]) => left - right);
+  const nodeIds = new Uint32Array(rows.length);
+  const matrices = new Float32Array(rows.length * 16);
+  let previous = -1;
+  for (let index = 0; index < rows.length; index += 1) {
+    const [nodeId, matrix] = rows[index];
+    if (!Number.isSafeInteger(nodeId) || nodeId < 0 || nodeId <= previous) {
+      throw new Error(`invalid authority matrix row: ${nodeId}`);
+    }
+    if (matrix.length !== 16) throw new Error('authority matrix must contain 16 values');
+    nodeIds[index] = nodeId;
+    matrices.set(matrix, index * 16);
+    previous = nodeId;
+  }
+  const poolSize = rows.length === 0
+    ? currentPoolSize
+    : Math.max(currentPoolSize, nodeIds.at(-1) + 1);
+  runtime.authority.applyNodeTransformBatch({
+    poolSize,
+    nodeIds,
+    matrices,
+  });
+  authorityMatrixPoolSizes.set(runtime, poolSize);
+}
+
+function createAuthorityNode(runtime, { nodeId, prefabId, state = {} }) {
+  return runtime.authority.createNode({
+    nodeId,
+    parentNodeId: null,
+    prefabId,
+    transformMode: 'live',
+    visible: true,
+    state,
+  });
 }
 
 const originalImageBitmap = globalThis.createImageBitmap;
@@ -219,6 +269,7 @@ async function verifyAuthorityAndRebuildLifecycle() {
     onHealth: (event) => healthEvents.push(event),
   });
   runtime.installScene({ sceneName: 'main' });
+  installEmptyAuthorityMatrixPool(runtime);
   runtime.activate();
   await runtime.whenReady();
 
@@ -229,18 +280,13 @@ async function verifyAuthorityAndRebuildLifecycle() {
   let previousRoot = null;
   let previousMeshComponent = null;
   for (let cycle = 0; cycle < 100; cycle += 1) {
-    commitAuthority(runtime, authorityCursor, () => runtime.authority.createNode({
-      name: 'py/leak-cycle',
-      parentName: null,
+    commitAuthority(runtime, authorityCursor, () => createAuthorityNode(runtime, {
+      nodeId: cycle,
       prefabId: prefab.id,
-      transformMode: 'live',
-      transform: IDENTITY,
-      visible: true,
-      state: {},
-    }));
+    }), { matrixRows: [[cycle, IDENTITY]] });
     await runtime.whenReady();
-    const root = runtime._nodeIndex.require('py/leak-cycle');
-    const visual = runtime._nodeIndex.require('prefab/py/leak-cycle/visual');
+    const root = runtime._nodeIndex.require(`py/${cycle}`);
+    const visual = runtime._nodeIndex.require(`prefab/py/${cycle}/visual`);
     const meshComponent = visual.requireComponent('mesh');
     assert.notStrictEqual(root, previousRoot, 'authority Node identity must never be resurrected');
     assert.notStrictEqual(meshComponent, previousMeshComponent,
@@ -256,7 +302,7 @@ async function verifyAuthorityAndRebuildLifecycle() {
     previousRoot = root;
     previousMeshComponent = meshComponent;
     commitAuthority(runtime, authorityCursor,
-      () => runtime.authority.removeNode({ name: 'py/leak-cycle' }));
+      () => runtime.authority.removeNode({ nodeId: cycle }));
     await runtime.whenReady();
     assert.deepEqual(runtimeMetrics(runtime, backends.at(-1).backend, frames), baseline,
       `authority lifecycle ${cycle + 1} failed to return to baseline`);
@@ -319,7 +365,8 @@ async function verifyAuthorityAndRebuildLifecycle() {
   return {
     authority: {
       cycles: 100,
-      canonicalName: 'py/leak-cycle',
+      canonicalNameDomain: 'py/<nodeId>',
+      nodeIdRange: [0, 99],
       distinctNodeIdentities: 100,
       distinctComponentIdentities: 100,
       baseline,
@@ -406,18 +453,19 @@ async function verifyAnimationPlayerLifecycle() {
     frameAdapter: frames,
   });
   runtime.installScene({ sceneName: 'main' });
+  installEmptyAuthorityMatrixPool(runtime);
   runtime.activate();
   await runtime.whenReady();
   runtime.start();
 
   const cursor = { commitSeq: 0, sourceTick: 0, lastCommandSeq: 0 };
   for (let cycle = 0; cycle < 25; cycle += 1) {
-    commitAuthority(runtime, cursor, () => runtime.authority.createNode({
-      name: 'py/anim-leak', parentName: null, prefabId: prefab.id,
-      transformMode: 'live', transform: IDENTITY, visible: true, state: {},
-    }));
+    commitAuthority(runtime, cursor, () => createAuthorityNode(runtime, {
+      nodeId: cycle,
+      prefabId: prefab.id,
+    }), { matrixRows: [[cycle, IDENTITY]] });
     await runtime.whenReady();
-    const sprite = runtime._nodeIndex.require('prefab/py/anim-leak/visual')
+    const sprite = runtime._nodeIndex.require(`prefab/py/${cycle}/visual`)
       .requireComponent('sprite');
     assert.equal(runtime._animationSystem._players.size, 1);
     assert.equal(runtime._animationSystem._outputOwners.size, 1);
@@ -426,7 +474,7 @@ async function verifyAnimationPlayerLifecycle() {
       'the running animation must own a transient override');
     frames.step(32);
     commitAuthority(runtime, cursor,
-      () => runtime.authority.removeNode({ name: 'py/anim-leak' }));
+      () => runtime.authority.removeNode({ nodeId: cycle }));
     await runtime.whenReady();
     assert.equal(runtime._animationSystem._players.size, 0,
       `cycle ${cycle + 1} kept a disposed animation player`);
@@ -608,14 +656,15 @@ async function verifyPendingBindingDispose() {
     frameAdapter: frames,
   });
   runtime.installScene({ sceneName: 'main' });
+  installEmptyAuthorityMatrixPool(runtime);
   runtime.activate();
   await runtime.whenReady();
   const baseline = runtimeMetrics(runtime, backendRows[0].backend, frames);
   const authorityCursor = { commitSeq: 0, sourceTick: 0, lastCommandSeq: 0 };
-  commitAuthority(runtime, authorityCursor, () => runtime.authority.createNode({
-    name: 'py/pending', parentName: null, prefabId: prefab.id,
-    transformMode: 'live', transform: IDENTITY, visible: true, state: {},
-  }));
+  commitAuthority(runtime, authorityCursor, () => createAuthorityNode(runtime, {
+    nodeId: 0,
+    prefabId: prefab.id,
+  }), { matrixRows: [[0, IDENTITY]] });
   await loadStarted;
   const pendingBeforeDispose = runtimeMetrics(runtime, backendRows[0].backend, frames);
   assert.equal(pendingBeforeDispose.pendingBindingCount, 1);

@@ -26,19 +26,26 @@ function transform(x = 0) {
   ]);
 }
 
-function createRecord(name, x = 0) {
+function createRecord(nodeId) {
   return {
-    name,
-    parent_name: null,
+    node_id: nodeId,
+    parent_node_id: null,
     prefab_id: 'benchmark.node',
     transform_mode: 'live',
-    transform: transform(x),
     visible: true,
     state: {},
   };
 }
 
-function checkpointPacket(nodes) {
+function matrixTensor(entries) {
+  const matrices = new Float32Array(entries.length * 16);
+  entries.forEach(({ nodeId, x }, index) => matrices.set(transform(x ?? nodeId), index * 16));
+  return matrices;
+}
+
+function checkpointPacket(nodes, matrixPoolSize) {
+  const matrices = new Float32Array(matrixPoolSize * 16);
+  for (const node of nodes) matrices.set(transform(node.node_id), node.node_id * 16);
   return encodePacket('engine.checkpoint', {
     schema: 'scene-engine-wire@3',
     type: 'engine.checkpoint',
@@ -59,19 +66,28 @@ function checkpointPacket(nodes) {
       kind: 'display_checkpoint',
       encoding: 'raw',
       value: encodeDisplayCheckpoint({
-        schema: 'scene-engine-display-checkpoint@5',
+        schema: 'scene-engine-display-checkpoint@6',
         scene_name: 'benchmark',
         ...HASHES,
         last_command_seq: 0,
+        matrix_pool_size: matrixPoolSize,
+        matrix_pool: matrices,
         nodes,
       }),
     },
   ]);
 }
 
-function commitPacket({ commitSeq, baseCommandSeq, commands }) {
+function commitPacket({
+  commitSeq,
+  baseCommandSeq,
+  matrixPoolSize,
+  dirtyNodeIds,
+  dirtyMatrices,
+  commands,
+}) {
   const records = commands.map((command, index) => ({
-    schema: 'scene-engine-node-command@5',
+    schema: 'scene-engine-node-command@6',
     command_seq: baseCommandSeq + index + 1,
     source_tick: commitSeq,
     ...command,
@@ -105,9 +121,12 @@ function commitPacket({ commitSeq, baseCommandSeq, commands }) {
       kind: 'display_command_stream',
       encoding: 'raw',
       value: encodeDisplayCommandStream({
-        schema: 'scene-engine-display-command-stream@5',
+        schema: 'scene-engine-display-command-stream@6',
         base_command_seq: baseCommandSeq,
         last_command_seq: lastCommandSeq,
+        matrix_pool_size: matrixPoolSize,
+        dirty_node_ids: dirtyNodeIds,
+        dirty_matrices: dirtyMatrices,
         commands: records,
       }, { sourceTick: commitSeq }),
     },
@@ -117,40 +136,58 @@ function commitPacket({ commitSeq, baseCommandSeq, commands }) {
 function createBenchmarkSessionFactory(state) {
   return () => {
     let pendingCursor = null;
-    const requireNode = (name) => {
-      const node = state.nodes.get(name);
-      if (!node) throw new Error(`benchmark node missing: ${name}`);
+    const requireNode = (nodeId) => {
+      const node = state.nodes.get(nodeId);
+      if (!node) throw new Error(`benchmark node missing: ${nodeId}`);
       return node;
     };
     const authorityPort = {
+      installNodeMatrixPool({ poolSize, matrices }) {
+        if (matrices.length !== poolSize * 16) throw new Error('benchmark matrix pool invalid');
+        state.matrixPool = matrices;
+      },
+      applyNodeTransformBatch({ poolSize, nodeIds, matrices }) {
+        if (nodeIds.length * 16 !== matrices.length) {
+          throw new Error('benchmark transform batch invalid');
+        }
+        if (state.matrixPool.length !== poolSize * 16) {
+          const grown = new Float32Array(poolSize * 16);
+          grown.set(state.matrixPool);
+          state.matrixPool = grown;
+        }
+        nodeIds.forEach((nodeId, index) => {
+          state.matrixPool.set(matrices.subarray(index * 16, (index + 1) * 16), nodeId * 16);
+        });
+      },
       createNode(record) {
-        if (state.nodes.has(record.name)) throw new Error(`benchmark duplicate: ${record.name}`);
-        state.nodes.set(record.name, record);
+        if (state.nodes.has(record.nodeId)) throw new Error(`benchmark duplicate: ${record.nodeId}`);
+        state.nodes.set(record.nodeId, record);
       },
       setNodeTransform(record) {
-        const node = requireNode(record.name);
-        state.nodes.set(record.name, { ...node, transform: record.transform });
+        requireNode(record.nodeId);
       },
       setNodeParent(record) {
-        const node = requireNode(record.name);
-        state.nodes.set(record.name, { ...node, parentName: record.parentName });
+        const node = requireNode(record.nodeId);
+        state.nodes.set(record.nodeId, { ...node, parentNodeId: record.parentNodeId });
       },
       setNodeVisible(record) {
-        const node = requireNode(record.name);
-        state.nodes.set(record.name, { ...node, visible: record.visible });
+        const node = requireNode(record.nodeId);
+        state.nodes.set(record.nodeId, { ...node, visible: record.visible });
       },
       setNodeState(record) {
-        const node = requireNode(record.name);
-        state.nodes.set(record.name, { ...node, state: record.state });
+        const node = requireNode(record.nodeId);
+        state.nodes.set(record.nodeId, { ...node, state: record.state });
       },
       replaceNodePrefab(record) {
-        const node = requireNode(record.name);
-        state.nodes.set(record.name, {
+        const node = requireNode(record.nodeId);
+        state.nodes.set(record.nodeId, {
           ...node, prefabId: record.prefabId, state: record.state,
         });
       },
       removeNode(record) {
-        if (!state.nodes.delete(record.name)) throw new Error(`benchmark node missing: ${record.name}`);
+        if (!state.nodes.delete(record.nodeId)) {
+          throw new Error(`benchmark node missing: ${record.nodeId}`);
+        }
       },
     };
     return {
@@ -195,29 +232,50 @@ function createBenchmarkSessionFactory(state) {
 }
 
 function createScenario(name) {
-  let names = Array.from({ length: NODE_COUNT }, (_, index) => `py/node-${index}`);
-  let nextName = NODE_COUNT;
+  let nodeIds = Array.from({ length: NODE_COUNT }, (_, index) => index);
+  let nextNodeId = NODE_COUNT;
   return {
-    baseline: names.map((nodeName, index) => createRecord(nodeName, index)),
+    baseline: nodeIds.map((nodeId) => createRecord(nodeId)),
+    initialPoolSize: nextNodeId,
     commands(iteration) {
-      if (name === 'steady') return [];
-      if (name === 'motion') {
-        return names.map((nodeName, index) => ({
-          kind: 'node-set-transform',
-          name: nodeName,
-          transform: transform(index + iteration / 1000),
-        }));
+      if (name === 'steady') {
+        return {
+          commands: [],
+          matrixPoolSize: nextNodeId,
+          dirtyNodeIds: new Uint32Array(),
+          dirtyMatrices: new Float32Array(),
+        };
       }
-      const removed = names.splice(0, CHURN_NODE_COUNT);
-      const created = Array.from({ length: CHURN_NODE_COUNT }, () => `py/node-${nextName++}`);
-      names.push(...created);
-      return [
-        ...removed.map((nodeName) => ({ kind: 'node-remove', name: nodeName })),
-        ...created.map((nodeName, index) => ({
-          kind: 'node-create',
-          ...createRecord(nodeName, index),
-        })),
-      ];
+      if (name === 'motion') {
+        const dirtyNodeIds = new Uint32Array(nodeIds);
+        return {
+          commands: nodeIds.map((nodeId) => ({
+            kind: 'node-set-transform',
+            node_id: nodeId,
+          })),
+          matrixPoolSize: nextNodeId,
+          dirtyNodeIds,
+          dirtyMatrices: matrixTensor(nodeIds.map((nodeId) => ({
+            nodeId,
+            x: nodeId + iteration / 1000,
+          }))),
+        };
+      }
+      const removed = nodeIds.splice(0, CHURN_NODE_COUNT);
+      const created = Array.from({ length: CHURN_NODE_COUNT }, () => nextNodeId++);
+      nodeIds.push(...created);
+      return {
+        commands: [
+          ...removed.map((nodeId) => ({ kind: 'node-remove', node_id: nodeId })),
+          ...created.map((nodeId) => ({
+            kind: 'node-create',
+            ...createRecord(nodeId),
+          })),
+        ],
+        matrixPoolSize: nextNodeId,
+        dirtyNodeIds: new Uint32Array(created),
+        dirtyMatrices: matrixTensor(created.map((nodeId, index) => ({ nodeId, x: index }))),
+      };
     },
   };
 }
@@ -238,19 +296,19 @@ function statistics(values) {
 
 function runRound(name) {
   const scenario = createScenario(name);
-  const state = { nodes: new Map(), cursor: null };
+  const state = { nodes: new Map(), matrixPool: new Float32Array(), cursor: null };
   const client = new SceneEngineClient({
     createDisplaySession: createBenchmarkSessionFactory(state),
   });
-  client.applyPacket(checkpointPacket(scenario.baseline));
+  client.applyPacket(checkpointPacket(scenario.baseline, scenario.initialPoolSize));
   let commitSeq = 0;
   let commandSeq = 0;
   let sampledBytes = 0;
   const nextPacket = (iteration) => {
     commitSeq += 1;
-    const commands = scenario.commands(iteration);
-    const packet = commitPacket({ commitSeq, baseCommandSeq: commandSeq, commands });
-    commandSeq += commands.length;
+    const mutation = scenario.commands(iteration);
+    const packet = commitPacket({ commitSeq, baseCommandSeq: commandSeq, ...mutation });
+    commandSeq += mutation.commands.length;
     return packet;
   };
   for (let index = 0; index < options.warmup; index += 1) {
@@ -318,7 +376,7 @@ for (const name of ['steady', 'motion', 'churn-25']) {
 
 const cpuInfo = os.cpus();
 const report = {
-  schema: 'scene-engine-client-authority-perf-500@2',
+  schema: 'scene-engine-client-authority-perf-500@3',
   hardware: {
     platform: os.platform(),
     architecture: os.arch(),

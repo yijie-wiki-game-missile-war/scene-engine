@@ -173,10 +173,10 @@ function dynamicPrefabs({ maximumInstances = 3 } = {}) {
   return { leafA, leafB, outer };
 }
 
-function authorityCommand(name, prefabId, state, transform = IDENTITY) {
+function authorityCommand(nodeId, prefabId, state, transform = IDENTITY) {
   return {
-    name,
-    parentName: null,
+    nodeId,
+    parentNodeId: null,
     prefabId,
     transformMode: 'live',
     transform,
@@ -203,16 +203,16 @@ test('three fixed Prefab levels expand into ordinary Nodes in the one live graph
   t.after(() => runtime.dispose());
 
   commitAuthority(runtime, () => runtime.authority.createNode(
-    authorityCommand('py/fixed', prefabs.outer.id, {}, transformAt(10)),
+    authorityCommand(0, prefabs.outer.id, {}, transformAt(10)),
   ), { sourceTickDelta: 1 });
 
   const names = {
-    owner: 'py/fixed',
-    mount: 'prefab/py/fixed/mount',
-    middle: 'prefab/py/fixed/middle',
-    branch: 'prefab/py/fixed/middle/branch',
-    leaf: 'prefab/py/fixed/middle/leaf',
-    body: 'prefab/py/fixed/middle/leaf/body',
+    owner: 'py/0',
+    mount: 'prefab/py/0/mount',
+    middle: 'prefab/py/0/middle',
+    branch: 'prefab/py/0/middle/branch',
+    leaf: 'prefab/py/0/middle/leaf',
+    body: 'prefab/py/0/middle/leaf/body',
   };
   const view = runtime.currentView();
   assert.equal(view.getNode(names.middle).parentName, names.mount);
@@ -226,7 +226,7 @@ test('three fixed Prefab levels expand into ordinary Nodes in the one live graph
     const node = runtime._nodeIndex.require(name);
     assert.equal(node.constructor.name, 'Node');
     assert.strictEqual(node._graph, runtime._nodeGraph);
-    assert.equal(view.getAuthorityOwner(name), 'py/fixed');
+    assert.equal(view.getAuthorityOwner(name), 'py/0');
   }
   assert.strictEqual(runtime._scene.nodeIndex, runtime._nodeIndex);
   assert.strictEqual(runtime._scene.nodeGraph, runtime._nodeGraph);
@@ -235,7 +235,7 @@ test('three fixed Prefab levels expand into ordinary Nodes in the one live graph
   const leafIdentity = runtime._nodeIndex.require(names.leaf);
   const probeIdentity = runtime._nodeIndex.require(names.body).requireComponent('probe');
   commitAuthority(runtime, () => runtime.authority.setNodeState({
-    name: names.owner,
+    nodeId: 0,
     state: {
       middle: {
         transform: transformAt(8),
@@ -254,7 +254,7 @@ test('three fixed Prefab levels expand into ordinary Nodes in the one live graph
   assert.equal(runtime.currentView().getComponentState(names.body, 'probe').properties.value, 19);
 
   // A missing fixed override restores the declaration baseline, including complete child state.
-  commitAuthority(runtime, () => runtime.authority.setNodeState({ name: names.owner, state: {} }),
+  commitAuthority(runtime, () => runtime.authority.setNodeState({ nodeId: 0, state: {} }),
     { sourceTickDelta: 1 });
   assert.strictEqual(runtime._nodeIndex.require(names.middle), middleIdentity);
   assert.deepEqual(matrixPosition(runtime.currentView().getNode(names.middle).localTransform), [2, 0, 0]);
@@ -270,18 +270,18 @@ test('dynamic Prefab slots reconcile 0..N instances and retain only the same key
       configureComponents: configureProbe,
     });
     t.after(() => runtime.dispose());
-    const owner = 'py/dynamic';
-    const alpha = 'prefab/py/dynamic/units/alpha';
+    const owner = 'py/0';
+    const alpha = 'prefab/py/0/units/alpha';
     const alphaBody = `${alpha}/body`;
-    const bravo = 'prefab/py/dynamic/units/bravo';
+    const bravo = 'prefab/py/0/units/bravo';
 
     commitAuthority(runtime, () => runtime.authority.createNode(
-      authorityCommand(owner, prefabs.outer.id, { units: {} }),
+      authorityCommand(0, prefabs.outer.id, { units: {} }),
     ), { sourceTickDelta: 1 });
     assert.equal(runtime.currentView().getNode(alpha), null);
 
     commitAuthority(runtime, () => runtime.authority.setNodeState({
-      name: owner,
+      nodeId: 0,
       state: {
         units: {
           alpha: {
@@ -296,11 +296,11 @@ test('dynamic Prefab slots reconcile 0..N instances and retain only the same key
     const alphaRootIdentity = runtime._nodeIndex.require(alpha);
     const alphaBodyIdentity = runtime._nodeIndex.require(alphaBody);
     const alphaProbeIdentity = alphaBodyIdentity.requireComponent('probe');
-    assert.equal(runtime.currentView().getNode(alpha).parentName, 'prefab/py/dynamic/mount');
+    assert.equal(runtime.currentView().getNode(alpha).parentName, 'prefab/py/0/mount');
     assert.equal(runtime.currentView().getComponentState(alphaBody, 'probe').properties.value, 3);
 
     commitAuthority(runtime, () => runtime.authority.setNodeState({
-      name: owner,
+      nodeId: 0,
       state: {
         units: {
           alpha: {
@@ -330,7 +330,7 @@ test('dynamic Prefab slots reconcile 0..N instances and retain only the same key
 
     const removedBravo = runtime._nodeIndex.require(bravo);
     commitAuthority(runtime, () => runtime.authority.setNodeState({
-      name: owner,
+      nodeId: 0,
       state: {
         units: {
           alpha: {
@@ -355,7 +355,7 @@ test('dynamic Prefab slots reconcile 0..N instances and retain only the same key
     // Resolver omission means the complete desired set for every declared slot is empty.
     const replacedAlpha = runtime._nodeIndex.require(alpha);
     commitAuthority(runtime, () => runtime.authority.setNodeState({
-      name: owner,
+      nodeId: 0,
       state: { omitSlots: true },
     }), { sourceTickDelta: 1 });
     assert.equal(runtime.currentView().getNode(alpha), null);
@@ -410,11 +410,11 @@ async function assertRejectedNestedStatePreservesLiveTree({ state, expectedCode,
     prefabEntries: [prefabs.outer, prefabs.leafA, prefabs.leafB],
     configureComponents: configureProbe,
   });
-  const owner = 'py/atomic-nested';
-  const rootName = 'prefab/py/atomic-nested/units/kept';
+  const owner = 'py/0';
+  const rootName = 'prefab/py/0/units/kept';
   const bodyName = `${rootName}/body`;
   commitAuthority(runtime, () => runtime.authority.createNode(authorityCommand(
-    owner,
+    0,
     prefabs.outer.id,
     { units: { kept: { prefabId: prefabs.leafA.id, state: { value: 41 } } } },
   )), { sourceTickDelta: 1 });
@@ -429,7 +429,7 @@ async function assertRejectedNestedStatePreservesLiveTree({ state, expectedCode,
   runtime.commitGate.begin(cursor);
   let caught = null;
   try {
-    runtime.authority.setNodeState({ name: owner, state: state(prefabs) });
+    runtime.authority.setNodeState({ nodeId: 0, state: state(prefabs) });
   } catch (error) {
     caught = error;
   }
@@ -489,7 +489,7 @@ test('runtime disposal releases every recursively expanded Node and Component ex
       configureComponents: configureProbe,
     });
     commitAuthority(runtime, () => runtime.authority.createNode(authorityCommand(
-      'py/cleanup',
+      0,
       prefabs.outer.id,
       {
         units: {

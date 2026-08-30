@@ -7,6 +7,7 @@ import sys
 from types import SimpleNamespace
 
 import pytest
+import numpy as np
 
 import scripts.benchmark_python_js_communication as benchmark_module
 from scene_engine import DisplayCatalogIdentity
@@ -29,10 +30,10 @@ def test_32_roots_cross_python_js_wire_and_ack_with_final_display_state() -> Non
         profile=PROFILE_ROUNDTRIP,
     )
 
-    assert report["schema"] == "scene-engine-python-js-communication@2"
+    assert report["schema"] == "scene-engine-python-js-communication@3"
     assert report["status"] == "PASS"
     assert report["transformDigestEncoding"] == (
-        "node-name-nul-le-f32-matrix16-nul"
+        "node-id-u32le-le-f32-matrix16"
     )
     assert report["parameters"] == {
         "roots": 32,
@@ -59,7 +60,7 @@ def test_32_roots_cross_python_js_wire_and_ack_with_final_display_state() -> Non
     assert report["flowControl"]["final"]["inFlightCount"] == 0
     assert report["flowControl"]["final"]["pendingCount"] == 0
     peer = report["final"]["peer"]
-    assert peer["schema"] == "scene-engine-python-js-communication-peer@2"
+    assert peer["schema"] == "scene-engine-python-js-communication-peer@3"
     assert peer["transformDigestEncoding"] == report["transformDigestEncoding"]
     assert peer["enginePacketCount"] == 7
     assert peer["transformDigest"]["rootCount"] == 32
@@ -105,10 +106,10 @@ def test_benchmark_cli_prints_one_json_report_to_stdout_only() -> None:
         text=True,
     )
     report = json.loads(completed.stdout)
-    assert report["schema"] == "scene-engine-python-js-communication@2"
+    assert report["schema"] == "scene-engine-python-js-communication@3"
     assert report["status"] == "PASS"
     assert report["transformDigestEncoding"] == (
-        "node-name-nul-le-f32-matrix16-nul"
+        "node-id-u32le-le-f32-matrix16"
     )
     assert report["parameters"]["roots"] == 32
     assert report["parameters"]["updatesPerCommit"] == 4
@@ -132,11 +133,11 @@ def test_benchmark_cli_prints_one_json_report_to_stdout_only() -> None:
     assert completed.stderr == ""
 
 
-def test_benchmark_world_reuses_matrix_owners_without_publication_rebuild(
+def test_benchmark_world_reuses_resident_matrix_pool_without_publication_rebuild(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     world = CommunicationWorld(3)
-    initial = tuple(world.transforms)
+    initial = world.matrix_pool.matrices.copy()
     program = CommunicationProgram(
         roots=3,
         updates_per_commit=1,
@@ -153,22 +154,23 @@ def test_benchmark_world_reuses_matrix_owners_without_publication_rebuild(
 
     checkpoint = program.build_checkpoint(world, None)
     assert calls == []
-    assert all(
-        checkpoint.display_nodes[index].transform is world.transforms[index]
-        for index in range(3)
-    )
+    assert checkpoint.display_matrix_pool is world.matrix_pool
+    assert tuple(node.node_id for node in checkpoint.display_nodes) == (0, 1, 2)
 
     mutation = program.step(
         world,
         SimpleNamespace(commit=SimpleNamespace(source_tick=1)),
     )
     assert calls == [(1.0, 0.0, 1.0)]
-    assert world.transforms[0] is not initial[0]
-    assert tuple(world.transforms[1:]) == initial[1:]
+    current = world.matrix_pool.matrices
+    assert not np.array_equal(current[0].view("<u4"), initial[0].view("<u4"))
+    assert np.array_equal(current[1:].view("<u4"), initial[1:].view("<u4"))
 
     commit = program.build_commit(world, mutation, None)
     assert calls == [(1.0, 0.0, 1.0)]
-    assert commit.display_commands[0].fields["transform"] is world.transforms[0]
+    assert commit.display_matrix_pool is world.matrix_pool
+    assert commit.display_commands[0].node_id == 0
+    assert "transform" not in commit.display_commands[0].fields
 
 
 def test_benchmark_rejects_a_non_positive_timeout_before_starting_a_peer() -> None:

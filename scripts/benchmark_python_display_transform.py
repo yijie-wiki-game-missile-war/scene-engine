@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure the public Python DisplayTransform and production binary encoder path."""
+"""Measure Python DisplayTransform, resident MatrixPool, and binary encoding."""
 
 from __future__ import annotations
 
@@ -21,8 +21,17 @@ from typing import Any
 import numpy as np
 
 import scene_engine
-from scene_engine import DisplayCommand, DisplayTransform
-from scene_engine.display import encode_display_command_stream
+from scene_engine import (
+    DisplayCatalogIdentity,
+    DisplayCommand,
+    DisplayMatrixPool,
+    DisplayNode,
+    DisplayTransform,
+)
+from scene_engine.display import (
+    encode_display_checkpoint,
+    encode_display_command_stream,
+)
 from scene_engine.display_binary import (
     decode_display_command_stream_binary,
     encode_display_command_stream_binary,
@@ -30,7 +39,7 @@ from scene_engine.display_binary import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
-REPORT_SCHEMA = "scene-engine-python-display-transform-benchmark@1"
+REPORT_SCHEMA = "scene-engine-python-display-transform-benchmark@2"
 SOURCE_TICK = 1
 DEFAULT_ITERATIONS = 5_000
 DEFAULT_REPEATS = 7
@@ -39,11 +48,14 @@ DEFAULT_ENCODE_REPEATS = 7
 DEFAULT_RESIDENT_COUNT = 10_000
 WARMUP_CALLS = 32
 COLD_START_PROGRAM = """
-from scene_engine import DisplayTransform
+from scene_engine import DisplayMatrixPool, DisplayTransform
 
 value = DisplayTransform.identity()
+pool = DisplayMatrixPool()
+assert pool.append(value) == 0
 assert len(value.matrix) == 16
 assert len(value.matrix_bytes) == 64
+assert pool.matrices.shape == (1, 4, 4)
 """
 
 
@@ -102,6 +114,8 @@ def _operation_benchmarks(
         scale=(0.8, 1.1, 1.4),
     )
     affine = parent.composed(local)
+    matrix_pool = DisplayMatrixPool()
+    matrix_pool_id = matrix_pool.append(parent)
     point = (1.25, -2.5, 0.75)
     vector = (-0.5, 1.75, 3.0)
 
@@ -131,6 +145,10 @@ def _operation_benchmarks(
         ("inverseTransformVector", lambda: affine.inverse_transform_vector(vector)),
         ("matrix", lambda: affine.matrix),
         ("matrixBytes", lambda: affine.matrix_bytes),
+        (
+            "matrixPoolSet",
+            lambda: (matrix_pool.set(matrix_pool_id, affine), matrix_pool_id)[1],
+        ),
     )
 
     timings = {
@@ -179,31 +197,58 @@ def _encoding_benchmark(
         )
         for index in range(command_count)
     )
-    commands = tuple(
-        DisplayCommand.set_transform(f"py/benchmark-{index:06d}", transform)
-        for index, transform in enumerate(transforms)
+    matrix_pool = DisplayMatrixPool()
+    node_ids = tuple(matrix_pool.append(transform) for transform in transforms)
+    baseline = encode_display_checkpoint(
+        scene_name="benchmark",
+        catalog=DisplayCatalogIdentity(
+            scene_catalog_hash="0" * 64,
+            prefab_catalog_hash="1" * 64,
+            state_schema_hash="2" * 64,
+        ),
+        last_command_seq=0,
+        matrix_pool=matrix_pool,
+        nodes=tuple(
+            DisplayNode(
+                node_id=node_id,
+                parent_node_id=None,
+                prefab_id="benchmark/root",
+                transform_mode="live",
+                visible=True,
+                state={},
+            )
+            for node_id in node_ids
+        ),
     )
+    baseline.confirm_published()
+    for node_id, transform in zip(node_ids, transforms, strict=True):
+        matrix_pool.set(node_id, transform)
+    commands = tuple(DisplayCommand.set_transform(node_id) for node_id in node_ids)
 
-    def encode_once() -> Any:
+    def encode_once() -> tuple[Any, Any]:
         stream, cursor = encode_display_command_stream(
             base_command_seq=0,
             source_tick=SOURCE_TICK,
+            matrix_pool=matrix_pool,
             commands=commands,
         )
-        return encode_display_command_stream_binary(
+        return (
+            encode_display_command_stream_binary(
+                stream,
+                expected_source_tick=SOURCE_TICK,
+                expected_last_command_seq=cursor,
+            ),
             stream,
-            expected_source_tick=SOURCE_TICK,
-            expected_last_command_seq=cursor,
         )
 
-    encoded = encode_once()
+    encoded, stream = encode_once()
     reference_payload = encoded.bytes
     payload_stable = True
     samples_ms: list[float] = []
     for _ in range(repeats):
         gc.collect()
         started_ns = time.perf_counter_ns()
-        encoded = encode_once()
+        encoded, stream = encode_once()
         elapsed_ns = time.perf_counter_ns() - started_ns
         samples_ms.append(elapsed_ns / 1_000_000)
         payload_stable = payload_stable and encoded.bytes == reference_payload
@@ -214,12 +259,9 @@ def _encoding_benchmark(
         expected_source_tick=SOURCE_TICK,
         expected_last_command_seq=command_count,
     )
-    first_decoded = DisplayTransform.from_matrix(
-        decoded["commands"][0]["transform"]
-    )
-    last_decoded = DisplayTransform.from_matrix(
-        decoded["commands"][-1]["transform"]
-    )
+    decoded_dirty = np.asarray(decoded["dirty_matrices"], dtype="<f4", order="C")
+    decoded_dirty_node_ids = decoded["dirty_node_ids"]
+    dirty_payload_bytes = decoded_dirty.tobytes(order="C")
     correctness = {
         "binaryMagic": encoded.bytes[:4] == b"SDCS",
         "binaryMetadata": (
@@ -229,14 +271,29 @@ def _encoding_benchmark(
         ),
         "binaryPayloadStableAcrossRepeats": payload_stable,
         "decodedCommandCount": len(decoded["commands"]) == command_count,
+        "decodedDirtyNodeIds": np.array_equal(decoded_dirty_node_ids, node_ids),
+        "decodedArraysReadOnlyContiguous": (
+            isinstance(decoded_dirty_node_ids, np.ndarray)
+            and decoded_dirty_node_ids.dtype == np.dtype("<u4")
+            and decoded_dirty_node_ids.flags.c_contiguous
+            and not decoded_dirty_node_ids.flags.writeable
+            and isinstance(decoded["dirty_matrices"], np.ndarray)
+            and decoded["dirty_matrices"].dtype == np.dtype("<f4")
+            and decoded["dirty_matrices"].flags.c_contiguous
+            and not decoded["dirty_matrices"].flags.writeable
+        ),
+        "decodedDirtyTensorShape": decoded_dirty.shape == (command_count, 4, 4),
         "decodedCursor": (
             decoded["base_command_seq"] == 0
             and decoded["last_command_seq"] == command_count
         ),
-        "firstMatrixBits": first_decoded.matrix_bytes == transforms[0].matrix_bytes,
-        "lastMatrixBits": last_decoded.matrix_bytes == transforms[-1].matrix_bytes,
-        "lastResidentBufferAtPayloadTail": encoded.bytes.endswith(
-            transforms[-1].matrix_bytes
+        "firstMatrixBits": dirty_payload_bytes[:64] == transforms[0].matrix_bytes,
+        "lastMatrixBits": dirty_payload_bytes[-64:] == transforms[-1].matrix_bytes,
+        "sealedDirtyTensorContiguous": (
+            stream.dirty_matrices.shape == (command_count, 4, 4)
+            and stream.dirty_matrices.dtype == np.dtype("<f4")
+            and stream.dirty_matrices.flags.c_contiguous
+            and not stream.dirty_matrices.flags.writeable
         ),
     }
     timings = {
@@ -246,6 +303,9 @@ def _encoding_benchmark(
     payload = {
         "kind": encoded.kind,
         "commands": command_count,
+        "matrixPoolSize": matrix_pool.size,
+        "dirtyNodeIds": len(stream.dirty_node_ids),
+        "dirtyMatrixBytes": stream.dirty_matrices.nbytes,
         "bytes": len(encoded.bytes),
         "bytesPerCommand": round(len(encoded.bytes) / command_count, 3),
         "baseCommandSeq": encoded.base_command_seq,
@@ -263,44 +323,67 @@ def _resident_memory(*, count: int) -> tuple[dict[str, Any], dict[str, bool]]:
     baseline_current, _ = tracemalloc.get_traced_memory()
     tracemalloc.reset_peak()
     started_ns = time.perf_counter_ns()
-    residents = [
-        DisplayTransform.from_trs(
-            position=(
-                float(index % 1_009),
-                float((index // 1_009) % 1_009),
-                float(index % 31),
-            ),
-            rotation_xyzw=(0.1, 0.2, 0.3, 0.9),
-            scale=(1.0, 1.25, 0.8),
+    matrix_pool = DisplayMatrixPool()
+    for index in range(count):
+        matrix_pool.append(
+            DisplayTransform.from_trs(
+                position=(
+                    float(index % 1_009),
+                    float((index // 1_009) % 1_009),
+                    float(index % 31),
+                ),
+                rotation_xyzw=(0.1, 0.2, 0.3, 0.9),
+                scale=(1.0, 1.25, 0.8),
+            )
         )
-        for index in range(count)
-    ]
     build_elapsed_ns = time.perf_counter_ns() - started_ns
-    resident_current, resident_peak = tracemalloc.get_traced_memory()
-    built_count = len(residents)
-    first_bytes = residents[0].matrix_bytes
-    last_bytes = residents[-1].matrix_bytes
-    distinct_owners = residents[0] is not residents[-1] if count > 1 else True
-    distinct_buffers = (
-        not np.shares_memory(residents[0]._matrix, residents[-1]._matrix)
-        if count > 1
-        else residents[0]._matrix.flags.owndata
+    built_count = matrix_pool.size
+
+    # Measure the steady resident pool after its initial publication.  The
+    # create/dirty sets are transient wire bookkeeping, not resident Matrix4
+    # storage; publishing through the public API also verifies that they drain.
+    baseline = encode_display_checkpoint(
+        scene_name="benchmark-resident",
+        catalog=DisplayCatalogIdentity(
+            scene_catalog_hash="0" * 64,
+            prefab_catalog_hash="1" * 64,
+            state_schema_hash="2" * 64,
+        ),
+        last_command_seq=0,
+        matrix_pool=matrix_pool,
+        nodes=tuple(
+            DisplayNode(
+                node_id=node_id,
+                parent_node_id=None,
+                prefab_id="benchmark/root",
+                transform_mode="live",
+                visible=True,
+                state={},
+            )
+            for node_id in range(count)
+        ),
     )
-    first_matrix = residents[0]._matrix
+    baseline.confirm_published()
+    del baseline
+    gc.collect()
+    resident_current, resident_peak = tracemalloc.get_traced_memory()
+    resident_tensor = matrix_pool.matrices
+    first_bytes = resident_tensor[0].tobytes(order="C")
+    last_bytes = resident_tensor[-1].tobytes(order="C")
     resident_layout = (
-        first_matrix.shape == (4, 4)
-        and first_matrix.dtype == np.dtype("<f4")
-        and first_matrix.flags.f_contiguous
-        and first_matrix.flags.owndata
-        and not first_matrix.flags.writeable
-        and first_matrix.base is None
+        resident_tensor.shape == (count, 4, 4)
+        and resident_tensor.dtype == np.dtype("<f4")
+        and resident_tensor.flags.c_contiguous
+        and not resident_tensor.flags.writeable
+        and resident_tensor.strides == (64, 16, 4)
+        and resident_tensor.nbytes == count * 64
     )
     endpoint_values_differ = first_bytes != last_bytes if count > 1 else False
     endpoint_bytes_valid = len(first_bytes) == len(last_bytes) == 64
-    del residents
+    del matrix_pool
     del first_bytes
     del last_bytes
-    del first_matrix
+    del resident_tensor
     gc.collect()
     released_current, _ = tracemalloc.get_traced_memory()
     tracemalloc.stop()
@@ -317,16 +400,18 @@ def _resident_memory(*, count: int) -> tuple[dict[str, Any], dict[str, bool]]:
         "tracedDeltaAfterReleaseBytes": released_delta,
         "buildMilliseconds": round(build_elapsed_ns / 1_000_000, 6),
         "endpointValuesDiffer": endpoint_values_differ,
-        "includesListContainer": True,
+        "includesListContainer": False,
+        "residentStorage": "one C-contiguous <f4 tensor shaped (n,4,4)",
         "measurement": (
-            "tracemalloc current/peak deltas after a GC'd warm-process baseline; "
-            "build timing includes tracing overhead"
+            "tracemalloc current delta after initial checkpoint publication and "
+            "GC; peak includes transient publication bookkeeping; build timing "
+            "includes tracing overhead"
         ),
     }
     correctness = {
         "requestedResidentCountBuilt": built_count == count,
-        "residentOwnersDistinct": distinct_owners,
-        "residentBuffersDistinct": distinct_buffers,
+        "residentOwnerIsSingleMatrixPool": True,
+        "residentRowsShareOneTensor": resident_layout,
         "residentMatrixLayout": resident_layout,
         "residentMatrixBytesLength": endpoint_bytes_valid,
     }
@@ -472,11 +557,11 @@ def run_benchmark(
                 "operations": "public call plus Python loop/callable dispatch",
                 "coldStart": (
                     "process spawn, scene_engine import, identity construction, "
-                    "and public access"
+                    "one MatrixPool append, and public access"
                 ),
                 "encoding": (
-                    "prebuilt commands and resident transforms through semantic "
-                    "stream sealing and the production binary encoder"
+                    "prebuilt ID commands and one resident MatrixPool through "
+                    "dirty gather, semantic sealing, and the production SDCS encoder"
                 ),
             },
             "coldStart": cold_start,

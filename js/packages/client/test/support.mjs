@@ -19,16 +19,22 @@ export function transform(x = 0) {
   ]);
 }
 
-export function baselineNode(name = 'py/unit-1', parentName = null) {
+export function baselineNode(nodeId = 0, parentNodeId = null) {
   return {
-    name,
-    parent_name: parentName,
+    node_id: nodeId,
+    parent_node_id: parentNodeId,
     prefab_id: 'unit.example',
     transform_mode: 'live',
-    transform: transform(),
     visible: true,
     state: { mode: 'idle' },
   };
+}
+
+function checkpointMatrixPool(nodes, matrixPoolSize, supplied) {
+  if (supplied !== null) return supplied;
+  const result = new Float32Array(matrixPoolSize * 16);
+  for (const node of nodes) result.set(transform(), node.node_id * 16);
+  return result;
 }
 
 export function checkpointPacket({
@@ -38,6 +44,9 @@ export function checkpointPacket({
   lastCommandSeq = 0,
   worldSnapshot = { tick: sourceTick, world_revision: worldRevision, value: 0 },
   nodes = [baselineNode()],
+  matrixPoolSize = nodes.length === 0
+    ? 0 : Math.max(...nodes.map((node) => node.node_id)) + 1,
+  matrixPool = null,
   sceneCatalogHash = HASH_A,
   prefabCatalogHash = HASH_B,
   stateSchemaHash = HASH_C,
@@ -58,12 +67,14 @@ export function checkpointPacket({
       kind: 'display_checkpoint',
       encoding: 'raw',
       value: encodeDisplayCheckpoint({
-        schema: 'scene-engine-display-checkpoint@5',
+        schema: 'scene-engine-display-checkpoint@6',
         scene_name: 'main',
         scene_catalog_hash: sceneCatalogHash,
         prefab_catalog_hash: prefabCatalogHash,
         state_schema_hash: stateSchemaHash,
         last_command_seq: lastCommandSeq,
+        matrix_pool_size: matrixPoolSize,
+        matrix_pool: checkpointMatrixPool(nodes, matrixPoolSize, matrixPool),
         nodes,
       }),
     },
@@ -72,13 +83,38 @@ export function checkpointPacket({
 
 export function command(kind, commandSeq, sourceTick, fields = {}) {
   return {
-    schema: 'scene-engine-node-command@5',
+    schema: 'scene-engine-node-command@6',
     command_seq: commandSeq,
     source_tick: sourceTick,
     kind,
-    name: fields.name ?? 'py/unit-1',
+    node_id: fields.node_id ?? fields.nodeId ?? 0,
     ...fields,
   };
+}
+
+function commandMatrix(commandValue) {
+  return commandValue.matrix ?? transform(commandValue.node_id);
+}
+
+function transportCommand(commandValue) {
+  const { matrix: _matrix, nodeId: _nodeId, ...record } = commandValue;
+  return record;
+}
+
+function matrixBatch(commands, suppliedIds, suppliedMatrices) {
+  if (suppliedIds !== null || suppliedMatrices !== null) {
+    if (suppliedIds === null || suppliedMatrices === null) {
+      throw new Error('dirtyNodeIds and dirtyMatrices must be supplied together');
+    }
+    return { nodeIds: suppliedIds, matrices: suppliedMatrices };
+  }
+  const matrixCommands = commands.filter(({ kind }) => (
+    kind === 'node-create' || kind === 'node-set-transform'
+  )).sort((left, right) => left.node_id - right.node_id);
+  const nodeIds = new Uint32Array(matrixCommands.map(({ node_id: id }) => id));
+  const matrices = new Float32Array(nodeIds.length * 16);
+  matrixCommands.forEach((entry, index) => matrices.set(commandMatrix(entry), index * 16));
+  return { nodeIds, matrices };
 }
 
 export function commitPacket({
@@ -87,6 +123,13 @@ export function commitPacket({
   worldRevision = 1,
   baseCommandSeq = 0,
   commands = [],
+  matrixPoolSize = Math.max(1, ...commands.flatMap((entry) => [
+    entry.node_id + 1,
+    entry.parent_node_id === null || entry.parent_node_id === undefined
+      ? 0 : entry.parent_node_id + 1,
+  ])),
+  dirtyNodeIds = null,
+  dirtyMatrices = null,
   cause = 'tick',
   causationId = null,
   worldPatch = {
@@ -97,6 +140,7 @@ export function commitPacket({
     ],
   },
 } = {}) {
+  const batch = matrixBatch(commands, dirtyNodeIds, dirtyMatrices);
   const lastCommandSeq = baseCommandSeq + commands.length;
   return encodePacket('engine.commit', {
     schema: 'scene-engine-wire@3',
@@ -116,10 +160,13 @@ export function commitPacket({
       kind: 'display_command_stream',
       encoding: 'raw',
       value: encodeDisplayCommandStream({
-        schema: 'scene-engine-display-command-stream@5',
+        schema: 'scene-engine-display-command-stream@6',
         base_command_seq: baseCommandSeq,
         last_command_seq: lastCommandSeq,
-        commands,
+        matrix_pool_size: matrixPoolSize,
+        dirty_node_ids: batch.nodeIds,
+        dirty_matrices: batch.matrices,
+        commands: commands.map(transportCommand),
       }, { sourceTick }),
     },
   ]);
@@ -141,9 +188,11 @@ export function createMockDisplayFactory({ failMethod = null, asyncMethod = null
       return undefined;
     };
     const authorityPort = {
+      installNodeMatrixPool: (value) => invoke('installNodeMatrixPool', value),
+      applyNodeTransformBatch: (value) => invoke('applyNodeTransformBatch', value),
       createNode(value) {
         const result = invoke('createNode', value);
-        if (result === undefined) nodes.add(value.name);
+        if (result === undefined) nodes.add(value.nodeId);
         return result;
       },
       setNodeTransform: (value) => invoke('setNodeTransform', value),
@@ -153,7 +202,7 @@ export function createMockDisplayFactory({ failMethod = null, asyncMethod = null
       replaceNodePrefab: (value) => invoke('replaceNodePrefab', value),
       removeNode(value) {
         const result = invoke('removeNode', value);
-        if (result === undefined) nodes.delete(value.name);
+        if (result === undefined) nodes.delete(value.nodeId);
         return result;
       },
     };

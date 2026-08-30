@@ -13,7 +13,8 @@ import {
 import { matrix4Bytes } from './matrix4.mjs';
 
 const MAXIMUM_FRAME_BYTES = 64 * 1024 * 1024;
-const TRANSFORM_DIGEST_ENCODING = 'node-name-nul-le-f32-matrix16-nul';
+const TRANSFORM_DIGEST_ENCODING = 'node-id-u32le-le-f32-matrix16';
+const AUTHORITY_NODE_NAME = /^py\/(\d+)$/u;
 
 class PassiveFrameAdapter {
   constructor() {
@@ -94,13 +95,15 @@ async function writeFrame(payload) {
 function canonicalTransformDigest(view) {
   const hash = createHash('sha256');
   const roots = view.snapshot().nodes
-    .filter((node) => node.name.startsWith('py/'))
-    .sort((left, right) => left.name.localeCompare(right.name));
-  for (const node of roots) {
-    hash.update(node.name);
-    hash.update('\0');
+    .map((node) => ({ node, match: AUTHORITY_NODE_NAME.exec(node.name) }))
+    .filter(({ match }) => match !== null)
+    .map(({ node, match }) => ({ node, nodeId: Number(match[1]) }))
+    .sort((left, right) => left.nodeId - right.nodeId);
+  const encodedNodeId = Buffer.allocUnsafe(4);
+  for (const { node, nodeId } of roots) {
+    encodedNodeId.writeUInt32LE(nodeId, 0);
+    hash.update(encodedNodeId);
     hash.update(matrix4Bytes(node.localTransform));
-    hash.update('\0');
   }
   return { rootCount: roots.length, sha256: hash.digest('hex') };
 }
@@ -144,7 +147,7 @@ async function finish() {
     && cleanup.fakeBackendBindings === 0
     && cleanup.fakeBackendDisposed === true;
   const report = {
-    schema: 'scene-engine-python-js-communication-peer@2',
+    schema: 'scene-engine-python-js-communication-peer@3',
     transformDigestEncoding: TRANSFORM_DIGEST_ENCODING,
     enginePacketCount,
     engineBytes,

@@ -14,8 +14,11 @@ import { createFakeRenderBackend } from '../src/testing/fake-render-backend.js';
 import { IDENTITY, commitAuthority, createHarness, emptyPrefab,
   matrixPosition, matrixTransform } from './helpers.mjs';
 
-function createCommand(name, prefabId = 'target.test.item', parentName = null, transformMode = 'live') {
-  return { name, parentName, prefabId, transformMode, transform: IDENTITY, visible: true, state: {} };
+function createCommand(nodeId, prefabId = 'target.test.item', parentNodeId = null,
+  transformMode = 'live') {
+  return {
+    nodeId, parentNodeId, prefabId, transformMode, transform: IDENTITY, visible: true, state: {},
+  };
 }
 
 function nextCursor(runtime, { sourceTickDelta = 1, commandCount = 1 } = {}) {
@@ -43,42 +46,42 @@ test('Authority create uses one Node graph and initial mode rejects later transf
   const { runtime, installReturn } = await createHarness(); t.after(() => runtime.dispose());
   assert.equal(installReturn, runtime, 'installScene is a synchronous checkpoint barrier');
   commitAuthority(runtime, () => runtime.authority.createNode(
-    createCommand('py/initial', 'target.test.item', null, 'initial'),
+    createCommand(0, 'target.test.item', null, 'initial'),
   ), { sourceTickDelta: 1 });
-  assert.equal(runtime.currentView().getNode('prefab/py/initial/body').parentName, 'py/initial');
-  assert.equal(runtime.currentView().getAuthorityOwner('prefab/py/initial/body'), 'py/initial');
+  assert.equal(runtime.currentView().getNode('prefab/py/0/body').parentName, 'py/0');
+  assert.equal(runtime.currentView().getAuthorityOwner('prefab/py/0/body'), 'py/0');
   expectAuthorityFailure(runtime, () => runtime.authority.setNodeTransform({
-    name: 'py/initial', transform: matrixTransform({ position: [1, 0, 0] }),
+    nodeId: 0, transform: matrixTransform({ position: [1, 0, 0] }),
   }), 'display-authority-transform-initial');
-  assert.deepEqual(matrixPosition(runtime.currentView().getNode('py/initial').localTransform), [0, 0, 0]);
+  assert.deepEqual(matrixPosition(runtime.currentView().getNode('py/0').localTransform), [0, 0, 0]);
 });
 
-test('Authority transform preserves validation order before mutation', async (t) => {
+test('Authority rejects a transform command for an initial-only node before mutation', async (t) => {
   const { runtime } = await createHarness(); t.after(() => runtime.dispose());
   commitAuthority(runtime, () => {
-    runtime.authority.createNode(createCommand('py/live'));
-    runtime.authority.createNode(createCommand('py/initial', 'target.test.item', null, 'initial'));
+    runtime.authority.createNode(createCommand(0));
+    runtime.authority.createNode(createCommand(1, 'target.test.item', null, 'initial'));
   }, { sourceTickDelta: 1, commandCount: 2 });
 
   expectAuthorityFailure(runtime, () => runtime.authority.setNodeTransform({
-    name: 'py/initial', transform: matrixTransform({ scale: [1, 0, 1] }),
+    nodeId: 1, transform: matrixTransform({ position: [1, 0, 0] }),
   }), 'display-authority-transform-initial');
-  assert.deepEqual(runtime.currentView().getNode('py/initial').localTransform, IDENTITY);
+  assert.deepEqual(runtime.currentView().getNode('py/1').localTransform, IDENTITY);
 });
 
-test('invalid live Authority transform leaves the Node and revision unchanged', async (t) => {
+test('malformed test transform batch leaves the Node and revision unchanged', async (t) => {
   const { runtime } = await createHarness(); t.after(() => runtime.dispose());
-  commitAuthority(runtime, () => runtime.authority.createNode(createCommand('py/live')), {
+  commitAuthority(runtime, () => runtime.authority.createNode(createCommand(0)), {
     sourceTickDelta: 1,
   });
   const before = runtime.summary();
 
   expectAuthorityFailure(runtime, () => runtime.authority.setNodeTransform({
-    name: 'py/live', transform: {
+    nodeId: 0, transform: {
       position: [0, 0, 0], rotationXyzw: [0, 0, 0, 1], scale: [1, 1, 1],
     },
-  }), 'display-transform-invalid');
-  assert.deepEqual(runtime.currentView().getNode('py/live').localTransform, IDENTITY);
+  }), 'display-authority-transform-batch-invalid');
+  assert.deepEqual(runtime.currentView().getNode('py/0').localTransform, IDENTITY);
   assert.equal(runtime.summary().revision, before.revision);
 });
 
@@ -86,14 +89,13 @@ test('derived world overflow fails seal before the ACK cursor advances', async (
   const { runtime } = await createHarness(); t.after(() => runtime.dispose());
   const localScale = matrixTransform({ scale: [1000, 1000, 1000] });
   commitAuthority(runtime, () => {
-    let parentName = null;
+    let parentNodeId = null;
     for (let index = 0; index < 101; index += 1) {
-      const name = `py/deep-${index}`;
       runtime.authority.createNode({
-        ...createCommand(name, 'target.test.item', parentName),
+        ...createCommand(index, 'target.test.item', parentNodeId),
         transform: localScale,
       });
-      parentName = name;
+      parentNodeId = index;
     }
   }, { sourceTickDelta: 1, commandCount: 101 });
 
@@ -101,7 +103,7 @@ test('derived world overflow fails seal before the ACK cursor advances', async (
   const cursor = nextCursor(runtime);
   runtime.commitGate.begin(cursor);
   runtime.authority.setNodeTransform({
-    name: 'py/deep-0',
+    nodeId: 0,
     transform: matrixTransform({ scale: [1e10, 1e10, 1e10] }),
   });
   let error = null;
@@ -116,10 +118,10 @@ test('derived world overflow fails seal before the ACK cursor advances', async (
 test('activated Authority rejects every mutation outside the active commit gate', async (t) => {
   const { runtime } = await createHarness(); t.after(() => runtime.dispose());
   const before = runtime.summary();
-  assert.throws(() => runtime.authority.createNode(createCommand('py/outside')),
+  assert.throws(() => runtime.authority.createNode(createCommand(0)),
     { code: 'display-authority-outside-commit' });
   assert.deepEqual(runtime.summary(), before);
-  assert.equal(runtime.currentView().getNode('py/outside'), null);
+  assert.equal(runtime.currentView().getNode('py/0'), null);
 });
 
 test('installScene rejects an asynchronous backend factory', async () => {
@@ -167,13 +169,13 @@ test('backend factory health bridge drives DisplayRuntime health', async (t) => 
 test('Authority remove rejects a named authority descendant without mutation', async (t) => {
   const { runtime } = await createHarness(); t.after(() => runtime.dispose());
   commitAuthority(runtime, () => {
-    runtime.authority.createNode(createCommand('py/parent'));
-    runtime.authority.createNode(createCommand('py/child', 'target.test.item', 'py/parent'));
+    runtime.authority.createNode(createCommand(0));
+    runtime.authority.createNode(createCommand(1, 'target.test.item', 0));
   }, { sourceTickDelta: 1, commandCount: 2 });
-  expectAuthorityFailure(runtime, () => runtime.authority.removeNode({ name: 'py/parent' }),
+  expectAuthorityFailure(runtime, () => runtime.authority.removeNode({ nodeId: 0 }),
     'display-authority-descendant-exists');
-  assert.equal(runtime.currentView().getNode('py/child').parentName, 'py/parent');
-  assert.notEqual(runtime.currentView().getNode('py/parent'), null);
+  assert.equal(runtime.currentView().getNode('py/1').parentName, 'py/0');
+  assert.notEqual(runtime.currentView().getNode('py/0'), null);
 });
 
 test('state resolver validates the whole patch before changing any target', async (t) => {
@@ -202,14 +204,14 @@ test('state resolver validates the whole patch before changing any target', asyn
   });
   t.after(() => runtime.dispose());
   commitAuthority(runtime, () => runtime.authority.createNode({
-    ...createCommand('py/stateful', prefab.id),
+    ...createCommand(0, prefab.id),
     state: { visible: true, modelResourceId: 'model/good' },
   }), { sourceTickDelta: 1 });
   expectAuthorityFailure(runtime, () => runtime.authority.setNodeState({
-    name: 'py/stateful', state: { visible: false, modelResourceId: 'model/missing' },
+    nodeId: 0, state: { visible: false, modelResourceId: 'model/missing' },
   }), 'display-resource-missing');
-  assert.equal(runtime.currentView().getNode('prefab/py/stateful/body').visibleSelf, true);
-  assert.equal(runtime.currentView().getComponentState('prefab/py/stateful/body', 'model')
+  assert.equal(runtime.currentView().getNode('prefab/py/0/body').visibleSelf, true);
+  assert.equal(runtime.currentView().getComponentState('prefab/py/0/body', 'model')
     .properties.modelResourceId, 'model/good');
 });
 
@@ -238,19 +240,19 @@ test('nested renderer state fails before cursor seal or backend update', async (
   });
   t.after(() => runtime.dispose());
   commitAuthority(runtime, () => runtime.authority.createNode({
-    ...createCommand('py/animated', prefab.id),
+    ...createCommand(0, prefab.id),
     state: { materialOverrides: { tintRgba: 0xff00_00ff, opacity: 1, emissive: 0,
       alphaMode: 'opaque', alphaCutoff: 0 } },
   }), { sourceTickDelta: 1 });
   await runtime.whenReady();
 
   const before = runtime.summary();
-  const component = runtime._nodeIndex.require('prefab/py/animated/body').requireComponent('model');
+  const component = runtime._nodeIndex.require('prefab/py/0/body').requireComponent('model');
   const propertiesBefore = component.properties;
   const backendCallsBefore = fakeBackends[0].calls.length;
 
   expectAuthorityFailure(runtime, () => runtime.authority.setNodeState({
-    name: 'py/animated', state: { materialOverrides: { tintRgba: -1 } },
+    nodeId: 0, state: { materialOverrides: { tintRgba: -1 } },
   }), 'display-component-properties-invalid');
 
   assert.deepEqual(runtime.summary().cursor, before.cursor);
@@ -323,13 +325,13 @@ test('invalid resource patch leaves RenderSystem dirty, draw, and lease state un
   });
   t.after(() => runtime.dispose());
   commitAuthority(runtime, () => runtime.authority.createNode({
-    ...createCommand('py/atomic-resource', prefab.id),
+    ...createCommand(0, prefab.id),
     state: { modelResourceId: 'model/good' },
   }), { sourceTickDelta: 1 });
   runtime.start();
   frames.step();
 
-  const component = runtime._nodeIndex.require('prefab/py/atomic-resource/body')
+  const component = runtime._nodeIndex.require('prefab/py/0/body')
     .requireComponent('model');
   const renderEntry = runtime._renderSystem._entries.get(component);
   assert.equal(renderEntry.dirty, false);
@@ -341,7 +343,7 @@ test('invalid resource patch leaves RenderSystem dirty, draw, and lease state un
   const backendCallCountBefore = fake.calls.length;
 
   expectAuthorityFailure(runtime, () => runtime.authority.setNodeState({
-    name: 'py/atomic-resource', state: { modelResourceId: 'model/missing' },
+    nodeId: 0, state: { modelResourceId: 'model/missing' },
   }), 'display-resource-missing');
 
   assert.strictEqual(component.properties, propertiesBefore);
@@ -382,15 +384,15 @@ test('validated state patches install normalized properties exactly once before 
   });
   t.after(() => runtime.dispose());
   commitAuthority(runtime, () => runtime.authority.createNode({
-    ...createCommand('py/state', prefab.id), state: { visible: true, value: 0 },
+    ...createCommand(0, prefab.id), state: { visible: true, value: 0 },
   }), { sourceTickDelta: 1 });
   armed = true;
   commitAuthority(runtime, () => runtime.authority.setNodeState({
-    name: 'py/state', state: { visible: false, value: 2 },
+    nodeId: 0, state: { visible: false, value: 2 },
   }), { sourceTickDelta: 1 });
   assert.equal(armedCalls, 1);
-  assert.equal(runtime.currentView().getNode('prefab/py/state/body').visibleSelf, false);
-  assert.equal(runtime.currentView().getComponentState('prefab/py/state/body', 'state').properties.value, 2);
+  assert.equal(runtime.currentView().getNode('prefab/py/0/body').visibleSelf, false);
+  assert.equal(runtime.currentView().getComponentState('prefab/py/0/body', 'state').properties.value, 2);
 });
 
 test('replaceNodePrefab stages a private shadow scope and preserves authority children', async (t) => {
@@ -402,13 +404,13 @@ test('replaceNodePrefab stages a private shadow scope and preserves authority ch
   ] });
   t.after(() => runtime.dispose());
   commitAuthority(runtime, () => {
-    runtime.authority.createNode(createCommand('py/root', first.id));
-    runtime.authority.createNode(createCommand('py/child', first.id, 'py/root'));
-    runtime.authority.replaceNodePrefab({ name: 'py/root', prefabId: second.id, state: {} });
+    runtime.authority.createNode(createCommand(0, first.id));
+    runtime.authority.createNode(createCommand(1, first.id, 0));
+    runtime.authority.replaceNodePrefab({ nodeId: 0, prefabId: second.id, state: {} });
   }, { sourceTickDelta: 1, commandCount: 3 });
-  assert.equal(runtime.currentView().getNode('prefab/py/root/first'), null);
-  assert.equal(runtime.currentView().getNode('prefab/py/root/second').parentName, 'py/root');
-  assert.equal(runtime.currentView().getNode('py/child').parentName, 'py/root');
+  assert.equal(runtime.currentView().getNode('prefab/py/0/first'), null);
+  assert.equal(runtime.currentView().getNode('prefab/py/0/second').parentName, 'py/0');
+  assert.equal(runtime.currentView().getNode('py/1').parentName, 'py/0');
 });
 
 test('replacement onAttach sees the final root childNames including preserved authority children',
@@ -418,7 +420,7 @@ test('replacement onAttach sees the final root childNames including preserved au
       static typeId = 'test.authority-child-candidate-probe@1';
 
       onAttach(display) {
-        observedChildNames = [...display.nodes.require('py/candidate-root').childNames];
+        observedChildNames = [...display.nodes.require('py/0').childNames];
       }
     }
     const original = emptyPrefab({
@@ -447,21 +449,19 @@ test('replacement onAttach sees the final root childNames including preserved au
     });
     t.after(() => runtime.dispose());
     commitAuthority(runtime, () => {
-      runtime.authority.createNode(createCommand('py/candidate-root', original.id));
-      runtime.authority.createNode(createCommand(
-        'py/candidate-child', original.id, 'py/candidate-root',
-      ));
+      runtime.authority.createNode(createCommand(0, original.id));
+      runtime.authority.createNode(createCommand(1, original.id, 0));
     }, { sourceTickDelta: 1, commandCount: 2 });
 
     commitAuthority(runtime, () => runtime.authority.replaceNodePrefab({
-      name: 'py/candidate-root', prefabId: replacement.id, state: {},
+      nodeId: 0, prefabId: replacement.id, state: {},
     }), { sourceTickDelta: 1 });
 
-    const expected = ['prefab/py/candidate-root/new', 'py/candidate-child'];
+    const expected = ['prefab/py/0/new', 'py/1'];
     assert.deepEqual(observedChildNames, expected);
-    assert.deepEqual(runtime.currentView().getNode('py/candidate-root').childNames, expected);
+    assert.deepEqual(runtime.currentView().getNode('py/0').childNames, expected);
     const scope = runtime._prefabInstantiator.getScope(
-      runtime._nodeIndex.require('py/candidate-root'),
+      runtime._nodeIndex.require('py/0'),
     );
     assert.strictEqual(scope.componentContext, runtime._componentContext);
     assert.equal(scope.shadowParent, null);
@@ -532,14 +532,14 @@ test('shadow adoption uses the non-virtual live registration path for every comp
     });
     t.after(() => runtime.dispose());
     commitAuthority(runtime, () => runtime.authority.createNode(
-      createCommand('py/adopt', original.id),
+      createCommand(0, original.id),
     ), { sourceTickDelta: 1 });
     commitAuthority(runtime, () => runtime.authority.replaceNodePrefab({
-      name: 'py/adopt', prefabId: replacement.id, state: {},
+      nodeId: 0, prefabId: replacement.id, state: {},
     }), { sourceTickDelta: 1 });
 
-    const root = runtime._nodeIndex.require('py/adopt');
-    const body = runtime._nodeIndex.require('prefab/py/adopt/body');
+    const root = runtime._nodeIndex.require('py/0');
+    const body = runtime._nodeIndex.require('prefab/py/0/body');
     const behaviour = root.requireComponent('behaviour');
     const player = root.requireComponent('animator');
     const render = body.requireComponent('custom-render');
@@ -578,10 +578,10 @@ test('replacement adoption failure restores the complete old live scope', async 
   });
   t.after(() => runtime.dispose());
   commitAuthority(runtime, () => runtime.authority.createNode(
-    createCommand('py/atomic-adopt', original.id),
+    createCommand(0, original.id),
   ), { sourceTickDelta: 1 });
-  const oldRoot = runtime._nodeIndex.require('py/atomic-adopt');
-  const oldBody = runtime._nodeIndex.require('prefab/py/atomic-adopt/body');
+  const oldRoot = runtime._nodeIndex.require('py/0');
+  const oldBody = runtime._nodeIndex.require('prefab/py/0/body');
   const oldComponent = oldBody.requireComponent('old');
   const oldRender = oldBody.requireComponent('model');
   const originalAttached = runtime._componentAttached.bind(runtime);
@@ -596,13 +596,13 @@ test('replacement adoption failure restores the complete old live scope', async 
   let caught = null;
   try {
     runtime.authority.replaceNodePrefab({
-      name: 'py/atomic-adopt', prefabId: replacement.id, state: {},
+      nodeId: 0, prefabId: replacement.id, state: {},
     });
   } catch (error) { caught = error; }
   runtime._componentAttached = originalAttached;
   assert.strictEqual(caught, failure);
-  assert.strictEqual(runtime._nodeIndex.require('py/atomic-adopt'), oldRoot);
-  assert.strictEqual(runtime._nodeIndex.require('prefab/py/atomic-adopt/body'), oldBody);
+  assert.strictEqual(runtime._nodeIndex.require('py/0'), oldRoot);
+  assert.strictEqual(runtime._nodeIndex.require('prefab/py/0/body'), oldBody);
   assert.strictEqual(oldBody.requireComponent('old'), oldComponent);
   assert.equal(oldComponent.disposed, false);
   assert.equal(runtime._scheduler._registered.has(oldComponent), true);
@@ -667,30 +667,30 @@ test('replacement adoption rollback restores interleaved Prefab and authority si
       prefabEntries: [original, replacement, nested],
     });
     t.after(() => runtime.dispose());
-    const rootName = 'py/order-root';
+    const rootName = 'py/0';
     commitAuthority(runtime, () => runtime.authority.createNode({
-      ...createCommand(rootName, original.id), state: { alpha: false, bravo: false },
+      ...createCommand(0, original.id), state: { alpha: false, bravo: false },
     }), { sourceTickDelta: 1 });
     commitAuthority(runtime, () => runtime.authority.createNode(
-      createCommand('py/order-a', nested.id, rootName),
+      createCommand(1, nested.id, 0),
     ), { sourceTickDelta: 1 });
     commitAuthority(runtime, () => runtime.authority.setNodeState({
-      name: rootName, state: { alpha: true, bravo: false },
+      nodeId: 0, state: { alpha: true, bravo: false },
     }), { sourceTickDelta: 1 });
     commitAuthority(runtime, () => runtime.authority.createNode(
-      createCommand('py/order-b', nested.id, rootName),
+      createCommand(2, nested.id, 0),
     ), { sourceTickDelta: 1 });
     commitAuthority(runtime, () => runtime.authority.setNodeState({
-      name: rootName, state: { alpha: true, bravo: true },
+      nodeId: 0, state: { alpha: true, bravo: true },
     }), { sourceTickDelta: 1 });
 
     const root = runtime._nodeIndex.require(rootName);
     const baselineChildren = [...root._children];
     const baselineNames = [
       `prefab/${rootName}/fixed`,
-      'py/order-a',
+      'py/1',
       `prefab/${rootName}/units/alpha`,
-      'py/order-b',
+      'py/2',
       `prefab/${rootName}/units/bravo`,
     ];
     assert.deepEqual(baselineChildren.map((node) => node.name), baselineNames);
@@ -704,7 +704,7 @@ test('replacement adoption rollback restores interleaved Prefab and authority si
     let caught;
     try {
       caught = expectAuthorityFailure(runtime, () => runtime.authority.replaceNodePrefab({
-        name: rootName, prefabId: replacement.id, state: {},
+        nodeId: 0, prefabId: replacement.id, state: {},
       }), Error);
     } finally {
       runtime._componentAttached = originalAttached;
@@ -740,14 +740,14 @@ test('replacement shadow handlers cannot mutate live nodes through lookup capabi
   });
   t.after(() => runtime.dispose());
   commitAuthority(runtime, () => runtime.authority.createNode(
-    createCommand('py/safe', first.id),
+    createCommand(0, first.id),
   ), { sourceTickDelta: 1 });
   expectAuthorityFailure(runtime, () => runtime.authority.replaceNodePrefab({
-    name: 'py/safe', prefabId: escaping.id, state: {},
+    nodeId: 0, prefabId: escaping.id, state: {},
   }), TypeError);
   assert.equal(runtime.currentView().getNode('scene/main/camera').visibleSelf, true);
-  assert(runtime.currentView().getNode('prefab/py/safe/old'));
-  assert.equal(runtime.currentView().getNode('prefab/py/safe/new'), null);
+  assert(runtime.currentView().getNode('prefab/py/0/old'));
+  assert.equal(runtime.currentView().getNode('prefab/py/0/new'), null);
 });
 
 test('each RenderComponent owns a (nodeName, componentKey) backend binding', async (t) => {
@@ -764,11 +764,11 @@ test('each RenderComponent owns a (nodeName, componentKey) backend binding', asy
   });
   t.after(() => runtime.dispose());
   commitAuthority(runtime, () => runtime.authority.createNode(
-    createCommand('py/rendered', prefab.id),
+    createCommand(0, prefab.id),
   ), { sourceTickDelta: 1 });
   await runtime.whenReady();
-  assert(fakeBackends[0].bindings.has(JSON.stringify(['prefab/py/rendered/body', 'first'])));
-  assert(fakeBackends[0].bindings.has(JSON.stringify(['prefab/py/rendered/body', 'second'])));
+  assert(fakeBackends[0].bindings.has(JSON.stringify(['prefab/py/0/body', 'first'])));
+  assert(fakeBackends[0].bindings.has(JSON.stringify(['prefab/py/0/body', 'second'])));
 });
 
 test('pending binding create cannot attach after its Node was removed', async (t) => {
@@ -784,11 +784,11 @@ test('pending binding create cannot attach after its Node was removed', async (t
   });
   t.after(() => runtime.dispose());
   commitAuthority(runtime, () => {
-    runtime.authority.createNode(createCommand('py/pending', prefab.id));
-    runtime.authority.removeNode({ name: 'py/pending' });
+    runtime.authority.createNode(createCommand(0, prefab.id));
+    runtime.authority.removeNode({ nodeId: 0 });
   }, { sourceTickDelta: 1, commandCount: 2 });
   await runtime.whenReady();
-  assert.equal(fake.bindings.has(JSON.stringify(['prefab/py/pending/body', 'model'])), false);
+  assert.equal(fake.bindings.has(JSON.stringify(['prefab/py/0/body', 'model'])), false);
 });
 
 test('same binding identity waits for a pending old create and its stale cleanup', async (t) => {
@@ -807,16 +807,16 @@ test('same binding identity waits for a pending old create and its stale cleanup
   });
   t.after(() => runtime.dispose());
   commitAuthority(runtime, () => {
-    runtime.authority.createNode(createCommand('py/pending-reused', first.id));
+    runtime.authority.createNode(createCommand(0, first.id));
     runtime.authority.replaceNodePrefab({
-      name: 'py/pending-reused', prefabId: second.id, state: {},
+      nodeId: 0, prefabId: second.id, state: {},
     });
   }, { sourceTickDelta: 1, commandCount: 2 });
   await runtime.whenReady();
-  const relevant = fake.calls.filter((call) => call[1] === 'prefab/py/pending-reused/body'
+  const relevant = fake.calls.filter((call) => call[1] === 'prefab/py/0/body'
     && call[2] === 'model');
   assert.deepEqual(relevant.map((call) => call[0]), ['create', 'destroy', 'create']);
-  assert(fake.bindings.has(JSON.stringify(['prefab/py/pending-reused/body', 'model'])));
+  assert(fake.bindings.has(JSON.stringify(['prefab/py/0/body', 'model'])));
 });
 
 test('an asynchronous null binding result makes renderer health fail closed', async (t) => {
@@ -848,13 +848,13 @@ test('same binding identity waits for asynchronous old destroy before replacemen
   });
   t.after(() => runtime.dispose());
   commitAuthority(runtime, () => {
-    runtime.authority.createNode(createCommand('py/reused', first.id));
-    runtime.authority.replaceNodePrefab({ name: 'py/reused', prefabId: second.id, state: {} });
+    runtime.authority.createNode(createCommand(0, first.id));
+    runtime.authority.replaceNodePrefab({ nodeId: 0, prefabId: second.id, state: {} });
   }, { sourceTickDelta: 1, commandCount: 2 });
   await runtime.whenReady();
-  const relevant = fake.calls.filter((call) => call[1] === 'prefab/py/reused/body' && call[2] === 'model');
+  const relevant = fake.calls.filter((call) => call[1] === 'prefab/py/0/body' && call[2] === 'model');
   assert.deepEqual(relevant.map((call) => call[0]), ['create', 'destroy', 'create']);
-  assert(fake.bindings.has(JSON.stringify(['prefab/py/reused/body', 'model'])));
+  assert(fake.bindings.has(JSON.stringify(['prefab/py/0/body', 'model'])));
 });
 
 test('commitGate blocks draw until exact seal and fail makes projection invalid', async (t) => {
@@ -862,14 +862,14 @@ test('commitGate blocks draw until exact seal and fail makes projection invalid'
   const { runtime, frames, fakeBackends } = await createHarness({ onHealth: (event) => health.push(event) });
   t.after(() => runtime.dispose());
   commitAuthority(runtime, () => runtime.authority.createNode(
-    createCommand('py/gated'),
+    createCommand(0),
   ), { sourceTickDelta: 1 });
   runtime.start();
   assert.equal(frames.pending, 1);
   const cursor = nextCursor(runtime);
   runtime.commitGate.begin(cursor);
   assert.equal(frames.pending, 0);
-  runtime.authority.setNodeVisible({ name: 'py/gated', visible: false });
+  runtime.authority.setNodeVisible({ nodeId: 0, visible: false });
   assert.equal(frames.pending, 0);
   assert.throws(() => runtime.commitGate.seal({ ...cursor, sourceTick: cursor.sourceTick + 1 }),
     { code: 'display-commit-gate-cursor-mismatch' });
@@ -889,24 +889,24 @@ test('commitGate blocks draw until exact seal and fail makes projection invalid'
 test('currentView is an immutable cursor-bound projection', async (t) => {
   const { runtime } = await createHarness(); t.after(() => runtime.dispose());
   commitAuthority(runtime, () => runtime.authority.createNode(
-    createCommand('py/view'),
+    createCommand(0),
   ), { sourceTickDelta: 1 });
   const before = runtime.currentView();
   const cursor = nextCursor(runtime);
   runtime.commitGate.begin(cursor);
-  runtime.authority.setNodeVisible({ name: 'py/view', visible: false });
+  runtime.authority.setNodeVisible({ nodeId: 0, visible: false });
   runtime.commitGate.seal(cursor);
   const after = runtime.currentView();
   assert.deepEqual(before.cursor, { commitSeq: 1, sourceTick: 1, lastCommandSeq: 1 });
-  assert.equal(before.getNode('py/view').visibleSelf, true);
+  assert.equal(before.getNode('py/0').visibleSelf, true);
   assert.deepEqual(after.cursor, cursor);
-  assert.equal(after.getNode('py/view').visibleSelf, false);
+  assert.equal(after.getNode('py/0').visibleSelf, false);
 });
 
 test('commitGate seal does not materialize a full DisplayView', async (t) => {
   const { runtime } = await createHarness(); t.after(() => runtime.dispose());
   commitAuthority(runtime, () => runtime.authority.createNode(
-    createCommand('py/direct-index'),
+    createCommand(0),
   ), { sourceTickDelta: 1 });
   let fullIndexTraversals = 0;
   const values = runtime._nodeIndex.values.bind(runtime._nodeIndex);
@@ -916,17 +916,17 @@ test('commitGate seal does not materialize a full DisplayView', async (t) => {
   };
   const cursor = nextCursor(runtime);
   runtime.commitGate.begin(cursor);
-  runtime.authority.setNodeVisible({ name: 'py/direct-index', visible: false });
+  runtime.authority.setNodeVisible({ nodeId: 0, visible: false });
   assert.equal(runtime.commitGate.seal(cursor), undefined);
   assert.equal(fullIndexTraversals, 0);
-  assert.equal(runtime.currentView().getNode('py/direct-index').visibleSelf, false);
+  assert.equal(runtime.currentView().getNode('py/0').visibleSelf, false);
   assert.equal(fullIndexTraversals, 1);
 });
 
 test('summary is a fresh frozen O(1) record and never traverses Nodes or Components', async (t) => {
   const { runtime } = await createHarness(); t.after(() => runtime.dispose());
   commitAuthority(runtime, () => runtime.authority.createNode(
-    createCommand('py/summary'),
+    createCommand(0),
   ), { sourceTickDelta: 1 });
   let nodeTraversals = 0;
   const values = runtime._nodeIndex.values.bind(runtime._nodeIndex);
@@ -1001,11 +1001,11 @@ test('backend rebuild preserves Node state and remounts declarative bindings', a
   const backendFactory = () => { const fake = createFakeRenderBackend(); fakes.push(fake); return fake.backend; };
   const { runtime } = await createHarness({ backendFactory }); t.after(() => runtime.dispose());
   commitAuthority(runtime, () => runtime.authority.createNode(
-    createCommand('py/stable'),
+    createCommand(0),
   ), { sourceTickDelta: 1 });
-  const before = runtime.currentView().getNode('py/stable').localTransform;
+  const before = runtime.currentView().getNode('py/0').localTransform;
   await runtime.rebuildRenderBackend();
-  assert.deepEqual(runtime.currentView().getNode('py/stable').localTransform, before);
+  assert.deepEqual(runtime.currentView().getNode('py/0').localTransform, before);
   assert.equal(fakes.length, 2);
   assert(fakes[1].bindings.has(JSON.stringify(['scene/main/camera', 'camera'])));
 });
@@ -1018,14 +1018,14 @@ test('fixed panels send the same Node world matrix to the backend before and aft
   const { runtime, frames, fakeBackends } = await createHarness({
     prefabEntries: [prefab], resources: [{ id: 'texture/card', kind: 'texture', url: './card.png' }],
     bootstrapAuthority(authority) {
-      authority.createNode({ ...createCommand('py/card'), transform: matrixTransform({
+      authority.createNode({ ...createCommand(0), transform: matrixTransform({
         position: [4, 2, -3], rotationXyzw: [0, Math.SQRT1_2, 0, Math.SQRT1_2], scale: [3, 1, 1],
       }) });
     },
   });
   t.after(() => runtime.dispose());
   runtime.start(); await runtime.whenReady(); frames.step();
-  const name = 'prefab/py/card/body';
+  const name = 'prefab/py/0/body';
   const expected = Array.from(runtime.currentView().getWorldTransform(name));
   for (const [offset, axis] of [[4, [0, 1, 0]], [8, [0, 0, 1]]]) {
     const values = expected.slice(offset, offset + 3); const length = Math.hypot(...values);
@@ -1060,7 +1060,7 @@ test('sprite projection uses its fixed ancestor footpoint across authority moves
   const { runtime, frames, fakeBackends } = await createHarness({
     prefabEntries: [prefab], resources: [{ id: 'texture/card', kind: 'texture', url: './card.png' }],
     bootstrapAuthority(authority) {
-      authority.createNode({ ...createCommand('py/card'), transform: matrixTransform({
+      authority.createNode({ ...createCommand(0), transform: matrixTransform({
         position: [4, 2, -3], rotationXyzw: [0, Math.SQRT1_2, 0, Math.SQRT1_2], scale: [2, 2, 2],
       }) });
     },
@@ -1070,18 +1070,18 @@ test('sprite projection uses its fixed ancestor footpoint across authority moves
   const assertProjection = () => {
     const view = runtime.currentView();
     const bindings = fakeBackends.at(-1).bindings;
-    const card = bindings.get(JSON.stringify(['prefab/py/card/body/card', 'sprite']));
-    const foot = view.getWorldTransform('prefab/py/card/body');
-    const center = view.getWorldTransform('prefab/py/card/body/card');
+    const card = bindings.get(JSON.stringify(['prefab/py/0/body/card', 'sprite']));
+    const foot = view.getWorldTransform('prefab/py/0/body');
+    const center = view.getWorldTransform('prefab/py/0/body/card');
     assert.deepEqual(card.patch.panelAnchorWorld, matrixPosition(foot));
     assert.notDeepEqual(card.patch.panelAnchorWorld, matrixPosition(center));
     assert.deepEqual(Array.from(card.patch.worldMatrix), Array.from(center));
-    assert.equal(bindings.get(JSON.stringify(['prefab/py/card/ground', 'sprite'])).patch.panelAnchorWorld, null);
+    assert.equal(bindings.get(JSON.stringify(['prefab/py/0/ground', 'sprite'])).patch.panelAnchorWorld, null);
     return card.patch.panelAnchorWorld;
   };
   const initial = assertProjection();
   commitAuthority(runtime, () => runtime.authority.setNodeTransform({
-    name: 'py/card', transform: matrixTransform({ position: [9, 2, -3] }),
+    nodeId: 0, transform: matrixTransform({ position: [9, 2, -3] }),
   }), { sourceTickDelta: 1 });
   frames.step();
   const moved = assertProjection();
@@ -1122,15 +1122,15 @@ test('sprite panel anchors invalidate only from their nearest Billboard source',
     prefabEntries: [prefab],
     resources: [{ id: 'texture/card', kind: 'texture', url: './card.png' }],
     bootstrapAuthority(authority) {
-      authority.createNode(createCommand('py/panel'));
+      authority.createNode(createCommand(0));
     },
   });
   t.after(() => runtime.dispose());
   runtime.start(); await runtime.whenReady(); frames.step();
 
   const fake = fakeBackends[0];
-  const outerName = 'prefab/py/panel/outer';
-  const innerName = 'prefab/py/panel/outer/inner';
+  const outerName = 'prefab/py/0/outer';
+  const innerName = 'prefab/py/0/outer/inner';
   const outer = runtime._nodeIndex.require(outerName);
   const inner = runtime._nodeIndex.require(innerName);
   const binding = (nodeName, componentKey) => fake.bindings.get(
@@ -1313,7 +1313,7 @@ test('dispose is one completion barrier and health observers cannot interrupt cl
   ]) assert.equal(runtime[key], null, `DisplayRuntime.${key} must be released`);
   assert.equal(runtime.authority, authority);
   assert.equal(runtime.commitGate, commitGate);
-  assert.throws(() => authority.createNode(createCommand('py/after-dispose')),
+  assert.throws(() => authority.createNode(createCommand(0)),
     { code: 'display-disposed' });
   assert.throws(() => commitGate.begin({ commitSeq: 1, sourceTick: 1, lastCommandSeq: 1 }),
     { code: 'display-disposed' });

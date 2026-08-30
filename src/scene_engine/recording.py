@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
-from .display_binary import decode_display_command_stream_binary
 from .errors import RecordingError
 from .wire import (
     DEFAULT_ENGINE_LIMITS,
@@ -28,6 +27,12 @@ PACKET_LOG_PACKETS = "packets.bin"
 PACKET_LOG_INDEX = "index.json"
 PACKET_LOG_INCOMPLETE = "INCOMPLETE"
 _LENGTH = struct.Struct("<Q")
+
+
+@dataclass(frozen=True, slots=True)
+class _MatrixPoolState:
+    pool_size: int
+    active_node_ids: frozenset[int]
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,6 +129,7 @@ class PacketLogWriter:
         self._last_tick: int | None = None
         self._last_revision: int | None = None
         self._last_command_seq: int | None = None
+        self._matrix_pool_state: _MatrixPoolState | None = None
         self._sealed = False
         self._closed = False
         try:
@@ -177,6 +183,9 @@ class PacketLogWriter:
                 raise RecordingError("packet log commit progression is invalid")
             elif not _cause_matches_tick(packet.header["cause"], tick - self._last_tick):
                 raise RecordingError("packet log cause/tick progression is invalid")
+        next_matrix_pool_state = _advance_matrix_pool_state(
+            self._matrix_pool_state, packet
+        )
         prefix = _LENGTH.pack(len(raw))
         try:
             prefix_offset = self._stream.tell()
@@ -205,6 +214,7 @@ class PacketLogWriter:
         self._last_tick = tick
         self._last_revision = revision
         self._last_command_seq = command_sequence
+        self._matrix_pool_state = next_matrix_pool_state
         return entry
 
     def seal(self) -> dict[str, Any]:
@@ -328,6 +338,7 @@ def rebuild_packet_index(
     cursor = 0
     entries: list[PacketLogEntry] = []
     previous = None
+    matrix_pool_state: _MatrixPoolState | None = None
     while cursor < len(raw):
         if cursor + _LENGTH.size > len(raw):
             raise RecordingError("packets.bin length prefix is truncated")
@@ -340,6 +351,7 @@ def rebuild_packet_index(
         if packet.kind not in (PacketKind.CHECKPOINT, PacketKind.COMMIT):
             raise RecordingError("packet log contains a non-state packet")
         _validate_packet_progression(previous, packet)
+        matrix_pool_state = _advance_matrix_pool_state(matrix_pool_state, packet)
         header = packet.header
         entries.append(
             PacketLogEntry(
@@ -471,12 +483,92 @@ def _cause_matches_tick(cause: str, delta: int) -> bool:
 
 
 def _display_command_base(packet: Any) -> int:
-    stream = decode_display_command_stream_binary(
-        packet.attachments[1].bytes,
-        expected_source_tick=packet.header["source_tick"],
-        expected_last_command_seq=packet.header["last_command_seq"],
+    return _display_payload(packet)["base_command_seq"]
+
+
+def _advance_matrix_pool_state(
+    previous: _MatrixPoolState | None,
+    packet: Any,
+) -> _MatrixPoolState:
+    payload = _display_payload(packet)
+    pool_size = payload["matrix_pool_size"]
+    if packet.kind is PacketKind.CHECKPOINT:
+        active_node_ids = frozenset(node["node_id"] for node in payload["nodes"])
+        if previous is None:
+            # Every allocated ID outside this set is a historical zero tombstone.
+            return _MatrixPoolState(pool_size, active_node_ids)
+        if (
+            pool_size != previous.pool_size
+            or active_node_ids != previous.active_node_ids
+        ):
+            raise RecordingError(
+                "periodic checkpoint matrix pool lifecycle does not match log"
+            )
+        return previous
+
+    if previous is None:
+        raise RecordingError("packet log matrix pool requires an initial checkpoint")
+    if pool_size < previous.pool_size:
+        raise RecordingError("packet log matrix pool cannot shrink within a stream")
+
+    commands = payload["commands"]
+    created_node_ids = tuple(
+        sorted(
+            command["node_id"]
+            for command in commands
+            if command["kind"] == "node-create"
+        )
     )
-    return stream["base_command_seq"]
+    growth = pool_size - previous.pool_size
+    if len(created_node_ids) != growth or any(
+        node_id != previous.pool_size + offset
+        for offset, node_id in enumerate(created_node_ids)
+    ):
+        raise RecordingError(
+            "packet log matrix pool growth must create every new suffix ID"
+        )
+    if growth > len(payload["dirty_node_ids"]):
+        raise RecordingError(
+            "packet log matrix pool growth must transmit every new suffix row"
+        )
+    dirty_node_ids = {int(node_id) for node_id in payload["dirty_node_ids"]}
+    if any(
+        node_id not in dirty_node_ids for node_id in created_node_ids
+    ):
+        raise RecordingError(
+            "packet log matrix pool growth must transmit every new suffix row"
+        )
+
+    active_node_ids = set(previous.active_node_ids)
+    for command in commands:
+        kind = command["kind"]
+        node_id = command["node_id"]
+        if kind == "node-create":
+            if node_id < previous.pool_size or node_id in active_node_ids:
+                raise RecordingError(
+                    "packet log node-create cannot reclaim an allocated ID"
+                )
+            parent_node_id = command["parent_node_id"]
+            if parent_node_id is not None and parent_node_id not in active_node_ids:
+                raise RecordingError("packet log node-create parent is not active")
+            active_node_ids.add(node_id)
+            continue
+        if node_id not in active_node_ids:
+            raise RecordingError("packet log command target is not active")
+        if kind == "node-set-parent":
+            parent_node_id = command["parent_node_id"]
+            if parent_node_id is not None and parent_node_id not in active_node_ids:
+                raise RecordingError("packet log node-set-parent parent is not active")
+        elif kind == "node-remove":
+            active_node_ids.remove(node_id)
+    return _MatrixPoolState(pool_size, frozenset(active_node_ids))
+
+
+def _display_payload(packet: Any) -> Any:
+    payload = packet._display_payload
+    if not isinstance(payload, dict):
+        raise RecordingError("packet log Display payload is unavailable")
+    return payload
 
 
 def _index_integer(value: Any, field: str) -> int:

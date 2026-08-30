@@ -21,11 +21,12 @@ from .errors import ConfigurationError
 from .json_tree import validate_json_value
 
 
-DISPLAY_CODEC = "scene-engine-display-node@5"
-DISPLAY_CHECKPOINT_SCHEMA = "scene-engine-display-checkpoint@5"
-DISPLAY_COMMAND_STREAM_SCHEMA = "scene-engine-display-command-stream@5"
-DISPLAY_COMMAND_SCHEMA = "scene-engine-node-command@5"
-MAXIMUM_NODE_NAME_BYTES = 192
+DISPLAY_CODEC = "scene-engine-display-node@6"
+DISPLAY_CHECKPOINT_SCHEMA = "scene-engine-display-checkpoint@6"
+DISPLAY_COMMAND_STREAM_SCHEMA = "scene-engine-display-command-stream@6"
+DISPLAY_COMMAND_SCHEMA = "scene-engine-node-command@6"
+MAXIMUM_NODE_ID = 0xFFFFFFFE
+NULL_NODE_ID = 0xFFFFFFFF
 MAXIMUM_PREFAB_ID_BYTES = 192
 MAXIMUM_SCENE_NAME_BYTES = 96
 MAXIMUM_NODE_DEPTH = 128
@@ -117,6 +118,16 @@ class DisplayTransform:
     @classmethod
     def identity(cls) -> "DisplayTransform":
         matrix = _IDENTITY_MATRIX4_F32.copy(order="F")
+        matrix.flags.writeable = False
+        instance = object.__new__(cls)
+        object.__setattr__(instance, "_matrix", matrix)
+        return instance
+
+    @classmethod
+    def _from_matrix_buffer(cls, value: np.ndarray) -> "DisplayTransform":
+        """Copy one trusted pool row without a bytes/frombuffer round trip."""
+
+        matrix = value.T.copy(order="F")
         matrix.flags.writeable = False
         instance = object.__new__(cls)
         object.__setattr__(instance, "_matrix", matrix)
@@ -387,60 +398,430 @@ def _restore_display_transform(matrix_bytes: bytes) -> DisplayTransform:
     return DisplayTransform(matrix_bytes=matrix_bytes)
 
 
+@dataclass(slots=True)
+class _MatrixPoolPublishToken:
+    pool: "DisplayMatrixPool"
+    generation: int
+    dirty_node_ids: np.ndarray
+    dirty_versions: np.ndarray
+    publication_node_ids: np.ndarray
+    publication_values: np.ndarray
+    publication_versions: np.ndarray
+    confirmed: bool = False
+
+    def confirm(self) -> None:
+        if self.confirmed:
+            return
+        self.pool._confirm_snapshot(
+            self.generation,
+            self.dirty_node_ids,
+            self.dirty_versions,
+            self.publication_node_ids,
+            self.publication_values,
+            self.publication_versions,
+        )
+        self.confirmed = True
+
+
+class DisplayMatrixPool:
+    """The sole persistent owner for one stream's authority Matrix4 rows.
+
+    Logical storage has shape ``(n, 4, 4)`` and C order.  Its axes are
+    ``[node, column, row]``, so each 64-byte row is the established
+    column-major Matrix4 byte sequence.  Node IDs are monotonically appended
+    uint32 values; retiring a row zeros it permanently and never reuses it.
+    """
+
+    __slots__ = (
+        "_capacity",
+        "_dirty_ids",
+        "_matrices",
+        "_pending_created_ids",
+        "_pending_retired_ids",
+        "_published",
+        "_retired",
+        "_size",
+        "_version",
+        "_versions",
+    )
+
+    def __init__(self) -> None:
+        self._capacity = 0
+        self._size = 0
+        self._version = 0
+        self._matrices = np.empty((0, 4, 4), dtype="<f4", order="C")
+        self._dirty_ids: set[int] = set()
+        self._pending_created_ids: set[int] = set()
+        self._pending_retired_ids: set[int] = set()
+        self._published = np.empty(0, dtype=np.bool_)
+        self._retired = np.empty(0, dtype=np.bool_)
+        self._versions = np.empty(0, dtype=np.uint64)
+
+    def __len__(self) -> int:
+        return self._size
+
+    @property
+    def size(self) -> int:
+        return self._size
+
+    @property
+    def _mutation_generation(self) -> int:
+        return self._version
+
+    @property
+    def matrices(self) -> np.ndarray:
+        """Return an isolated read-only logical ``(n, 4, 4)`` snapshot."""
+
+        payload = self._matrices[: self._size].tobytes(order="C")
+        return np.frombuffer(payload, dtype="<f4").reshape((self._size, 4, 4))
+
+    def append(
+        self,
+        transform: DisplayTransform | Sequence[float] | None = None,
+    ) -> int:
+        """Append one live row and return its never-reused uint32 Node ID."""
+
+        if self._size > MAXIMUM_NODE_ID:
+            raise ConfigurationError("display matrix pool exhausted uint32 Node IDs")
+        normalized = (
+            DisplayTransform.identity()
+            if transform is None
+            else _display_transform(transform)
+        )
+        node_id = self._size
+        self._ensure_capacity(node_id + 1)
+        np.copyto(self._matrices[node_id], normalized._matrix_buffer())
+        self._published[node_id] = False
+        self._retired[node_id] = False
+        self._pending_created_ids.add(node_id)
+        self._touch(node_id)
+        self._size += 1
+        return node_id
+
+    def set(
+        self,
+        node_id: int,
+        transform: DisplayTransform | Sequence[float],
+    ) -> None:
+        """Replace one live row and mark that Node ID dirty."""
+
+        index = self._require_live(node_id)
+        normalized = _display_transform(transform)
+        np.copyto(self._matrices[index], normalized._matrix_buffer())
+        self._touch(index)
+
+    def retire(self, node_id: int) -> None:
+        """Permanently retire one row, writing an exact all-zero tombstone."""
+
+        index = self._require_live(node_id)
+        if not self._published[index]:
+            raise ConfigurationError(
+                "node_id must be published before its matrix row can be retired"
+            )
+        self._matrices[index].fill(0.0)
+        self._retired[index] = True
+        self._pending_retired_ids.add(index)
+        self._dirty_ids.discard(index)
+        self._version += 1
+        self._versions[index] = self._version
+
+    def transform(self, node_id: int) -> DisplayTransform:
+        """Return an immutable value snapshot for one live pool row."""
+
+        index = self._require_live(node_id)
+        return DisplayTransform._from_matrix_buffer(self._matrices[index])
+
+    def _ensure_capacity(self, required: int) -> None:
+        if required <= self._capacity:
+            return
+        capacity = max(4, required, self._capacity * 2)
+        matrices = np.zeros((capacity, 4, 4), dtype="<f4", order="C")
+        retired = np.zeros(capacity, dtype=np.bool_)
+        published = np.zeros(capacity, dtype=np.bool_)
+        versions = np.zeros(capacity, dtype=np.uint64)
+        if self._size:
+            matrices[: self._size] = self._matrices[: self._size]
+            retired[: self._size] = self._retired[: self._size]
+            published[: self._size] = self._published[: self._size]
+            versions[: self._size] = self._versions[: self._size]
+        self._capacity = capacity
+        self._matrices = matrices
+        self._retired = retired
+        self._published = published
+        self._versions = versions
+
+    def _touch(self, node_id: int) -> None:
+        self._version += 1
+        self._versions[node_id] = self._version
+        self._dirty_ids.add(node_id)
+
+    def _require_allocated(self, node_id: Any, field: str = "node_id") -> int:
+        index = _node_id(node_id, field)
+        if index >= self._size:
+            raise ConfigurationError(f"{field} is not allocated in the matrix pool")
+        return index
+
+    def _require_live(self, node_id: Any, field: str = "node_id") -> int:
+        index = self._require_allocated(node_id, field)
+        if self._retired[index]:
+            raise ConfigurationError(f"{field} is retired in the matrix pool")
+        return index
+
+    def _active_node_ids(self) -> tuple[int, ...]:
+        return tuple(
+            int(index)
+            for index in np.flatnonzero(~self._retired[: self._size])
+        )
+
+    def _has_pending_changes(self) -> bool:
+        return bool(
+            self._dirty_ids
+            or self._pending_created_ids
+            or self._pending_retired_ids
+        )
+
+    def _snapshot_full(self) -> tuple[np.ndarray, _MatrixPoolPublishToken]:
+        matrix_bytes = self._matrices[: self._size].tobytes(order="C")
+        matrices = np.frombuffer(matrix_bytes, dtype="<f4").reshape(
+            (self._size, 4, 4)
+        )
+        node_ids = np.frombuffer(
+            np.arange(self._size, dtype="<u4").tobytes(), dtype="<u4"
+        )
+        versions = self._versions[: self._size].copy()
+        versions.flags.writeable = False
+        publication_values = (~self._retired[: self._size]).copy()
+        publication_values.flags.writeable = False
+        return matrices, _MatrixPoolPublishToken(
+            self,
+            self._version,
+            node_ids,
+            versions,
+            node_ids,
+            publication_values,
+            versions,
+        )
+
+    def _snapshot_dirty(
+        self,
+        expected_node_ids: Sequence[int],
+        publication_updates: Sequence[tuple[int, bool]],
+    ) -> tuple[np.ndarray, np.ndarray, _MatrixPoolPublishToken]:
+        expected = tuple(expected_node_ids)
+        if len(self._dirty_ids) != len(expected) or any(
+            node_id not in self._dirty_ids for node_id in expected
+        ):
+            raise ConfigurationError(
+                "dirty matrix Node IDs must exactly match create/set-transform commands"
+            )
+        mutable_node_ids = np.asarray(expected, dtype="<u4")
+        matrices_bytes = self._matrices[mutable_node_ids].tobytes(order="C")
+        node_ids = np.frombuffer(mutable_node_ids.tobytes(), dtype="<u4")
+        matrices = np.frombuffer(matrices_bytes, dtype="<f4").reshape(
+            (len(expected), 4, 4)
+        )
+        versions = self._versions[node_ids].copy()
+        versions.flags.writeable = False
+        mutable_publication_node_ids = np.asarray(
+            [node_id for node_id, _value in publication_updates], dtype="<u4"
+        )
+        publication_node_ids = np.frombuffer(
+            mutable_publication_node_ids.tobytes(), dtype="<u4"
+        )
+        publication_values = np.frombuffer(
+            np.asarray(
+                [value for _node_id, value in publication_updates], dtype=np.bool_
+            ).tobytes(),
+            dtype=np.bool_,
+        )
+        publication_versions = self._versions[publication_node_ids].copy()
+        publication_versions.flags.writeable = False
+        return (
+            node_ids,
+            matrices,
+            _MatrixPoolPublishToken(
+                self,
+                self._version,
+                node_ids,
+                versions,
+                publication_node_ids,
+                publication_values,
+                publication_versions,
+            ),
+        )
+
+    def _confirm_snapshot(
+        self,
+        generation: int,
+        dirty_node_ids: np.ndarray,
+        dirty_versions: np.ndarray,
+        publication_node_ids: np.ndarray,
+        publication_values: np.ndarray,
+        publication_versions: np.ndarray,
+    ) -> None:
+        if self._version != generation:
+            raise ConfigurationError(
+                "display matrix pool changed after its packet snapshot was sealed"
+            )
+        for node_id, version in zip(dirty_node_ids, dirty_versions, strict=True):
+            index = int(node_id)
+            if index < self._size and self._versions[index] == version:
+                self._dirty_ids.discard(index)
+        for node_id, value, version in zip(
+            publication_node_ids,
+            publication_values,
+            publication_versions,
+            strict=True,
+        ):
+            index = int(node_id)
+            if index < self._size and self._versions[index] == version:
+                self._published[index] = bool(value)
+                if value:
+                    self._pending_created_ids.discard(index)
+                else:
+                    self._pending_retired_ids.discard(index)
+        # Individual ``discard`` calls leave a large, empty hash table behind.
+        # Release that transient publication bookkeeping once a sealed packet
+        # has drained it so the resident cost returns to the NumPy-backed pool.
+        if not self._dirty_ids:
+            self._dirty_ids.clear()
+        if not self._pending_created_ids:
+            self._pending_created_ids.clear()
+        if not self._pending_retired_ids:
+            self._pending_retired_ids.clear()
+
+    def _validate_command_lifecycle(
+        self, commands: Sequence["DisplayCommand"]
+    ) -> tuple[tuple[tuple[int, bool], ...], tuple[int, ...], int]:
+        active: dict[int, bool] = {}
+        updates: list[tuple[int, bool]] = []
+        create_targets: set[int] = set()
+        matrix_targets: set[int] = set()
+        remove_targets: set[int] = set()
+        maximum_json_depth = 0
+
+        def is_active(node_id: int) -> bool:
+            return active.get(node_id, bool(self._published[node_id]))
+
+        for command in commands:
+            node_id = self._require_allocated(command.node_id)
+            if command.kind == "node-create":
+                if node_id not in self._pending_created_ids or is_active(node_id):
+                    raise ConfigurationError(
+                        "node-create must target a newly appended unpublished Node ID"
+                    )
+                parent = command.fields["parent_node_id"]
+                if parent is not None:
+                    parent = self._require_allocated(parent, "parent_node_id")
+                    if not is_active(parent) or self._retired[parent]:
+                        raise ConfigurationError("node-create parent is not active")
+                active[node_id] = True
+                create_targets.add(node_id)
+                matrix_targets.add(node_id)
+                maximum_json_depth = max(
+                    maximum_json_depth,
+                    _maximum_json_depth(command.fields["state"]),
+                )
+                updates.append((node_id, True))
+                continue
+            if not is_active(node_id):
+                raise ConfigurationError(
+                    f"{command.kind} targets a Node ID that is not active"
+                )
+            if command.kind == "node-remove":
+                if node_id not in self._pending_retired_ids:
+                    raise ConfigurationError(
+                        "node-remove must target a just-retired active Node ID"
+                    )
+                active[node_id] = False
+                remove_targets.add(node_id)
+                updates.append((node_id, False))
+                continue
+            if self._retired[node_id]:
+                raise ConfigurationError(
+                    f"{command.kind} targets a retired Node ID"
+                )
+            if command.kind == "node-set-transform":
+                if node_id in matrix_targets:
+                    raise ConfigurationError(
+                        "create/set-transform commands must target each Node ID at most once"
+                    )
+                matrix_targets.add(node_id)
+            elif command.kind == "node-set-parent":
+                parent = command.fields["parent_node_id"]
+                if parent is not None:
+                    parent = self._require_allocated(parent, "parent_node_id")
+                    if not is_active(parent) or self._retired[parent]:
+                        raise ConfigurationError("node-set-parent parent is not active")
+            elif command.kind in {"node-set-state", "node-replace-prefab"}:
+                maximum_json_depth = max(
+                    maximum_json_depth,
+                    _maximum_json_depth(command.fields["state"]),
+                )
+        if create_targets != self._pending_created_ids:
+            raise ConfigurationError(
+                "node-create commands must exactly match newly appended Node IDs"
+            )
+        if remove_targets != self._pending_retired_ids:
+            raise ConfigurationError(
+                "node-remove commands must exactly match just-retired Node IDs"
+            )
+        return tuple(updates), tuple(sorted(matrix_targets)), maximum_json_depth
+
+
+def _display_transform(
+    value: DisplayTransform | Sequence[float],
+) -> DisplayTransform:
+    return (
+        value if isinstance(value, DisplayTransform) else DisplayTransform.from_record(value)
+    )
+
+
 @dataclass(frozen=True, slots=True, init=False)
 class DisplayNode:
     """One Python-owned authority root in a checkpoint baseline."""
 
-    name: str
-    parent_name: str | None
+    node_id: int
+    parent_node_id: int | None
     prefab_id: str
     transform_mode: str
-    transform: DisplayTransform
     visible: bool
     state: Mapping[str, Any]
 
     def __init__(
         self,
         *,
-        name: str,
-        parent_name: str | None,
+        node_id: int,
+        parent_node_id: int | None,
         prefab_id: str,
         transform_mode: str,
-        transform: DisplayTransform | Sequence[float],
         visible: bool,
         state: Mapping[str, Any],
     ) -> None:
-        _authority_name(name, "name")
-        if parent_name is not None:
-            _authority_name(parent_name, "parent_name")
-            if parent_name == name:
+        normalized_node_id = _node_id(node_id, "node_id")
+        normalized_parent_id = _nullable_node_id(parent_node_id, "parent_node_id")
+        if normalized_parent_id is not None:
+            if normalized_parent_id == normalized_node_id:
                 raise ConfigurationError("authority Node cannot parent itself")
         _prefab_id(prefab_id)
         if transform_mode not in {"initial", "live"}:
             raise ConfigurationError("transform_mode must be initial or live")
-        normalized_transform = (
-            transform
-            if isinstance(transform, DisplayTransform)
-            else DisplayTransform.from_record(transform)
-        )
         if not isinstance(visible, bool):
             raise ConfigurationError("visible must be boolean")
         normalized_state = _plain_state(state)
-        object.__setattr__(self, "name", name)
-        object.__setattr__(self, "parent_name", parent_name)
+        object.__setattr__(self, "node_id", normalized_node_id)
+        object.__setattr__(self, "parent_node_id", normalized_parent_id)
         object.__setattr__(self, "prefab_id", prefab_id)
         object.__setattr__(self, "transform_mode", transform_mode)
-        object.__setattr__(self, "transform", normalized_transform)
         object.__setattr__(self, "visible", visible)
         object.__setattr__(self, "state", normalized_state)
 
     def to_record(self) -> dict[str, Any]:
         return {
-            "name": self.name,
-            "parent_name": self.parent_name,
+            "node_id": self.node_id,
+            "parent_node_id": self.parent_node_id,
             "prefab_id": self.prefab_id,
             "transform_mode": self.transform_mode,
-            "transform": self.transform.to_record(),
             "visible": self.visible,
             "state": _thaw(self.state),
         }
@@ -448,16 +829,10 @@ class DisplayNode:
 
 @dataclass(frozen=True, slots=True, init=False)
 class DisplayCommand:
-    """One closed logical mutation with exactly one product-owned target.
-
-    Commands are closed records. Product code must use the named constructors so
-    an invalid kind/field combination cannot be assembled dynamically. Mutation
-    target names are trusted on this Python hot path and validated at decoded
-    command boundaries and by the browser Client before Display mutation.
-    """
+    """One closed logical mutation targeting a stream-stable uint32 Node ID."""
 
     kind: str
-    name: str
+    node_id: int
     fields: Mapping[str, Any]
 
     def __init__(self, *_args: Any, **_kwargs: Any) -> None:
@@ -471,53 +846,54 @@ class DisplayCommand:
             raise ConfigurationError("node-create requires DisplayNode")
         return _new_display_command(
             kind="node-create",
-            name=node.name,
-            parent_name=node.parent_name,
+            node_id=node.node_id,
+            parent_node_id=node.parent_node_id,
             prefab_id=node.prefab_id,
             transform_mode=node.transform_mode,
-            transform=node.transform,
             visible=node.visible,
             state=node.state,
         )
 
     @classmethod
-    def set_transform(
-        cls, name: str, transform: DisplayTransform | Sequence[float]
+    def set_transform(cls, node_id: int) -> "DisplayCommand":
+        return _new_display_command(kind="node-set-transform", node_id=node_id)
+
+    @classmethod
+    def set_parent(
+        cls, node_id: int, parent_node_id: int | None
     ) -> "DisplayCommand":
         return _new_display_command(
-            kind="node-set-transform", name=name, transform=transform
+            kind="node-set-parent",
+            node_id=node_id,
+            parent_node_id=parent_node_id,
         )
 
     @classmethod
-    def set_parent(cls, name: str, parent_name: str | None) -> "DisplayCommand":
+    def set_visible(cls, node_id: int, visible: bool) -> "DisplayCommand":
         return _new_display_command(
-            kind="node-set-parent", name=name, parent_name=parent_name
+            kind="node-set-visible", node_id=node_id, visible=visible
         )
 
     @classmethod
-    def set_visible(cls, name: str, visible: bool) -> "DisplayCommand":
+    def set_state(cls, node_id: int, state: Mapping[str, Any]) -> "DisplayCommand":
         return _new_display_command(
-            kind="node-set-visible", name=name, visible=visible
+            kind="node-set-state", node_id=node_id, state=state
         )
-
-    @classmethod
-    def set_state(cls, name: str, state: Mapping[str, Any]) -> "DisplayCommand":
-        return _new_display_command(kind="node-set-state", name=name, state=state)
 
     @classmethod
     def replace_prefab(
-        cls, name: str, prefab_id: str, state: Mapping[str, Any]
+        cls, node_id: int, prefab_id: str, state: Mapping[str, Any]
     ) -> "DisplayCommand":
         return _new_display_command(
             kind="node-replace-prefab",
-            name=name,
+            node_id=node_id,
             prefab_id=prefab_id,
             state=state,
         )
 
     @classmethod
-    def remove(cls, name: str) -> "DisplayCommand":
-        return _new_display_command(kind="node-remove", name=name)
+    def remove(cls, node_id: int) -> "DisplayCommand":
+        return _new_display_command(kind="node-remove", node_id=node_id)
 
     def to_record(self, *, command_seq: int, source_tick: int) -> dict[str, Any]:
         _safe_integer(command_seq, "command_seq")
@@ -527,41 +903,40 @@ class DisplayCommand:
             "command_seq": command_seq,
             "source_tick": source_tick,
             "kind": self.kind,
-            "name": self.name,
+            "node_id": self.node_id,
             **_thaw(self.fields),
         }
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, eq=False)
 class ValidatedDisplayCheckpoint:
-    """Typed seal for a parent-first Display checkpoint."""
+    """Typed seal owning one full, immutable MatrixPool snapshot."""
 
     scene_name: str
     catalog: DisplayCatalogIdentity
     last_command_seq: int
+    matrix_pool_size: int
+    matrix_pool: np.ndarray
     nodes: tuple[DisplayNode, ...]
     maximum_json_depth: int
+    _publish_token: _MatrixPoolPublishToken
 
     def __post_init__(self) -> None:
         _scene_name(self.scene_name)
         if not isinstance(self.catalog, DisplayCatalogIdentity):
             raise ConfigurationError("catalog must be DisplayCatalogIdentity")
         _safe_integer(self.last_command_seq, "last_command_seq")
-        if (
-            not isinstance(self.nodes, tuple)
-            or _ordered_baseline(self.nodes) != self.nodes
-        ):
-            raise ConfigurationError("validated display checkpoint nodes are invalid")
-        expected_depth = max(
-            (_maximum_json_depth(node.state) for node in self.nodes),
-            default=0,
+        _validate_matrix_tensor(
+            self.matrix_pool, self.matrix_pool_size, "matrix_pool"
         )
-        if (
-            isinstance(self.maximum_json_depth, bool)
-            or not isinstance(self.maximum_json_depth, int)
-            or self.maximum_json_depth != expected_depth
-        ):
-            raise ConfigurationError("validated display checkpoint depth is invalid")
+        normalized = _ordered_baseline(self.nodes)
+        if normalized != self.nodes:
+            raise ConfigurationError("validated display checkpoint nodes are invalid")
+        _validate_baseline_pool(self.nodes, self.matrix_pool, self.matrix_pool_size)
+        _validate_maximum_depth(self.maximum_json_depth, self.nodes)
+
+    def confirm_published(self) -> None:
+        self._publish_token.confirm()
 
     def to_record(self) -> dict[str, Any]:
         return {
@@ -569,45 +944,55 @@ class ValidatedDisplayCheckpoint:
             "scene_name": self.scene_name,
             **self.catalog.to_record(),
             "last_command_seq": self.last_command_seq,
+            "matrix_pool_size": self.matrix_pool_size,
+            "matrix_pool": self.matrix_pool.tolist(),
             "nodes": [node.to_record() for node in self.nodes],
         }
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, eq=False)
 class ValidatedDisplayCommandStream:
-    """Typed seal retaining validated commands and their matrix owners."""
+    """Typed seal owning one immutable dirty MatrixPool gather."""
 
     base_command_seq: int
     source_tick: int
     last_command_seq: int
+    matrix_pool_size: int
+    dirty_node_ids: np.ndarray
+    dirty_matrices: np.ndarray
     commands: tuple[DisplayCommand, ...]
     maximum_json_depth: int
+    _publish_token: _MatrixPoolPublishToken
 
     def __post_init__(self) -> None:
         _safe_integer(self.base_command_seq, "base_command_seq")
         _safe_integer(self.source_tick, "source_tick")
         _safe_integer(self.last_command_seq, "last_command_seq")
+        _pool_size(self.matrix_pool_size)
         normalized = _logical_commands(self.commands)
         if normalized != self.commands:
             raise ConfigurationError("validated display command stream is invalid")
         if self.last_command_seq != self.base_command_seq + len(self.commands):
             raise ConfigurationError("validated display command stream cursor is invalid")
-        expected_depth = max(
-            (_command_json_depth(command) for command in self.commands),
-            default=0,
+        _validate_dirty_batch(
+            self.dirty_node_ids,
+            self.dirty_matrices,
+            self.matrix_pool_size,
+            self.commands,
         )
-        if (
-            isinstance(self.maximum_json_depth, bool)
-            or not isinstance(self.maximum_json_depth, int)
-            or self.maximum_json_depth != expected_depth
-        ):
-            raise ConfigurationError("validated display command stream depth is invalid")
+        _validate_maximum_depth(self.maximum_json_depth, self.commands)
+
+    def confirm_published(self) -> None:
+        self._publish_token.confirm()
 
     def to_record(self) -> dict[str, Any]:
         return {
             "schema": DISPLAY_COMMAND_STREAM_SCHEMA,
             "base_command_seq": self.base_command_seq,
             "last_command_seq": self.last_command_seq,
+            "matrix_pool_size": self.matrix_pool_size,
+            "dirty_node_ids": self.dirty_node_ids.tolist(),
+            "dirty_matrices": self.dirty_matrices.tolist(),
             "commands": [
                 command.to_record(
                     command_seq=self.base_command_seq + ordinal,
@@ -618,15 +1003,43 @@ class ValidatedDisplayCommandStream:
         }
 
 
-def _new_display_command(*, kind: str, name: str, **fields: Any) -> DisplayCommand:
+def _new_validated_display_command_stream(
+    *,
+    base_command_seq: int,
+    source_tick: int,
+    last_command_seq: int,
+    matrix_pool_size: int,
+    dirty_node_ids: np.ndarray,
+    dirty_matrices: np.ndarray,
+    commands: tuple[DisplayCommand, ...],
+    maximum_json_depth: int,
+    publish_token: _MatrixPoolPublishToken,
+) -> ValidatedDisplayCommandStream:
+    """Build a seal from parts already validated by the publication factory."""
+
+    result = object.__new__(ValidatedDisplayCommandStream)
+    object.__setattr__(result, "base_command_seq", base_command_seq)
+    object.__setattr__(result, "source_tick", source_tick)
+    object.__setattr__(result, "last_command_seq", last_command_seq)
+    object.__setattr__(result, "matrix_pool_size", matrix_pool_size)
+    object.__setattr__(result, "dirty_node_ids", dirty_node_ids)
+    object.__setattr__(result, "dirty_matrices", dirty_matrices)
+    object.__setattr__(result, "commands", commands)
+    object.__setattr__(result, "maximum_json_depth", maximum_json_depth)
+    object.__setattr__(result, "_publish_token", publish_token)
+    return result
+
+
+def _new_display_command(
+    *, kind: str, node_id: int, **fields: Any
+) -> DisplayCommand:
     if kind not in _COMMAND_KINDS:
         raise ConfigurationError("display command kind is invalid")
-    if not isinstance(name, str):
-        raise ConfigurationError("display command target name must be a string")
-    normalized = _normalize_command_fields(kind, name, fields)
+    normalized_node_id = _node_id(node_id, "node_id")
+    normalized = _normalize_command_fields(kind, normalized_node_id, fields)
     command = object.__new__(DisplayCommand)
     object.__setattr__(command, "kind", kind)
-    object.__setattr__(command, "name", name)
+    object.__setattr__(command, "node_id", normalized_node_id)
     object.__setattr__(command, "fields", _freeze(normalized))
     return command
 
@@ -636,58 +1049,86 @@ def encode_display_checkpoint(
     scene_name: str,
     catalog: DisplayCatalogIdentity,
     last_command_seq: int,
+    matrix_pool: DisplayMatrixPool,
     nodes: Sequence[DisplayNode],
 ) -> ValidatedDisplayCheckpoint:
-    """Build the typed baseline consumed by the binary Wire codec."""
+    """Seal one parent-first baseline and a full MatrixPool tensor."""
 
     _scene_name(scene_name)
     if not isinstance(catalog, DisplayCatalogIdentity):
         raise ConfigurationError("catalog must be DisplayCatalogIdentity")
     _safe_integer(last_command_seq, "last_command_seq")
-    normalized_nodes = _ordered_baseline(nodes)
+    if not isinstance(matrix_pool, DisplayMatrixPool):
+        raise ConfigurationError("matrix_pool must be DisplayMatrixPool")
+    normalized_nodes = validate_display_nodes(nodes, matrix_pool=matrix_pool)
+    snapshot, token = matrix_pool._snapshot_full()
     return ValidatedDisplayCheckpoint(
         scene_name=scene_name,
         catalog=catalog,
         last_command_seq=last_command_seq,
+        matrix_pool_size=len(matrix_pool),
+        matrix_pool=snapshot,
         nodes=normalized_nodes,
         maximum_json_depth=max(
             (_maximum_json_depth(node.state) for node in normalized_nodes),
             default=0,
         ),
+        _publish_token=token,
     )
 
 
-def validate_display_nodes(nodes: Sequence[DisplayNode]) -> tuple[DisplayNode, ...]:
-    """Validate and own a parent-before-child authority checkpoint baseline."""
+def validate_display_nodes(
+    nodes: Sequence[DisplayNode], *, matrix_pool: DisplayMatrixPool | None = None
+) -> tuple[DisplayNode, ...]:
+    """Validate a parent-before-child authority baseline and its pool IDs."""
 
-    return _ordered_baseline(nodes)
+    result = _ordered_baseline(nodes)
+    if matrix_pool is not None:
+        if not isinstance(matrix_pool, DisplayMatrixPool):
+            raise ConfigurationError("matrix_pool must be DisplayMatrixPool")
+        expected = matrix_pool._active_node_ids()
+        actual = tuple(sorted(node.node_id for node in result))
+        if actual != expected:
+            raise ConfigurationError(
+                "display checkpoint Nodes must exactly match live matrix pool IDs"
+            )
+    return result
 
 
 def encode_display_command_stream(
     *,
     base_command_seq: int,
     source_tick: int,
+    matrix_pool: DisplayMatrixPool,
     commands: Sequence[DisplayCommand],
 ) -> tuple[ValidatedDisplayCommandStream, int]:
-    """Assign strict stream-global sequence numbers to logical commands."""
+    """Seal commands plus one sorted dirty-ID / contiguous-matrix gather."""
 
     _safe_integer(base_command_seq, "base_command_seq")
     _safe_integer(source_tick, "source_tick")
+    if not isinstance(matrix_pool, DisplayMatrixPool):
+        raise ConfigurationError("matrix_pool must be DisplayMatrixPool")
     normalized = _logical_commands(commands)
+    publication_updates, expected_dirty, maximum_json_depth = (
+        matrix_pool._validate_command_lifecycle(normalized)
+    )
+    dirty_ids, dirty_matrices, token = matrix_pool._snapshot_dirty(
+        expected_dirty, publication_updates
+    )
     cursor = base_command_seq + len(normalized)
     if cursor > (1 << 53) - 1:
         raise ConfigurationError("last_command_seq must be a non-negative safe integer")
-    maximum_json_depth = max(
-        (_command_json_depth(command) for command in normalized),
-        default=0,
-    )
     return (
-        ValidatedDisplayCommandStream(
+        _new_validated_display_command_stream(
             base_command_seq=base_command_seq,
             source_tick=source_tick,
             last_command_seq=cursor,
+            matrix_pool_size=len(matrix_pool),
+            dirty_node_ids=dirty_ids,
+            dirty_matrices=dirty_matrices,
             commands=normalized,
             maximum_json_depth=maximum_json_depth,
+            publish_token=token,
         ),
         cursor,
     )
@@ -696,8 +1137,6 @@ def encode_display_command_stream(
 def validate_display_checkpoint(
     value: Any, *, expected_last_command_seq: int | None = None
 ) -> tuple[DisplayNode, ...]:
-    """Validate one decoded checkpoint attachment and return its Node baseline."""
-
     fields = {
         "schema",
         "scene_name",
@@ -705,6 +1144,8 @@ def validate_display_checkpoint(
         "prefab_catalog_hash",
         "state_schema_hash",
         "last_command_seq",
+        "matrix_pool_size",
+        "matrix_pool",
         "nodes",
     }
     if not isinstance(value, dict) or set(value) != fields:
@@ -720,24 +1161,22 @@ def validate_display_checkpoint(
     cursor = _safe_integer(value["last_command_seq"], "last_command_seq")
     if expected_last_command_seq is not None and cursor != expected_last_command_seq:
         raise ConfigurationError("display checkpoint command cursor is invalid")
+    size = _pool_size(value["matrix_pool_size"])
+    matrices = _matrix_tensor_from_record(value["matrix_pool"], size, "matrix_pool")
     nodes_value = value["nodes"]
     if not isinstance(nodes_value, list):
         raise ConfigurationError("display checkpoint nodes must be an array")
-    nodes: list[DisplayNode] = []
-    node_fields = {
-        "name",
-        "parent_name",
-        "prefab_id",
-        "transform_mode",
-        "transform",
-        "visible",
-        "state",
+    fields = {
+        "node_id", "parent_node_id", "prefab_id", "transform_mode", "visible", "state"
     }
+    nodes = []
     for record in nodes_value:
-        if not isinstance(record, dict) or set(record) != node_fields:
+        if not isinstance(record, dict) or set(record) != fields:
             raise ConfigurationError("display checkpoint Node fields are invalid")
         nodes.append(DisplayNode(**record))
-    return _ordered_baseline(nodes)
+    result = _ordered_baseline(nodes)
+    _validate_baseline_pool(result, matrices, size)
+    return result
 
 
 def validate_display_command_stream(
@@ -746,9 +1185,10 @@ def validate_display_command_stream(
     expected_source_tick: int,
     expected_last_command_seq: int,
 ) -> tuple[DisplayCommand, ...]:
-    """Validate a decoded stream envelope, record sequence, and every command."""
-
-    fields = {"schema", "base_command_seq", "last_command_seq", "commands"}
+    fields = {
+        "schema", "base_command_seq", "last_command_seq", "matrix_pool_size",
+        "dirty_node_ids", "dirty_matrices", "commands",
+    }
     if not isinstance(value, dict) or set(value) != fields:
         raise ConfigurationError("display command stream fields are invalid")
     if value["schema"] != DISPLAY_COMMAND_STREAM_SCHEMA:
@@ -756,27 +1196,31 @@ def validate_display_command_stream(
     base = _safe_integer(value["base_command_seq"], "base_command_seq")
     last = _safe_integer(value["last_command_seq"], "last_command_seq")
     _safe_integer(expected_source_tick, "expected_source_tick")
-    _safe_integer(expected_last_command_seq, "expected_last_command_seq")
-    if last != expected_last_command_seq or last < base:
+    if last != _safe_integer(expected_last_command_seq, "expected_last_command_seq") or last < base:
         raise ConfigurationError("display command stream cursor is invalid")
     records = value["commands"]
     if not isinstance(records, list) or len(records) != last - base:
         raise ConfigurationError("display command stream length is invalid")
-    commands: list[DisplayCommand] = []
-    cursor = base
-    for record in records:
+    commands = []
+    for ordinal, record in enumerate(records, 1):
         command = _command_from_record(record)
-        cursor += 1
-        if record["command_seq"] != cursor:
+        if record["command_seq"] != base + ordinal:
             raise ConfigurationError("display command sequence is invalid")
         if record["source_tick"] != expected_source_tick:
             raise ConfigurationError("display command source_tick is invalid")
         commands.append(command)
+    size = _pool_size(value["matrix_pool_size"])
+    dirty_ids = _dirty_ids_from_record(value["dirty_node_ids"], size)
+    dirty_matrices = _matrix_tensor_from_record(
+        value["dirty_matrices"], len(dirty_ids), "dirty_matrices"
+    )
+    _validate_command_pool_ids(tuple(commands), size)
+    _validate_dirty_batch(dirty_ids, dirty_matrices, size, tuple(commands))
     return tuple(commands)
 
 
 def _command_from_record(value: Any) -> DisplayCommand:
-    common = {"schema", "command_seq", "source_tick", "kind", "name"}
+    common = {"schema", "command_seq", "source_tick", "kind", "node_id"}
     if not isinstance(value, dict) or not common.issubset(value):
         raise ConfigurationError("display command record fields are invalid")
     if value["schema"] != DISPLAY_COMMAND_SCHEMA:
@@ -785,16 +1229,9 @@ def _command_from_record(value: Any) -> DisplayCommand:
     _safe_integer(value["source_tick"], "source_tick")
     kind = value["kind"]
     expected_by_kind = {
-        "node-create": {
-            "parent_name",
-            "prefab_id",
-            "transform_mode",
-            "transform",
-            "visible",
-            "state",
-        },
-        "node-set-transform": {"transform"},
-        "node-set-parent": {"parent_name"},
+        "node-create": {"parent_node_id", "prefab_id", "transform_mode", "visible", "state"},
+        "node-set-transform": set(),
+        "node-set-parent": {"parent_node_id"},
         "node-set-visible": {"visible"},
         "node-set-state": {"state"},
         "node-replace-prefab": {"prefab_id", "state"},
@@ -802,10 +1239,9 @@ def _command_from_record(value: Any) -> DisplayCommand:
     }
     if kind not in expected_by_kind or set(value) != common | expected_by_kind[kind]:
         raise ConfigurationError("display command record fields are invalid")
-    _authority_name(value["name"], "name")
     return _new_display_command(
         kind=kind,
-        name=value["name"],
+        node_id=value["node_id"],
         **{field: value[field] for field in expected_by_kind[kind]},
     )
 
@@ -814,21 +1250,20 @@ def _ordered_baseline(nodes: Sequence[DisplayNode]) -> tuple[DisplayNode, ...]:
     if not isinstance(nodes, (tuple, list)):
         raise ConfigurationError("display checkpoint nodes must be a sequence")
     result = tuple(nodes)
-    by_name: dict[str, DisplayNode] = {}
+    by_id: dict[int, DisplayNode] = {}
+    depths: dict[int, int] = {}
     for node in result:
         if not isinstance(node, DisplayNode):
             raise ConfigurationError("display checkpoint contains a non-DisplayNode")
-        if node.name in by_name:
-            raise ConfigurationError("display checkpoint contains duplicate names")
-        if node.parent_name is not None and node.parent_name not in by_name:
+        if node.node_id in by_id:
+            raise ConfigurationError("display checkpoint contains duplicate Node IDs")
+        if node.parent_node_id is not None and node.parent_node_id not in by_id:
             raise ConfigurationError("display checkpoint must be parent-before-child")
-        by_name[node.name] = node
-    depths: dict[str, int] = {}
-    for node in result:
-        depth = 1 if node.parent_name is None else depths[node.parent_name] + 1
+        depth = 1 if node.parent_node_id is None else depths[node.parent_node_id] + 1
         if depth > MAXIMUM_NODE_DEPTH:
             raise ConfigurationError("display checkpoint exceeds maximum Node depth")
-        depths[node.name] = depth
+        by_id[node.node_id] = node
+        depths[node.node_id] = depth
     return result
 
 
@@ -842,48 +1277,32 @@ def _logical_commands(commands: Sequence[DisplayCommand]) -> tuple[DisplayComman
 
 
 def _normalize_command_fields(
-    kind: str, name: str, fields: Mapping[str, Any]
+    kind: str, node_id: int, fields: Mapping[str, Any]
 ) -> dict[str, Any]:
     actual = set(fields)
     if kind == "node-create":
-        required = {
-            "parent_name",
-            "prefab_id",
-            "transform_mode",
-            "transform",
-            "visible",
-            "state",
-        }
+        required = {"parent_node_id", "prefab_id", "transform_mode", "visible", "state"}
         if actual != required:
             raise ConfigurationError("node-create fields are invalid")
-        node = DisplayNode(name=name, **fields)
+        node = DisplayNode(node_id=node_id, **fields)
         return {
-            "parent_name": node.parent_name,
+            "parent_node_id": node.parent_node_id,
             "prefab_id": node.prefab_id,
             "transform_mode": node.transform_mode,
-            "transform": node.transform,
             "visible": node.visible,
             "state": node.state,
         }
     if kind == "node-set-transform":
-        if actual != {"transform"}:
+        if actual:
             raise ConfigurationError("node-set-transform fields are invalid")
-        value = fields["transform"]
-        transform = (
-            value
-            if isinstance(value, DisplayTransform)
-            else DisplayTransform.from_record(value)
-        )
-        return {"transform": transform}
+        return {}
     if kind == "node-set-parent":
-        if actual != {"parent_name"}:
+        if actual != {"parent_node_id"}:
             raise ConfigurationError("node-set-parent fields are invalid")
-        parent_name = fields["parent_name"]
-        if parent_name is not None:
-            _authority_name(parent_name, "parent_name")
-            if parent_name == name:
-                raise ConfigurationError("authority Node cannot parent itself")
-        return {"parent_name": parent_name}
+        parent = _nullable_node_id(fields["parent_node_id"], "parent_node_id")
+        if parent == node_id:
+            raise ConfigurationError("authority Node cannot parent itself")
+        return {"parent_node_id": parent}
     if kind == "node-set-visible":
         if actual != {"visible"} or not isinstance(fields["visible"], bool):
             raise ConfigurationError("node-set-visible fields are invalid")
@@ -896,36 +1315,192 @@ def _normalize_command_fields(
         if actual != {"prefab_id", "state"}:
             raise ConfigurationError("node-replace-prefab fields are invalid")
         _prefab_id(fields["prefab_id"])
-        return {
-            "prefab_id": fields["prefab_id"],
-            "state": _plain_state(fields["state"]),
-        }
+        return {"prefab_id": fields["prefab_id"], "state": _plain_state(fields["state"])}
     if actual:
         raise ConfigurationError("node-remove fields are invalid")
     return {}
 
 
-def _authority_name(value: Any, field: str) -> str:
-    name = _node_name(value, field)
-    if not name.startswith("py/"):
-        raise ConfigurationError(f"{field} must use the py/ authority prefix")
-    return name
-
-
-def _node_name(value: Any, field: str) -> str:
-    if not isinstance(value, str) or len(value.encode("utf-8")) > MAXIMUM_NODE_NAME_BYTES:
-        raise ConfigurationError(f"{field} is not a valid Node name")
-    segments = value.split("/")
-    if len(segments) < 2 or segments[0] not in {
-        "sys",
-        "scene",
-        "py",
-        "prefab",
-    }:
-        raise ConfigurationError(f"{field} has an invalid Node prefix")
-    if any(_NODE_SEGMENT.fullmatch(segment) is None for segment in segments):
-        raise ConfigurationError(f"{field} has an invalid Node segment")
+def _node_id(value: Any, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= MAXIMUM_NODE_ID:
+        raise ConfigurationError(f"{field} must be a uint32 Node ID")
     return value
+
+
+def _nullable_node_id(value: Any, field: str) -> int | None:
+    return None if value is None else _node_id(value, field)
+
+
+def _pool_size(value: Any) -> int:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value < 0
+        or value > NULL_NODE_ID
+    ):
+        raise ConfigurationError("matrix_pool_size must fit uint32")
+    return value
+
+
+def _validate_matrix_tensor(value: Any, count: int, field: str) -> np.ndarray:
+    _pool_size(count)
+    if (
+        not isinstance(value, np.ndarray)
+        or value.shape != (count, 4, 4)
+        or value.dtype != np.dtype("<f4")
+        or not value.flags.c_contiguous
+        or value.flags.writeable
+    ):
+        raise ConfigurationError(
+            f"{field} must be a read-only contiguous <f4 tensor with shape ({count}, 4, 4)"
+        )
+    return value
+
+
+def _matrix_tensor_from_record(value: Any, count: int, field: str) -> np.ndarray:
+    if (
+        isinstance(value, np.ndarray)
+        and value.shape == (count, 4, 4)
+        and value.dtype == np.dtype("<f4")
+        and value.flags.c_contiguous
+        and not value.flags.writeable
+    ):
+        return value
+    try:
+        result = np.asarray(value, dtype="<f4", order="C")
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ConfigurationError(f"{field} is invalid") from exc
+    if count == 0 and result.shape == (0,):
+        result = result.reshape((0, 4, 4))
+    if result.shape != (count, 4, 4):
+        raise ConfigurationError(f"{field} must have shape ({count}, 4, 4)")
+    result = result.copy(order="C")
+    result.flags.writeable = False
+    return result
+
+
+def _dirty_ids_from_record(value: Any, pool_size: int) -> np.ndarray:
+    if isinstance(value, np.ndarray):
+        if (
+            value.ndim != 1
+            or value.dtype != np.dtype("<u4")
+            or not value.flags.c_contiguous
+        ):
+            raise ConfigurationError(
+                "dirty_node_ids must be a one-dimensional contiguous <u4 array"
+            )
+        result = value
+        if result.flags.writeable:
+            result = result.copy(order="C")
+            result.flags.writeable = False
+        if len(result) > 1 and not np.all(result[1:] > result[:-1]):
+            raise ConfigurationError(
+                "dirty_node_ids must be unique and strictly sorted"
+            )
+        if len(result) and int(result[-1]) >= pool_size:
+            raise ConfigurationError("dirty_node_id is outside matrix_pool_size")
+        return result
+    elif isinstance(value, list):
+        normalized = tuple(_node_id(item, "dirty_node_id") for item in value)
+        result = np.asarray(normalized, dtype="<u4")
+        result.flags.writeable = False
+    else:
+        raise ConfigurationError("dirty_node_ids must be an array")
+    if tuple(sorted(set(normalized))) != normalized:
+        raise ConfigurationError("dirty_node_ids must be unique and strictly sorted")
+    if normalized and normalized[-1] >= pool_size:
+        raise ConfigurationError("dirty_node_id is outside matrix_pool_size")
+    return result
+
+
+def _validate_baseline_pool(
+    nodes: Sequence[DisplayNode], matrices: np.ndarray, pool_size: int
+) -> None:
+    _validate_matrix_tensor(matrices, pool_size, "matrix_pool")
+    active_ids = {node.node_id for node in nodes}
+    if any(node_id >= pool_size for node_id in active_ids):
+        raise ConfigurationError("checkpoint Node ID is outside matrix_pool_size")
+    bits = matrices.view("<u4")
+    for node_id in range(pool_size):
+        if node_id not in active_ids and np.any(bits[node_id] != 0):
+            raise ConfigurationError("inactive matrix pool rows must be zero tombstones")
+
+
+def _matrix_command_targets(commands: Sequence[DisplayCommand]) -> tuple[int, ...]:
+    targets = tuple(
+        command.node_id
+        for command in commands
+        if command.kind in {"node-create", "node-set-transform"}
+    )
+    if len(set(targets)) != len(targets):
+        raise ConfigurationError(
+            "create/set-transform commands must target each Node ID at most once"
+        )
+    return tuple(sorted(targets))
+
+
+def _validate_command_pool_ids(
+    commands: Sequence[DisplayCommand], pool_size: int
+) -> None:
+    _pool_size(pool_size)
+    for command in commands:
+        if command.node_id >= pool_size:
+            raise ConfigurationError("display command Node ID is outside matrix_pool_size")
+        if command.kind in {"node-create", "node-set-parent"}:
+            parent = command.fields["parent_node_id"]
+            if parent is not None and parent >= pool_size:
+                raise ConfigurationError(
+                    "display command parent Node ID is outside matrix_pool_size"
+                )
+
+
+def _validate_dirty_batch(
+    node_ids: Any,
+    matrices: Any,
+    pool_size: int,
+    commands: Sequence[DisplayCommand],
+) -> None:
+    _pool_size(pool_size)
+    _validate_command_pool_ids(commands, pool_size)
+    if (
+        not isinstance(node_ids, np.ndarray)
+        or node_ids.ndim != 1
+        or node_ids.dtype != np.dtype("<u4")
+        or not node_ids.flags.c_contiguous
+        or node_ids.flags.writeable
+    ):
+        raise ConfigurationError("dirty_node_ids must be a read-only contiguous <u4 array")
+    if len(node_ids) > 1 and not np.all(node_ids[1:] > node_ids[:-1]):
+        raise ConfigurationError("dirty_node_ids must be unique and strictly sorted")
+    if len(node_ids) and int(node_ids[-1]) >= pool_size:
+        raise ConfigurationError("dirty_node_id is outside matrix_pool_size")
+    _validate_matrix_tensor(matrices, len(node_ids), "dirty_matrices")
+    targets = _matrix_command_targets(commands)
+    if len(targets) != len(node_ids) or any(
+        target != int(node_id)
+        for target, node_id in zip(targets, node_ids, strict=True)
+    ):
+        raise ConfigurationError(
+            "dirty matrix Node IDs must exactly match create/set-transform commands"
+        )
+
+
+def _validate_maximum_depth(maximum_json_depth: Any, values: Sequence[Any]) -> None:
+    expected = max(
+        (
+            _maximum_json_depth(value.state)
+            if isinstance(value, DisplayNode)
+            else _command_json_depth(value)
+            for value in values
+        ),
+        default=0,
+    )
+    if (
+        isinstance(maximum_json_depth, bool)
+        or not isinstance(maximum_json_depth, int)
+        or maximum_json_depth != expected
+    ):
+        raise ConfigurationError("validated Display JSON depth is invalid")
 
 
 def _prefab_id(value: Any) -> str:
@@ -1139,10 +1714,12 @@ __all__ = [
     "DISPLAY_COMMAND_STREAM_SCHEMA",
     "DisplayCatalogIdentity",
     "DisplayCommand",
+    "DisplayMatrixPool",
     "DisplayNode",
     "DisplayTransform",
     "MAXIMUM_NODE_DEPTH",
-    "MAXIMUM_NODE_NAME_BYTES",
+    "MAXIMUM_NODE_ID",
+    "NULL_NODE_ID",
     "ValidatedDisplayCheckpoint",
     "ValidatedDisplayCommandStream",
     "encode_display_checkpoint",

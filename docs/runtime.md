@@ -51,12 +51,14 @@ ProductCheckpoint(
     world_snapshot: Mapping[str, Any],
     scene_name: str,
     display_catalog: DisplayCatalogIdentity,
+    display_matrix_pool: DisplayMatrixPool,
     display_nodes: tuple[DisplayNode, ...],
 )
 
 ProductCommit(
     world_codec: str,
     world_patch: Mapping[str, Any],
+    display_matrix_pool: DisplayMatrixPool,
     display_commands: tuple[DisplayCommand, ...] = (),
 )
 ```
@@ -67,34 +69,42 @@ The display identity is loaded from the JSON artifact produced by the JavaScript
 identity = DisplayCatalogIdentity.from_record(record)
 ```
 
-Checkpoint nodes are complete parent-first `py/` authority roots. Product code chooses stable names, exact registered
-`prefab_id`, transform mode, one column-major local Matrix4, visibility and complete authority state. Each Python
-`DisplayTransform` keeps that matrix in one private, read-only, little-endian float32 NumPy array; the encoder publishes its
-exact 64 column-major bytes, and the browser Client remains the first matrix-semantic acceptance gate.
+One `DisplayMatrixPool` is resident for the whole stream. `append(transform)` allocates the next stable authority `node_id`;
+`set(node_id, transform)` changes that row and marks it dirty; `retire(node_id)` writes an all-positive-zero tombstone that is
+never reused in the same stream. The same pool object must be supplied by every checkpoint and commit. Its NumPy backing tensor
+has shape `(n,4,4)`, dtype `<f4`, and axes `[node,column,row]`, making every row the exact contiguous column-major wire matrix.
+After the initial checkpoint, append/create and retire/remove are paired publication transitions: a new ID cannot be mutated as
+an existing Node, a live ID cannot be removed before its row is retired, and an unpublished ID cannot be retired. Dirty IDs are
+tracked directly, so sealing a sparse `m`-row update does not scan the full `n`-row pool.
+
+Checkpoint nodes are complete parent-first authority roots. Product code supplies stable `node_id`/`parent_id`, exact
+registered `prefab_id`, transform mode, visibility and complete authority state; the Node obtains its local Matrix4 from the
+pool row with the same ID. The browser Client remains the first matrix-semantic acceptance gate.
 After checkpoint it publishes only single-target commands created through named constructors:
 
 ```python
 DisplayCommand.create_node(node)
-DisplayCommand.set_transform(name, transform)
-DisplayCommand.set_parent(name, parent_name)
-DisplayCommand.set_visible(name, visible)
-DisplayCommand.set_state(name, complete_state)
-DisplayCommand.replace_prefab(name, prefab_id, complete_state)
-DisplayCommand.remove(name)
+DisplayCommand.set_transform(node_id)
+DisplayCommand.set_parent(node_id, parent_id)
+DisplayCommand.set_visible(node_id, visible)
+DisplayCommand.set_state(node_id, complete_state)
+DisplayCommand.replace_prefab(node_id, prefab_id, complete_state)
+DisplayCommand.remove(node_id)
 ```
 
 Generic `DisplayCommand(kind=..., **fields)` construction is intentionally unavailable. Engine owns `command_seq`,
 `source_tick`, stream/commit/revision and encoded bytes.
 
-Post-checkpoint mutation constructors trust their target `name` as a stable product-owned string and do not repeat canonical
-path or UTF-8 validation on every update. `DisplayNode` creation and structural parent names remain fully validated. The typed
-outbound encoder still enforces string encoding and byte bounds, while the JavaScript Client validates canonical `py/` syntax
-before opening the Display commit gate. A product that violates this trust emits a packet the Client rejects without ACK.
+Every command target is a checked `uint32` pool row. A create or set-transform command must correspond exactly to one dirty
+pool row; dirty IDs are unique and encoded in increasing order with their `(m,4,4)` tensor. Missing/extra dirty rows, duplicate
+matrix-bearing targets, a retired target for any non-remove command, a second removal, or a parent outside the active set
+fails before publication. Successful packet encode
+clears only the rows captured by that packet; an encoding failure does not silently lose dirty state.
 
 ## Nested Prefab projection
 
-Nested Prefabs are entirely inside `@scene-engine/display@0.11.0` and Prefab definition schema
-`scene-engine-prefab-definition@4`. They do not change `scene-engine-wire@3`, `scene-engine-display-node@5`,
+Nested Prefabs are entirely inside `@scene-engine/display@0.12.0` and Prefab definition schema
+`scene-engine-prefab-definition@4`. They do not change `scene-engine-wire@3`, `scene-engine-display-node@6`,
 `scene-engine-packet-log@3`, checkpoint records, Display commands or ACK cursors.
 
 Python still creates and controls only the outer `py/` authority root. `set_state` sends one complete outer state. Display calls
@@ -120,7 +130,7 @@ A tick transaction is:
 3. call `step` and require `changed`;
 4. write proposed revision;
 5. call `build_commit` with the mutation's `commit_context`;
-6. validate the World patch and every Display command shape/value, trusting each mutation target name;
+6. validate the World patch, matrix-pool lifecycle and every ID-targeted Display command;
 7. assign command sequence;
 8. encode/record once and publish shared immutable bytes;
 9. expose the committed counters.
@@ -132,12 +142,15 @@ Inputs are decoded, bounded and queued per client, then serialized on the runtim
 unchanged. `changed` keeps tick fixed, increments revision/commit once and records the input ID as causation.
 
 `start()` always builds and validates a checkpoint, even without clients or a recorder. Scene name, World codec, Display codec
-and catalog identities are frozen for one stream. Later checkpoints must match them.
+and catalog identities are frozen for one stream. Later checkpoints must match them and are read-only with respect to the
+resident matrix pool. Runtime checks the pool generation so a new-client or periodic checkpoint cannot consume a change that
+existing clients have not received through a commit.
 
 ## Client barrier and ACK
 
 Every connection receives a checkpoint before commits. A commit carries a World patch and a Display command-stream attachment,
-even when its command list is empty. Commands preserve strict stream-global `command_seq` order.
+even when its command list and dirty matrix batch are empty. Commands preserve strict stream-global `command_seq` order; moving
+matrix bytes into the aligned batch does not reorder their logical commands.
 
 Client validates the full packet and next World before opening the Display gate. It applies every command, seals the exact
 cursor, then publishes pointers and generates ACK. Resource loading, observers, RAF and draw are outside the barrier. A command

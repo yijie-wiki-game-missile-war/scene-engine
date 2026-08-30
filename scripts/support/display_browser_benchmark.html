@@ -158,10 +158,18 @@
         { length: bindingCount },
         (_, index) => transform(index, 0, columns),
       );
-      for (let index = 0; index < bindingCount; index += 1) {
+      const initialMatrices = new Float32Array(bindingCount * 16);
+      for (let nodeId = 0; nodeId < bindingCount; nodeId += 1) {
+        initialMatrices.set(expectedTransforms[nodeId], nodeId * 16);
+      }
+      runtime.authority.installNodeMatrixPool({
+        poolSize: bindingCount,
+        matrices: initialMatrices,
+      });
+      for (let nodeId = 0; nodeId < bindingCount; nodeId += 1) {
         runtime.authority.createNode({
-          name: nodeName(index), parentName: null, prefabId: prefab.id,
-          transformMode: 'live', transform: expectedTransforms[index],
+          nodeId, parentNodeId: null, prefabId: prefab.id,
+          transformMode: 'live',
           visible: true, state: {},
         });
       }
@@ -182,13 +190,27 @@
         };
         runtime.commitGate.begin(cursor);
         try {
+          const updates = [];
           for (let ordinal = 0; ordinal < updatesPerTick; ordinal += 1) {
-            const index = (tick * updatesPerTick + ordinal) % bindingCount;
-            const nextTransform = transform(index, tick, columns);
-            runtime.authority.setNodeTransform({
-              name: nodeName(index), transform: nextTransform,
-            });
-            expectedTransforms[index] = nextTransform;
+            const nodeId = (tick * updatesPerTick + ordinal) % bindingCount;
+            const nextTransform = transform(nodeId, tick, columns);
+            updates.push({ nodeId, transform: nextTransform });
+            expectedTransforms[nodeId] = nextTransform;
+          }
+          const sorted = [...updates].sort((left, right) => left.nodeId - right.nodeId);
+          const dirtyIds = new Uint32Array(sorted.length);
+          const dirtyMatrices = new Float32Array(sorted.length * 16);
+          for (let index = 0; index < sorted.length; index += 1) {
+            dirtyIds[index] = sorted[index].nodeId;
+            dirtyMatrices.set(sorted[index].transform, index * 16);
+          }
+          runtime.authority.applyNodeTransformBatch({
+            poolSize: bindingCount,
+            nodeIds: dirtyIds,
+            matrices: dirtyMatrices,
+          });
+          for (const { nodeId } of updates) {
+            runtime.authority.setNodeTransform({ nodeId });
           }
           runtime.commitGate.seal(cursor);
         } catch (error) {
@@ -286,7 +308,7 @@
       });
     }
 
-    function nodeName(index) { return `py/item-${String(index).padStart(6, '0')}`; }
+    function nodeName(nodeId) { return `py/${nodeId}`; }
     function transform(index, tick, columns) {
       const angle = ((tick + index) % 360) * Math.PI / 180;
       return composeMatrix4(

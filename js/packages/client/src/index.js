@@ -1,7 +1,7 @@
 import {
   parseDisplayCheckpoint,
   parseDisplayCommandStream,
-  takeOwnedDisplayMatrix,
+  takeOwnedDisplayMatrixTensor,
 } from './display.js';
 import { applyJsonPatch, prepareJsonSnapshot } from './json-tree.js';
 import { readPacketLog } from './packet-log.js';
@@ -31,6 +31,8 @@ export class SceneEngineClientError extends Error {
 }
 
 export class SceneEngineClient {
+  #applying = false;
+  #cleanupAfterCommit = false;
   #commit = null;
   #createDisplaySession;
   #displaySession = null;
@@ -38,7 +40,9 @@ export class SceneEngineClient {
   #failed = false;
   #lastCommandSeq = null;
   #limits;
+  #matrixPoolSize = null;
   #onCommit;
+  #retiredNodeIds = null;
   #worldCodec = null;
   #worldState = null;
 
@@ -70,17 +74,26 @@ export class SceneEngineClient {
 
   applyPacket(rawBytes) {
     this.#requireAvailable();
+    if (this.#applying) {
+      if (!this.#cleanupAfterCommit) this.#failed = true;
+      fail('client-apply-reentrant');
+    }
+    this.#applying = true;
     let packet;
     try {
       packet = readEnginePacket(rawBytes, this.#limits);
-      if (packet.kind === 'engine.checkpoint') return this.#applyCheckpoint(packet);
-      if (packet.kind === 'engine.commit') return this.#applyCommit(packet);
-      if (packet.kind === 'engine.input_result') return this.#applyInputResult(packet);
-      if (packet.kind === 'engine.error') {
+      let result;
+      if (packet.kind === 'engine.checkpoint') result = this.#applyCheckpoint(packet);
+      else if (packet.kind === 'engine.commit') result = this.#applyCommit(packet);
+      else if (packet.kind === 'engine.input_result') result = this.#applyInputResult(packet);
+      else if (packet.kind === 'engine.error') {
         this.#failed = true;
         throw new SceneEngineClientError('engine-error', packet.header.code);
+      } else {
+        throw new SceneEngineClientError('server-packet-kind-invalid');
       }
-      throw new SceneEngineClientError('server-packet-kind-invalid');
+      this.#assertApplyCanCommit();
+      return result;
     } catch (error) {
       this.#failed = true;
       if (error instanceof SceneEngineClientError) throw error;
@@ -89,6 +102,8 @@ export class SceneEngineClient {
         error?.message ?? 'packet apply failed',
         { cause: error },
       );
+    } finally {
+      this.#applying = false;
     }
   }
 
@@ -111,6 +126,11 @@ export class SceneEngineClient {
     const checkpoint = parseDisplayCheckpoint(
       attachment(packet, 'display_checkpoint').value,
       { header, maximumJsonDepth: this.#limits.maximumJsonDepth },
+    );
+    const retiredNodeIds = validateCheckpointMatrixPoolProgression(
+      this.#matrixPoolSize,
+      this.#retiredNodeIds,
+      checkpoint,
     );
     const commit = commitView('checkpoint', header);
     const cursor = displayCursor(commit);
@@ -140,6 +160,11 @@ export class SceneEngineClient {
         [Object.freeze({ sceneName: checkpoint.sceneName })],
         'display-install-scene-async',
       );
+      callAuthority(
+        candidate.authorityPort,
+        'installNodeMatrixPool',
+        checkpointMatrixPoolPayload(checkpoint),
+      );
       for (const node of checkpoint.nodes) {
         callAuthority(candidate.authorityPort, 'createNode', authorityNodePayload(node));
       }
@@ -161,13 +186,18 @@ export class SceneEngineClient {
         commitSeq: commit.commitSeq,
         lastCommandSeq: commit.lastCommandSeq,
       }, this.#limits);
+      this.#assertApplyCanCommit();
       const previous = this.#displaySession;
       this.#displaySession = candidate;
       this.#worldState = world;
       this.#worldCodec = header.world_codec;
       this.#commit = commit;
       this.#lastCommandSeq = checkpoint.lastCommandSeq;
-      safeDispose(previous);
+      this.#matrixPoolSize = checkpoint.matrixPoolSize;
+      this.#retiredNodeIds = retiredNodeIds;
+      this.#cleanupAfterCommit = true;
+      try { safeDispose(previous); } finally { this.#cleanupAfterCommit = false; }
+      this.#assertApplyCanCommit();
       this.#schedule('checkpoint', commit, world, displaySummary);
       return outcome('checkpoint', commit, ackPacket, null);
     } catch (error) {
@@ -188,6 +218,7 @@ export class SceneEngineClient {
         maximumJsonDepth: this.#limits.maximumJsonDepth,
       },
     );
+    validateMatrixPoolProgression(this.#matrixPoolSize, stream);
     const world = applyJsonPatch(
       this.#worldState,
       attachment(packet, 'world_patch').value,
@@ -205,12 +236,22 @@ export class SceneEngineClient {
         'display-gate-begin-async',
       );
       gateBegun = true;
+      callAuthority(
+        session.authorityPort,
+        'applyNodeTransformBatch',
+        commandMatrixBatchPayload(stream),
+      );
+      let removedNodeIds = null;
       for (const command of stream.commands) {
         callAuthority(
           session.authorityPort,
           AUTHORITY_METHOD[command.kind],
           authorityPayload(command),
         );
+        if (command.kind === 'node-remove') {
+          if (removedNodeIds === null) removedNodeIds = [];
+          removedNodeIds.push(command.nodeId);
+        }
       }
       callSynchronous(
         session.commitGate.seal,
@@ -218,10 +259,16 @@ export class SceneEngineClient {
         [cursor],
         'display-gate-seal-async',
       );
+      this.#assertApplyCanCommit();
       this.#worldState = world;
       this.#commit = commit;
       this.#lastCommandSeq = stream.lastCommandSeq;
+      this.#matrixPoolSize = stream.matrixPoolSize;
+      if (removedNodeIds !== null) {
+        for (const nodeId of removedNodeIds) this.#retiredNodeIds.add(nodeId);
+      }
       const displaySummary = provideDisplaySummary(session);
+      this.#assertApplyCanCommit();
       const ackPacket = encodeEngineAck({
         streamId: commit.streamId,
         commitSeq: commit.commitSeq,
@@ -286,6 +333,8 @@ export class SceneEngineClient {
     this.#worldCodec = null;
     this.#commit = null;
     this.#lastCommandSeq = null;
+    this.#matrixPoolSize = null;
+    this.#retiredNodeIds = null;
     this.#createDisplaySession = null;
     this.#onCommit = null;
   }
@@ -302,6 +351,10 @@ export class SceneEngineClient {
   }
 
   #requireOpen() { if (this.#disposed) fail('client-disposed'); }
+  #assertApplyCanCommit() {
+    this.#requireOpen();
+    if (this.#failed) fail('client-apply-reentrant');
+  }
   #requireAvailable() {
     this.#requireOpen();
     if (this.#failed) fail('client-failed');
@@ -321,6 +374,57 @@ function validateCommitProgression(previous, header, worldCodec) {
     : header.cause === 'input' ? delta !== 0 : ![0, 1].includes(delta)) {
     fail('source-tick-progression-invalid');
   }
+}
+
+function validateMatrixPoolProgression(previousSize, stream) {
+  if (!Number.isSafeInteger(previousSize) || stream.matrixPoolSize < previousSize) {
+    fail('display-matrix-pool-progression-invalid');
+  }
+  const growth = stream.matrixPoolSize - previousSize;
+  if (growth > stream.dirtyNodeIds.length) {
+    fail('display-matrix-pool-progression-invalid');
+  }
+  const firstNew = stream.dirtyNodeIds.length - growth;
+  for (let offset = 0; offset < growth; offset += 1) {
+    if (stream.dirtyNodeIds[firstNew + offset] !== previousSize + offset) {
+      fail('display-matrix-pool-progression-invalid');
+    }
+  }
+  const createdIds = growth === 0 ? null : new Set();
+  for (const command of stream.commands) {
+    if (command.kind !== 'node-create') continue;
+    if (command.nodeId < previousSize || createdIds === null) {
+      fail('display-matrix-pool-progression-invalid');
+    }
+    createdIds.add(command.nodeId);
+  }
+  for (let nodeId = previousSize; nodeId < stream.matrixPoolSize; nodeId += 1) {
+    if (!createdIds.has(nodeId)) {
+      fail('display-matrix-pool-progression-invalid');
+    }
+  }
+}
+
+function validateCheckpointMatrixPoolProgression(previousSize, previousRetiredIds, checkpoint) {
+  if (previousSize !== null && (
+    !Number.isSafeInteger(previousSize)
+      || checkpoint.matrixPoolSize < previousSize
+      || !(previousRetiredIds instanceof Set)
+  )) {
+    fail('display-matrix-pool-progression-invalid');
+  }
+  const activeIds = new Set();
+  for (const node of checkpoint.nodes) {
+    if (previousRetiredIds?.has(node.nodeId)) {
+      fail('display-matrix-pool-progression-invalid');
+    }
+    activeIds.add(node.nodeId);
+  }
+  const retiredIds = new Set(previousRetiredIds ?? []);
+  for (let nodeId = 0; nodeId < checkpoint.matrixPoolSize; nodeId += 1) {
+    if (!activeIds.has(nodeId)) retiredIds.add(nodeId);
+  }
+  return retiredIds;
 }
 
 function commitView(kind, header) {
@@ -355,7 +459,11 @@ function createSession(value) {
     ['catalogIdentity', 'installScene', 'activate', 'start', 'summary', 'currentView'],
     'display-session-runtime-invalid',
   );
-  requireMethods(value.authorityPort, Object.values(AUTHORITY_METHOD), 'authority-port-invalid');
+  requireMethods(value.authorityPort, [
+    'installNodeMatrixPool',
+    'applyNodeTransformBatch',
+    ...Object.values(AUTHORITY_METHOD),
+  ], 'authority-port-invalid');
   requireMethods(value.commitGate, ['begin', 'seal', 'fail'], 'display-commit-gate-invalid');
   if (typeof value.dispose !== 'function') fail('display-session-dispose-invalid');
   return Object.freeze({
@@ -402,24 +510,21 @@ function authorityPayload(command) {
     case 'node-create':
       return authorityNodePayload(command);
     case 'node-set-transform':
-      return Object.freeze({
-        name: command.name,
-        transform: takeOwnedDisplayMatrix(command.transform),
-      });
+      return Object.freeze({ nodeId: command.nodeId });
     case 'node-set-parent':
-      return Object.freeze({ name: command.name, parentName: command.parentName });
+      return Object.freeze({ nodeId: command.nodeId, parentNodeId: command.parentNodeId });
     case 'node-set-visible':
-      return Object.freeze({ name: command.name, visible: command.visible });
+      return Object.freeze({ nodeId: command.nodeId, visible: command.visible });
     case 'node-set-state':
-      return Object.freeze({ name: command.name, state: command.state });
+      return Object.freeze({ nodeId: command.nodeId, state: command.state });
     case 'node-replace-prefab':
       return Object.freeze({
-        name: command.name,
+        nodeId: command.nodeId,
         prefabId: command.prefabId,
         state: command.state,
       });
     case 'node-remove':
-      return Object.freeze({ name: command.name });
+      return Object.freeze({ nodeId: command.nodeId });
     default:
       fail('display-command-kind-invalid');
   }
@@ -427,13 +532,27 @@ function authorityPayload(command) {
 
 function authorityNodePayload(node) {
   return Object.freeze({
-    name: node.name,
-    parentName: node.parentName,
+    nodeId: node.nodeId,
+    parentNodeId: node.parentNodeId,
     prefabId: node.prefabId,
     transformMode: node.transformMode,
-    transform: takeOwnedDisplayMatrix(node.transform),
     visible: node.visible,
     state: node.state,
+  });
+}
+
+function checkpointMatrixPoolPayload(checkpoint) {
+  return Object.freeze({
+    poolSize: checkpoint.matrixPoolSize,
+    matrices: takeOwnedDisplayMatrixTensor(checkpoint.matrixPool),
+  });
+}
+
+function commandMatrixBatchPayload(stream) {
+  return Object.freeze({
+    poolSize: stream.matrixPoolSize,
+    nodeIds: stream.dirtyNodeIds,
+    matrices: takeOwnedDisplayMatrixTensor(stream.dirtyMatrices),
   });
 }
 

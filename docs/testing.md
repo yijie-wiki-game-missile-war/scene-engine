@@ -32,24 +32,26 @@ checkpoint、commit、command、ACK、pending/in-flight 和最终状态一致性
 默认门禁只执行 32 roots 的确定性跨语言 smoke；更多 roots、commits、update ratio 和 roundtrip/windowed profile
 通过显式 benchmark runner 运行。
 
-### 3. Python Matrix4 操作与常驻成本
+### 3. Python Matrix4 操作、矩阵池与常驻成本
 
-这一类直接测量 Python `DisplayTransform` 的唯一只读 NumPy Matrix4 owner。默认门禁中的 `test_display.py` 和
-`test_display_binary.py` 验证数组 shape、little-endian float32 dtype、列主序、只读性、输入隔离、公开 accessor、
-便利操作与 exact 64-byte 编码；显式 `scripts/benchmark_python_display_transform.py` runner 观测构造、组合、平移、
-旋转、缩放、点/向量及逆转换、公开 accessor、命令编码、新进程启动路径和批量常驻内存。
+这一类测量 Python `DisplayTransform` 的只读 NumPy Matrix4 值，以及 `DisplayMatrixPool` 的单一常驻连续
+`(n, 4, 4)` little-endian float32 owner。默认门禁中的 `test_display.py` 和 `test_display_binary.py` 验证数组 shape、
+列主序位布局、只读快照、输入隔离、节点 ID、池增长/墓碑/不复用、dirty ID 与 `(m, 4, 4)` 张量的一次成型编码；
+显式 `scripts/benchmark_python_display_transform.py` runner 观测矩阵操作、池内写入与 gather、命令编码、新进程启动
+路径和池的批量常驻内存。
 
 runner 接受 `--iterations`、`--repeats`、`--encode-commands`、`--encode-repeats` 和 `--resident-count`。它只向
 stdout 输出 JSON，其中包括 `environment`、各 `operations` 的 best/p50/p95、encoding payload 与时延、fresh-process
 startup、tracemalloc resident 和 correctness。启动项包括子进程创建、根包 import、identity 构造和公开 accessor；
-内存项是 warm process 中、包含 resident list 的可追踪分配，不是 RSS。该数据用于给当前实现建立可复现的本机性能
+内存当前值在初始 checkpoint 发布并 GC 后读取，表示 warm process 中包含矩阵池容量的稳态可追踪分配，peak 仍包含
+初始发布的瞬时 bookkeeping；两者都不是 RSS。该数据用于给当前实现建立可复现的本机性能
 报告，不设置跨机器硬阈值，也不替代默认正确性测试或全量门禁。
 
 ## 测试方法
 
 ### 合同与单元测试
 
-对一个公开合同或一个明确的内部不变量做最小验证，例如固定 60 Hz、Wire 字段、命令顺序、Node 名称、资源类型、
+对一个公开合同或一个明确的内部不变量做最小验证，例如固定 60 Hz、Wire 字段、命令顺序、Authority Node ID、资源类型、
 公共导出和生命周期状态。测试同时覆盖合法输入和合同边界上的非法输入。
 
 ### 生产路径集成测试
@@ -66,7 +68,9 @@ Python 与 JavaScript 共享的协议、Display 记录、目录身份和 packet 
 
 失败测试不仅检查抛错，还检查失败发生的边界：候选必须在写入前完整校验，非法提交不得 ACK；承诺原子性的单目标
 操作失败后不能留下部分 Node、Component、binding、resource lease 或 pending load。跨多命令失败必须使投影失效，
-并要求从新 checkpoint 恢复。创建、替换、重建、移除和 dispose 必须覆盖成功、取消、迟到完成和重复释放。
+并要求从新 checkpoint 恢复。创建、替换、重建、移除和 dispose 必须覆盖成功、取消、迟到完成和重复释放。packet-log
+还要跨记录验证 Node ID/MatrixPool 生命周期，拒绝池缩小、旧 ID 重用，以及会让 seek 与线性 Replay 分叉的周期
+checkpoint 墓碑复活。
 
 ### 规模回归与资源现场测试
 
@@ -76,7 +80,7 @@ Python 与 JavaScript 共享的协议、Display 记录、目录身份和 packet 
 断言。
 
 性能 runner 必须报告与自身范围对应的 correctness。状态与通讯 runner 检查结构、cursor、最终状态、健康和释放；
-Python Matrix4 runner 检查矩阵位模式、组合/逆转换、编码 cursor 和常驻 owner，并把 tracing 释放后的 delta 作为观测
+Python Matrix4 runner 检查矩阵位模式、组合/逆转换、编码 cursor、连续池 owner 和 dirty tensor，并把 tracing 释放后的 delta 作为观测
 字段。p50、p95、p99、maximum、吞吐与内存数据现阶段用于观察和建立基线；在没有固定硬件、运行环境和经确认的
 基线前，不设置跨机器绝对时间硬阈值。
 

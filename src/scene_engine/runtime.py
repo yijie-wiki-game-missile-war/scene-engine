@@ -14,6 +14,7 @@ from .clock import MonotonicClock, SystemMonotonicClock
 from .display import (
     DisplayCatalogIdentity,
     DisplayCommand,
+    DisplayMatrixPool,
     DisplayNode,
     encode_display_checkpoint,
     encode_display_command_stream,
@@ -161,6 +162,7 @@ class ProductCheckpoint:
     world_snapshot: Mapping[str, Any]
     scene_name: str
     display_catalog: DisplayCatalogIdentity
+    display_matrix_pool: DisplayMatrixPool
     display_nodes: tuple[DisplayNode, ...]
 
     def __post_init__(self) -> None:
@@ -173,6 +175,10 @@ class ProductCheckpoint:
             raise ConfigurationError(
                 "display_catalog must be DisplayCatalogIdentity"
             )
+        if not isinstance(self.display_matrix_pool, DisplayMatrixPool):
+            raise ConfigurationError(
+                "display_matrix_pool must be DisplayMatrixPool"
+            )
         normalized_nodes = _display_records(
             self.display_nodes,
             DisplayNode,
@@ -181,7 +187,9 @@ class ProductCheckpoint:
         object.__setattr__(
             self,
             "display_nodes",
-            validate_display_nodes(normalized_nodes),
+            validate_display_nodes(
+                normalized_nodes, matrix_pool=self.display_matrix_pool
+            ),
         )
 
 
@@ -189,6 +197,7 @@ class ProductCheckpoint:
 class ProductCommit:
     world_codec: str
     world_patch: Mapping[str, Any]
+    display_matrix_pool: DisplayMatrixPool
     display_commands: tuple[DisplayCommand, ...] = ()
 
     def __post_init__(self) -> None:
@@ -196,6 +205,10 @@ class ProductCommit:
         if not isinstance(self.world_patch, dict):
             raise ConfigurationError("world_patch must be a JSON object")
         validate_json_patch(self.world_patch)
+        if not isinstance(self.display_matrix_pool, DisplayMatrixPool):
+            raise ConfigurationError(
+                "display_matrix_pool must be DisplayMatrixPool"
+            )
         object.__setattr__(
             self,
             "display_commands",
@@ -453,6 +466,7 @@ class SceneEngineRuntime:
         self._world_codec: str | None = None
         self._display_scene_name: str | None = None
         self._display_catalog: DisplayCatalogIdentity | None = None
+        self._display_matrix_pool: DisplayMatrixPool | None = None
         self._display_command_seq = 0
         self._fatal_cause: BaseException | None = None
         self._operation_lock = threading.Lock()
@@ -800,6 +814,8 @@ class SceneEngineRuntime:
             raise RuntimeError("stream publication contract is not initialized")
         if product.world_codec != self._world_codec:
             raise RuntimeError("world_codec changed within one stream")
+        if product.display_matrix_pool is not self._display_matrix_pool:
+            raise RuntimeError("display_matrix_pool changed within one stream")
         validate_json_patch(
             product.world_patch,
             maximum_changes=self._limits.maximum_world_patch_changes,
@@ -809,6 +825,7 @@ class SceneEngineRuntime:
         display_commands, next_command_seq = encode_display_command_stream(
             base_command_seq=self._display_command_seq,
             source_tick=proposed.source_tick,
+            matrix_pool=product.display_matrix_pool,
             commands=product.display_commands,
         )
         raw = encode_commit(
@@ -824,6 +841,7 @@ class SceneEngineRuntime:
             display_commands=display_commands,
             limits=self._limits,
         )
+        display_commands.confirm_published()
         self._display_command_seq = next_command_seq
         return PacketRef(
             raw,
@@ -837,6 +855,15 @@ class SceneEngineRuntime:
 
     def _materialize_checkpoint(self) -> PacketRef:
         before = self._assert_world_counters()
+        bound_pool = self._display_matrix_pool
+        initial_publication = bound_pool is None
+        pool_generation = (
+            None if bound_pool is None else bound_pool._mutation_generation
+        )
+        if bound_pool is not None and bound_pool._has_pending_changes():
+            raise RuntimeError(
+                "cannot build a checkpoint while the display matrix pool has unpublished changes"
+            )
         context = CheckpointContext(
             self._stream_id,
             self._commit_seq,
@@ -849,17 +876,32 @@ class SceneEngineRuntime:
             raise RuntimeError("build_checkpoint must return ProductCheckpoint")
         if self._read_world_counters() != before:
             raise RuntimeError("build_checkpoint modified Engine counters")
+        if (
+            bound_pool is not None
+            and bound_pool._mutation_generation != pool_generation
+        ):
+            raise RuntimeError("build_checkpoint modified the display matrix pool")
         if self._world_codec is not None and product.world_codec != self._world_codec:
             raise RuntimeError("world_codec changed within one stream")
         if self._display_scene_name is not None and (
             product.scene_name != self._display_scene_name
             or product.display_catalog != self._display_catalog
+            or product.display_matrix_pool is not self._display_matrix_pool
         ):
-            raise RuntimeError("display scene or catalog changed within one stream")
+            raise RuntimeError(
+                "display scene, catalog, or matrix pool changed within one stream"
+            )
+        if initial_publication and tuple(
+            sorted(node.node_id for node in product.display_nodes)
+        ) != tuple(range(len(product.display_matrix_pool))):
+            raise RuntimeError(
+                "initial display checkpoint Node IDs must be dense from zero"
+            )
         display_checkpoint = encode_display_checkpoint(
             scene_name=product.scene_name,
             catalog=product.display_catalog,
             last_command_seq=self._display_command_seq,
+            matrix_pool=product.display_matrix_pool,
             nodes=product.display_nodes,
         )
         raw = encode_checkpoint(
@@ -873,10 +915,13 @@ class SceneEngineRuntime:
             display_checkpoint=display_checkpoint,
             limits=self._limits,
         )
+        if initial_publication:
+            display_checkpoint.confirm_published()
         if self._world_codec is None:
             self._world_codec = product.world_codec
             self._display_scene_name = product.scene_name
             self._display_catalog = product.display_catalog
+            self._display_matrix_pool = product.display_matrix_pool
         return PacketRef(
             raw,
             self._stream_id,

@@ -60,7 +60,7 @@ test('root export surface remains the exact client allowlist', () => {
 
 test('client package and Display codec versions are the frozen matrix-native release', async () => {
   const packageJson = JSON.parse(await readFile(new URL('../package.json', import.meta.url)));
-  assert.equal(packageJson.version, '0.12.0');
+  assert.equal(packageJson.version, '0.13.0');
   assert.throws(() => encodePacket('engine.checkpoint', {
     schema: 'scene-engine-wire@3',
     type: 'engine.checkpoint',
@@ -70,7 +70,7 @@ test('client package and Display codec versions are the frozen matrix-native rel
     world_revision: 0,
     last_command_seq: 0,
     world_codec: WORLD_CODEC,
-    display_codec: 'scene-engine-display-node@4',
+    display_codec: 'scene-engine-display-node@5',
   }), (error) => error.code === 'display-codec-unsupported');
 });
 
@@ -80,7 +80,7 @@ test('wire v3 fixture has binary display checkpoint and ACK command cursor', asy
   const raw = new Uint8Array(await readFile(`${FIXTURES}/checkpoint.bin`));
   const decoded = readEnginePacket(raw);
   assert.equal(decoded.header.schema, 'scene-engine-wire@3');
-  assert.equal(decoded.header.display_codec, 'scene-engine-display-node@5');
+  assert.equal(decoded.header.display_codec, 'scene-engine-display-node@6');
   assert.deepEqual(decoded.attachments.map(({ kind, encoding }) => [kind, encoding]), [
     ['world_snapshot', 'json'],
     ['display_checkpoint', 'raw'],
@@ -99,14 +99,15 @@ test('wire v3 fixture has binary display checkpoint and ACK command cursor', asy
     state_schema_hash: sessions[0].metadata.stateSchemaHash,
   }, identity);
   assert.deepEqual(sessions[0].log.map(([kind]) => kind), [
-    'installScene', 'createNode', 'createNode', 'activate', 'start', 'summary',
+    'installScene', 'installNodeMatrixPool', 'createNode', 'createNode', 'createNode',
+    'activate', 'start', 'summary',
   ]);
   assert.deepEqual(sessions[0].log[0][1], { sceneName: 'main' });
   assert.deepEqual(sessions[0].log.find(([kind]) => kind === 'activate')[1], {
     commitSeq: 0, sourceTick: 0, lastCommandSeq: 0,
   });
   assert.deepEqual(Object.keys(sessions[0].log.find(([kind]) => kind === 'createNode')[1]), [
-    'name', 'parentName', 'prefabId', 'transformMode', 'transform', 'visible', 'state',
+    'nodeId', 'parentNodeId', 'prefabId', 'transformMode', 'visible', 'state',
   ]);
   assert.equal('currentView' in client, false);
   assert.equal('getNode' in client, false);
@@ -130,7 +131,7 @@ test('packaged wire v3 fixtures are exact copies of the canonical generated corp
   }
 });
 
-test('Authority takes a packet-independent Float32Array and preserves shear exactly', () => {
+test('Authority takes one packet-independent matrix pool tensor and preserves shear exactly', () => {
   const { factory, sessions } = createMockDisplayFactory();
   const client = new SceneEngineClient({ createDisplaySession: factory });
   const shear = new Float32Array([
@@ -140,17 +141,17 @@ test('Authority takes a packet-independent Float32Array and preserves shear exac
     7, 8, 9, 1,
   ]);
   const raw = checkpointPacket({
-    nodes: [{ ...baselineNode(), transform: shear }],
+    matrixPool: shear,
   });
   client.applyPacket(raw);
-  const authorityTransform = sessions[0].log.find(([kind]) => kind === 'createNode')[1]
-    .transform;
-  assert.ok(authorityTransform instanceof Float32Array);
-  assert.deepEqual(authorityTransform, shear);
-  assert.notStrictEqual(authorityTransform, shear);
-  assert.notStrictEqual(authorityTransform.buffer, raw.buffer);
+  const authorityPool = sessions[0].log.find(([kind]) => kind === 'installNodeMatrixPool')[1]
+    .matrices;
+  assert.ok(authorityPool instanceof Float32Array);
+  assert.deepEqual(authorityPool, shear);
+  assert.notStrictEqual(authorityPool, shear);
+  assert.notStrictEqual(authorityPool.buffer, raw.buffer);
   raw.fill(0);
-  assert.deepEqual(authorityTransform, shear);
+  assert.deepEqual(authorityPool, shear);
 });
 
 test('applies canonical Python wire@3 fixtures through exact Authority payloads', async () => {
@@ -171,10 +172,12 @@ test('applies canonical Python wire@3 fixtures through exact Authority payloads'
     input.commit.lastCommandSeq,
   ], [0, 7, 7]);
   assert.deepEqual(sessions[0].log.map(([kind]) => kind), [
-    'installScene', 'createNode', 'createNode', 'activate', 'start', 'summary',
-    'begin', 'createNode', 'setNodeTransform', 'setNodeParent', 'setNodeVisible',
+    'installScene', 'installNodeMatrixPool', 'createNode', 'createNode', 'createNode',
+    'activate', 'start', 'summary',
+    'begin', 'applyNodeTransformBatch', 'createNode', 'setNodeTransform',
+    'setNodeParent', 'setNodeVisible',
     'setNodeState', 'replaceNodePrefab', 'removeNode', 'seal', 'summary',
-    'begin', 'seal', 'summary',
+    'begin', 'applyNodeTransformBatch', 'seal', 'summary',
   ]);
   assert.equal(client.currentWorldState().state.stable.value, 8);
 });
@@ -200,6 +203,167 @@ test('checkpoint fresh session swaps only after complete synchronous activation'
   assert.equal(client.currentCommit().lastCommandSeq, 2);
 });
 
+test('same-stream checkpoints cannot shrink the matrix pool or resurrect retired IDs', () => {
+  const shrink = new SceneEngineClient({ createDisplaySession: createMockDisplayFactory().factory });
+  shrink.applyPacket(checkpointPacket({
+    nodes: [baselineNode(0)],
+    matrixPoolSize: 2,
+  }));
+  assert.throws(() => shrink.applyPacket(checkpointPacket({
+    commitSeq: 1,
+    sourceTick: 1,
+    worldRevision: 1,
+    matrixPoolSize: 1,
+  })), (error) => error.code === 'display-matrix-pool-progression-invalid');
+
+  const resurrect = new SceneEngineClient({
+    createDisplaySession: createMockDisplayFactory().factory,
+  });
+  resurrect.applyPacket(checkpointPacket({
+    nodes: [baselineNode(0)],
+    matrixPoolSize: 2,
+  }));
+  assert.throws(() => resurrect.applyPacket(checkpointPacket({
+    commitSeq: 1,
+    sourceTick: 1,
+    worldRevision: 1,
+    nodes: [baselineNode(0), baselineNode(1)],
+    matrixPoolSize: 2,
+  })), (error) => error.code === 'display-matrix-pool-progression-invalid');
+
+  const removed = new SceneEngineClient({
+    createDisplaySession: createMockDisplayFactory().factory,
+  });
+  removed.applyPacket(checkpointPacket({
+    nodes: [baselineNode(0), baselineNode(1)],
+    matrixPoolSize: 2,
+  }));
+  removed.applyPacket(commitPacket({
+    commands: [command('node-remove', 1, 1, { node_id: 1 })],
+    matrixPoolSize: 2,
+  }));
+  assert.throws(() => removed.applyPacket(checkpointPacket({
+    commitSeq: 2,
+    sourceTick: 2,
+    worldRevision: 2,
+    lastCommandSeq: 1,
+    nodes: [baselineNode(0), baselineNode(1)],
+    matrixPoolSize: 2,
+  })), (error) => error.code === 'display-matrix-pool-progression-invalid');
+});
+
+test('checkpoint factory reentry cannot overwrite progression even when it swallows the error', () => {
+  const mock = createMockDisplayFactory();
+  let client;
+  let factoryCalls = 0;
+  let nestedError = null;
+  client = new SceneEngineClient({
+    createDisplaySession(metadata) {
+      factoryCalls += 1;
+      if (factoryCalls === 2) {
+        try {
+          client.applyPacket(checkpointPacket({
+            commitSeq: 3,
+            sourceTick: 3,
+            worldRevision: 3,
+          }));
+        } catch (error) {
+          nestedError = error;
+        }
+      }
+      return mock.factory(metadata);
+    },
+  });
+  client.applyPacket(checkpointPacket());
+  const acknowledged = client.currentCommit();
+
+  assert.throws(() => client.applyPacket(checkpointPacket({
+    commitSeq: 2,
+    sourceTick: 2,
+    worldRevision: 2,
+  })), (error) => error.code === 'client-apply-reentrant');
+  assert.equal(nestedError?.code, 'client-apply-reentrant');
+  assert.strictEqual(client.currentCommit(), acknowledged);
+  assert.equal(mock.sessions[0].log.some(([kind]) => kind === 'dispose'), false);
+  assert.equal(mock.sessions[1].log.at(-1)[0], 'dispose');
+  assert.throws(() => client.applyPacket(checkpointPacket()),
+    (error) => error.code === 'client-failed');
+});
+
+test('Authority and gate callback reentry cannot commit a stale outer packet', () => {
+  for (const [owner, method] of [
+    ['authorityPort', 'applyNodeTransformBatch'],
+    ['commitGate', 'seal'],
+  ]) {
+    const mock = createMockDisplayFactory();
+    const client = new SceneEngineClient({ createDisplaySession: mock.factory });
+    client.applyPacket(checkpointPacket());
+    const acknowledged = client.currentCommit();
+    const receiver = mock.sessions[0].session[owner];
+    const original = receiver[method];
+    let nestedError = null;
+    receiver[method] = function reentrantCallback(...args) {
+      try {
+        client.applyPacket(checkpointPacket({
+          commitSeq: 3,
+          sourceTick: 3,
+          worldRevision: 3,
+        }));
+      } catch (error) {
+        nestedError = error;
+      }
+      return original.apply(this, args);
+    };
+
+    assert.throws(() => client.applyPacket(commitPacket()),
+      (error) => error.code === 'client-apply-reentrant', `${owner}.${method}`);
+    assert.equal(nestedError?.code, 'client-apply-reentrant', `${owner}.${method}`);
+    assert.strictEqual(client.currentCommit(), acknowledged, `${owner}.${method}`);
+    assert.equal(mock.sessions[0].log.at(-1)[0], 'fail', `${owner}.${method}`);
+    assert.throws(() => client.applyPacket(commitPacket()),
+      (error) => error.code === 'client-failed', `${owner}.${method}`);
+  }
+});
+
+test('post-swap disposal rejects reentry without rolling back or poisoning replacement', () => {
+  const mock = createMockDisplayFactory();
+  const client = new SceneEngineClient({ createDisplaySession: mock.factory });
+  client.applyPacket(checkpointPacket());
+  const originalDispose = mock.sessions[0].session.dispose;
+  let nestedError = null;
+  mock.sessions[0].session.dispose = function reentrantDispose() {
+    try {
+      client.applyPacket(checkpointPacket({
+        commitSeq: 3,
+        sourceTick: 3,
+        worldRevision: 3,
+      }));
+    } catch (error) {
+      nestedError = error;
+    }
+    return originalDispose.call(this);
+  };
+
+  const replacement = client.applyPacket(checkpointPacket({
+    commitSeq: 2,
+    sourceTick: 2,
+    worldRevision: 2,
+  }));
+  assert.ok(replacement.ackPacket instanceof Uint8Array);
+  assert.equal(nestedError?.code, 'client-apply-reentrant');
+  assert.equal(client.currentCommit().commitSeq, 2);
+  assert.equal(mock.sessions[0].log.at(-1)[0], 'dispose');
+  assert.equal(mock.sessions[1].log.some(([kind]) => kind === 'dispose'), false);
+
+  const next = client.applyPacket(commitPacket({
+    commitSeq: 3,
+    sourceTick: 3,
+    worldRevision: 3,
+  }));
+  assert.ok(next.ackPacket instanceof Uint8Array);
+  assert.equal(client.currentCommit().commitSeq, 3);
+});
+
 test('checkpoint and commit observers receive only immutable summary payloads after ACK', async () => {
   const { factory, sessions } = createMockDisplayFactory();
   const observations = [];
@@ -210,7 +374,7 @@ test('checkpoint and commit observers receive only immutable summary payloads af
 
   const checkpoint = client.applyPacket(checkpointPacket());
   const commit = client.applyPacket(commitPacket({
-    commands: [command('node-set-transform', 1, 1, { transform: transform(2) })],
+    commands: [command('node-set-transform', 1, 1, { matrix: transform(2) })],
   }));
 
   assert.ok(checkpoint.ackPacket instanceof Uint8Array);
@@ -264,7 +428,7 @@ test('10,000 commits take summaries without materializing DisplayView', () => {
       worldRevision: commitSeq,
       baseCommandSeq: commitSeq - 1,
       commands: [command('node-set-transform', commitSeq, commitSeq, {
-        transform: transform(commitSeq),
+        matrix: transform(commitSeq),
       })],
     }));
   }
@@ -300,22 +464,22 @@ test('observer exceptions do not withhold ACK or make the client fail', async ()
   client.dispose();
 });
 
-test('commit validates all commands then applies one Authority call per target before seal', () => {
+test('commit stages one contiguous tensor then applies ID commands in order before seal', () => {
   const { factory, sessions } = createMockDisplayFactory();
   const client = new SceneEngineClient({ createDisplaySession: factory });
   client.applyPacket(checkpointPacket());
   const commands = [
     command('node-create', 1, 1, {
-      name: 'py/unit-2',
-      parent_name: null,
+      node_id: 1,
+      parent_node_id: null,
       prefab_id: 'unit.example',
       transform_mode: 'live',
-      transform: transform(2),
+      matrix: transform(2),
       visible: true,
       state: { mode: 'new' },
     }),
-    command('node-set-transform', 2, 1, { transform: transform(3) }),
-    command('node-set-parent', 3, 1, { parent_name: 'py/unit-2' }),
+    command('node-set-transform', 2, 1, { matrix: transform(3) }),
+    command('node-set-parent', 3, 1, { parent_node_id: 1 }),
     command('node-set-visible', 4, 1, { visible: false }),
     command('node-set-state', 5, 1, { state: { mode: 'active' } }),
     command('node-replace-prefab', 6, 1, {
@@ -323,18 +487,22 @@ test('commit validates all commands then applies one Authority call per target b
     }),
     command('node-remove', 7, 1),
   ];
-  const result = client.applyPacket(commitPacket({ commands }));
+  const result = client.applyPacket(commitPacket({ commands, matrixPoolSize: 2 }));
   const ack = readEnginePacket(result.ackPacket);
   assert.equal(ack.header.last_command_seq, 7);
   assert.equal(client.currentCommit().lastCommandSeq, 7);
-  assert.deepEqual(sessions[0].log.slice(5).map(([kind]) => kind), [
-    'begin', 'createNode', 'setNodeTransform', 'setNodeParent', 'setNodeVisible',
+  assert.deepEqual(sessions[0].log.slice(6).map(([kind]) => kind), [
+    'begin', 'applyNodeTransformBatch', 'createNode', 'setNodeTransform',
+    'setNodeParent', 'setNodeVisible',
     'setNodeState', 'replaceNodePrefab', 'removeNode', 'seal', 'summary',
   ]);
+  const batch = sessions[0].log.find(([kind]) => kind === 'applyNodeTransformBatch')[1];
+  assert.deepEqual([...batch.nodeIds], [0, 1]);
+  assert.deepEqual([...batch.matrices.slice(0, 16)], [...transform(3)]);
+  assert.deepEqual([...batch.matrices.slice(16)], [...transform(2)]);
   const transformRecord = sessions[0].log.find(([kind]) => kind === 'setNodeTransform')[1];
-  assert.ok(transformRecord.transform instanceof Float32Array);
-  assert.deepEqual([...transformRecord.transform], [...transform(3)]);
-  assert.deepEqual(Object.keys(transformRecord), ['name', 'transform']);
+  assert.deepEqual(transformRecord, { nodeId: 0 });
+  assert.deepEqual(Object.keys(transformRecord), ['nodeId']);
   assert.equal(Object.isFrozen(transformRecord), true);
 });
 
@@ -347,10 +515,23 @@ test('empty command stream still seals and ACKs while preserving command cursor'
     commands: [],
   }));
   assert.equal(readEnginePacket(result.ackPacket).header.last_command_seq, 4);
-  assert.deepEqual(sessions[0].log.slice(5).map(([kind]) => kind), [
-    'begin', 'seal', 'summary',
+  assert.deepEqual(sessions[0].log.slice(6).map(([kind]) => kind), [
+    'begin', 'applyNodeTransformBatch', 'seal', 'summary',
   ]);
   assert.equal(client.currentWorldState().tick, 1);
+});
+
+test('matrix pool growth requires transmitted contiguous create rows before the draw gate', () => {
+  const { factory, sessions } = createMockDisplayFactory();
+  const client = new SceneEngineClient({ createDisplaySession: factory });
+  client.applyPacket(checkpointPacket());
+  const beforeLogLength = sessions[0].log.length;
+
+  assert.throws(() => client.applyPacket(commitPacket({
+    commands: [],
+    matrixPoolSize: 0x10000000,
+  })), (error) => error.code === 'display-matrix-pool-progression-invalid');
+  assert.equal(sessions[0].log.length, beforeLogLength, 'invalid growth must not open the gate');
 });
 
 test('invalid binary command base fails before draw gate and leaves pointers unchanged', () => {
@@ -368,7 +549,7 @@ test('invalid binary command base fails before draw gate and leaves pointers unc
   const after = client.capture();
   assert.strictEqual(after.commit, before.commit);
   assert.strictEqual(after.worldState, before.worldState);
-  assert.equal(sessions[0].log.slice(5).length, 0);
+  assert.equal(sessions[0].log.slice(6).length, 0);
   assert.throws(() => client.applyPacket(raw), (error) => error.code === 'client-failed');
 });
 
@@ -386,7 +567,7 @@ test('validates the binary source-tick seal before the first Authority mutation'
     () => client.applyPacket(raw),
     (error) => error.code === 'display-command-source-tick-mismatch',
   );
-  assert.equal(sessions[0].log.length, 5);
+  assert.equal(sessions[0].log.length, 6);
 });
 
 test('Authority failure calls gate.fail, emits no ACK, and makes client terminal', () => {
@@ -403,8 +584,8 @@ test('Authority failure calls gate.fail, emits no ACK, and makes client terminal
     thrown = error;
   }
   assert.equal(thrown.code, 'packet-apply-failed');
-  assert.deepEqual(sessions[0].log.slice(5).map(([kind]) => kind), [
-    'begin', 'setNodeState', 'fail',
+  assert.deepEqual(sessions[0].log.slice(6).map(([kind]) => kind), [
+    'begin', 'applyNodeTransformBatch', 'setNodeState', 'fail',
   ]);
   assert.equal(sessions[0].log.at(-1)[1].message, 'failed:setNodeState');
   assert.strictEqual(client.currentCommit(), before.commit);
@@ -436,7 +617,8 @@ test('Promise-returning checkpoint summary fails closed and disposes the candida
     (error) => error.code === 'display-summary-async',
   );
   assert.deepEqual(sessions[0].log.map(([kind]) => kind), [
-    'installScene', 'createNode', 'activate', 'start', 'summary', 'dispose',
+    'installScene', 'installNodeMatrixPool', 'createNode',
+    'activate', 'start', 'summary', 'dispose',
   ]);
   assert.equal(client.currentDisplayView(), null);
   assert.throws(
@@ -455,8 +637,8 @@ test('Promise-returning commit summary fails the gate and publishes no ACK', () 
     () => client.applyPacket(commitPacket()),
     (error) => error.code === 'display-summary-async',
   );
-  assert.deepEqual(sessions[0].log.slice(5).map(([kind]) => kind), [
-    'begin', 'seal', 'fail',
+  assert.deepEqual(sessions[0].log.slice(6).map(([kind]) => kind), [
+    'begin', 'applyNodeTransformBatch', 'seal', 'fail',
   ]);
   assert.equal(client.currentCommit().commitSeq, 1);
   assert.throws(
@@ -596,5 +778,5 @@ test('constructor rejects missing display session factory', () => {
     command: 'bad', args: { value: NaN },
   }));
   assert.equal(WORLD_CODEC, 'example-world@2');
-  assert.equal(baselineNode().name, 'py/unit-1');
+  assert.equal(baselineNode().node_id, 0);
 });

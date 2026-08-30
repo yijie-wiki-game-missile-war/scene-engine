@@ -113,24 +113,33 @@ export interface DisplaySessionRuntime {
 }
 
 export interface AuthorityNodeRecord {
-  readonly name: string;
-  readonly parentName: string | null;
+  readonly nodeId: number;
+  readonly parentNodeId: number | null;
   readonly prefabId: string;
   readonly transformMode: 'initial' | 'live';
-  /** Client supplies an owned Float32Array; the wider input type matches Display Authority. */
-  readonly transform: Matrix4Input;
   readonly visible: boolean;
   readonly state: JSONRecord;
 }
 
+export interface NodeMatrixPoolRecord {
+  readonly poolSize: number;
+  readonly matrices: Float32Array;
+}
+
+export interface NodeTransformBatchRecord extends NodeMatrixPoolRecord {
+  readonly nodeIds: Uint32Array;
+}
+
 export interface DisplayAuthorityPort {
-  createNode(command: AuthorityNodeRecord): string;
-  setNodeTransform(command: { readonly name: string; readonly transform: Matrix4Input }): undefined;
-  setNodeParent(command: { readonly name: string; readonly parentName: string | null }): undefined;
-  setNodeVisible(command: { readonly name: string; readonly visible: boolean }): undefined;
-  setNodeState(command: { readonly name: string; readonly state: JSONRecord }): undefined;
-  replaceNodePrefab(command: { readonly name: string; readonly prefabId: string; readonly state: JSONRecord }): undefined;
-  removeNode(command: { readonly name: string }): undefined;
+  installNodeMatrixPool(command: NodeMatrixPoolRecord): undefined;
+  applyNodeTransformBatch(command: NodeTransformBatchRecord): undefined;
+  createNode(command: AuthorityNodeRecord): number;
+  setNodeTransform(command: { readonly nodeId: number }): undefined;
+  setNodeParent(command: { readonly nodeId: number; readonly parentNodeId: number | null }): undefined;
+  setNodeVisible(command: { readonly nodeId: number; readonly visible: boolean }): undefined;
+  setNodeState(command: { readonly nodeId: number; readonly state: JSONRecord }): undefined;
+  replaceNodePrefab(command: { readonly nodeId: number; readonly prefabId: string; readonly state: JSONRecord }): undefined;
+  removeNode(command: { readonly nodeId: number }): undefined;
 }
 
 export interface DisplayCommitGate {

@@ -388,23 +388,33 @@ export class PrefabDefinition {
 }
 
 export interface AuthorityNodeRecord {
-  readonly name: string;
-  readonly parentName: string | null;
+  readonly nodeId: number;
+  readonly parentNodeId: number | null;
   readonly prefabId: string;
   readonly transformMode: 'initial' | 'live';
-  readonly transform: Matrix4Input;
   readonly visible: boolean;
   readonly state: JSONRecord;
 }
 
+export interface NodeMatrixPoolRecord {
+  readonly poolSize: number;
+  readonly matrices: Float32Array;
+}
+
+export interface NodeTransformBatchRecord extends NodeMatrixPoolRecord {
+  readonly nodeIds: Uint32Array;
+}
+
 export interface AuthorityPort {
-  createNode(command: AuthorityNodeRecord): string;
-  setNodeTransform(command: { readonly name: string; readonly transform: Matrix4Input }): undefined;
-  setNodeParent(command: { readonly name: string; readonly parentName: string | null }): undefined;
-  setNodeVisible(command: { readonly name: string; readonly visible: boolean }): undefined;
-  setNodeState(command: { readonly name: string; readonly state: JSONRecord }): undefined;
-  replaceNodePrefab(command: { readonly name: string; readonly prefabId: string; readonly state: JSONRecord }): undefined;
-  removeNode(command: { readonly name: string }): undefined;
+  installNodeMatrixPool(command: NodeMatrixPoolRecord): undefined;
+  applyNodeTransformBatch(command: NodeTransformBatchRecord): undefined;
+  createNode(command: AuthorityNodeRecord): number;
+  setNodeTransform(command: { readonly nodeId: number }): undefined;
+  setNodeParent(command: { readonly nodeId: number; readonly parentNodeId: number | null }): undefined;
+  setNodeVisible(command: { readonly nodeId: number; readonly visible: boolean }): undefined;
+  setNodeState(command: { readonly nodeId: number; readonly state: JSONRecord }): undefined;
+  replaceNodePrefab(command: { readonly nodeId: number; readonly prefabId: string; readonly state: JSONRecord }): undefined;
+  removeNode(command: { readonly nodeId: number }): undefined;
 }
 
 export interface CommitGate {
@@ -545,7 +555,7 @@ export class BillboardComponent extends BehaviourComponent { static readonly typ
 export class LookAtComponent extends BehaviourComponent { static readonly typeId: 'behavior.look-at@1'; static readonly tickPhase: 'before-render'; static readonly drivesTransform: true; }
 
 export const TICKS_PER_SECOND: 60;
-export const DISPLAY_RUNTIME_SCHEMA: 'scene-engine-display-node@5';
+export const DISPLAY_RUNTIME_SCHEMA: 'scene-engine-display-node@6';
 export const DISPLAY_SUMMARY_SCHEMA: 'scene-engine-display-summary@1';
 export const DISPLAY_CATALOG_MANIFEST_SCHEMA: 'scene-engine-display-catalog-manifest@2';
 export const SCENE_DEFINITION_SCHEMA: 'scene-engine-scene-definition@2';

@@ -5,7 +5,8 @@ import { fail } from '../runtime/health.js';
 import { assertNodeName } from './node-name.js';
 
 export class Node {
-  constructor({ name, sceneToken, transform, visible = true, label = null }) {
+  constructor({ name, sceneToken, transform, visible = true, label = null,
+    authorityMatrixPool = null, authorityNodeId = null }) {
     this._name = assertNodeName(name);
     if (sceneToken === null || (typeof sceneToken !== 'object' && typeof sceneToken !== 'function')) {
       fail('display-node-scene-invalid');
@@ -13,9 +14,19 @@ export class Node {
     this._sceneToken = sceneToken;
     this._parent = null;
     this._children = [];
-    this._localTransform = createLocalTransform(
-      transform === undefined ? IDENTITY_TRANSFORM : transform,
-    );
+    this._ownedLocalTransform = null;
+    this._authorityMatrixPool = null;
+    this._authorityNodeId = null;
+    if (authorityMatrixPool === null && authorityNodeId === null) {
+      this._ownedLocalTransform = createLocalTransform(
+        transform === undefined ? IDENTITY_TRANSFORM : transform,
+      );
+    } else {
+      if (transform !== undefined || authorityMatrixPool === null || authorityNodeId === null) {
+        fail('display-authority-matrix-node-invalid');
+      }
+      this._bindAuthorityMatrixPool(authorityMatrixPool, authorityNodeId);
+    }
     this._worldTransform = createMutableWorldTransform();
     this._visibleSelf = visible;
     if (typeof visible !== 'boolean') fail('display-node-visibility-invalid');
@@ -37,10 +48,18 @@ export class Node {
   get visibleInHierarchy() { return this._visibleInHierarchy; }
   get components() { return Object.freeze([...this._components.values()]); }
   get disposed() { return this._disposed; }
+  get _localTransform() {
+    return this._authorityMatrixPool === null
+      ? this._ownedLocalTransform
+      : this._authorityMatrixPool.matrix(this._authorityNodeId);
+  }
 
   setLocalTransform(next) {
     this._assertMutable();
-    this._localTransform = createLocalTransform(next);
+    if (this._authorityMatrixPool !== null) {
+      fail('display-authority-transform-batch-required');
+    }
+    this._ownedLocalTransform = createLocalTransform(next);
     this._graph?.markTransformDirty(this);
   }
 
@@ -113,7 +132,28 @@ export class Node {
   _setGraph(graph) { this._graph = graph; }
   _setParent(parent) { this._parent = parent; }
   _setVisibleInHierarchy(value) { this._visibleInHierarchy = value; }
-  _markDisposed() { this._disposed = true; this._graph = null; }
+  _markDisposed() {
+    this._disposed = true;
+    this._graph = null;
+    this._authorityMatrixPool = null;
+    this._authorityNodeId = null;
+    this._ownedLocalTransform = null;
+  }
+  _bindAuthorityMatrixPool(pool, nodeId) {
+    if (!pool || typeof pool.matrix !== 'function' || !pool.has(nodeId)) {
+      fail('display-authority-matrix-node-invalid');
+    }
+    this._authorityMatrixPool = pool;
+    this._authorityNodeId = nodeId;
+    this._ownedLocalTransform = null;
+  }
+  _markAuthorityTransformChanged(pool, nodeId) {
+    this._assertMutable();
+    if (this._authorityMatrixPool !== pool || this._authorityNodeId !== nodeId) {
+      fail('display-authority-matrix-node-invalid');
+    }
+    this._graph?.markTransformDirty(this);
+  }
   _setAuthorityOwner(name) { this._authorityOwnerName = name; }
   _snapshotComponentState(key) {
     const component = this._components.get(key);

@@ -1,18 +1,19 @@
 import { encodeJSON, parseCanonicalJSON } from './wire.js';
 
-export const DISPLAY_CHECKPOINT_SCHEMA = 'scene-engine-display-checkpoint@5';
-export const DISPLAY_COMMAND_STREAM_SCHEMA = 'scene-engine-display-command-stream@5';
-export const NODE_COMMAND_SCHEMA = 'scene-engine-node-command@5';
+export const DISPLAY_CHECKPOINT_SCHEMA = 'scene-engine-display-checkpoint@6';
+export const DISPLAY_COMMAND_STREAM_SCHEMA = 'scene-engine-display-command-stream@6';
+export const NODE_COMMAND_SCHEMA = 'scene-engine-node-command@6';
 
 const CHECKPOINT_MAGIC = 'SDCP';
 const COMMAND_STREAM_MAGIC = 'SDCS';
-const BINARY_VERSION = 2;
+const BINARY_VERSION = 3;
 const FLOAT32_SCALAR = 1;
 const NULL_PARENT_INDEX = 0xffffffff;
 const NULL_STRING_LENGTH = 0xffff;
 const COMMON_HEADER_BYTES = 8;
 const MATRIX_LENGTH = 16;
 const MATRIX_BYTES = MATRIX_LENGTH * 4;
+const MAXIMUM_COMMANDS_PER_PAYLOAD = 65_536;
 
 const OPCODE_BY_KIND = Object.freeze({
   'node-create': 1,
@@ -27,26 +28,24 @@ const KIND_BY_OPCODE = Object.freeze(Object.fromEntries(
   Object.entries(OPCODE_BY_KIND).map(([kind, opcode]) => [opcode, kind]),
 ));
 
-const AUTHORITY_NAME = /^py\/[a-z0-9][a-z0-9._-]*(?:\/[a-z0-9][a-z0-9._-]*)*$/u;
 const SCENE_NAME = /^[a-z0-9][a-z0-9._-]*$/u;
 const PREFAB_ID = /^[a-z0-9][a-z0-9._@-]*(?:\/[a-z0-9][a-z0-9._@-]*)*$/u;
 const SHA256 = /^[0-9a-f]{64}$/u;
 const ENCODER = new TextEncoder();
 const DECODER = new TextDecoder('utf-8', { fatal: true });
-const OWNED_MATRICES = new WeakSet();
+const OWNED_MATRIX_TENSORS = new WeakSet();
+const LITTLE_ENDIAN = new Uint8Array(new Uint16Array([1]).buffer)[0] === 1;
 
 const BASELINE_FIELDS = new Set([
-  'name', 'parent_name', 'prefab_id', 'transform_mode',
-  'transform', 'visible', 'state',
+  'node_id', 'parent_node_id', 'prefab_id', 'transform_mode', 'visible', 'state',
 ]);
-const COMMAND_BASE_FIELDS = ['schema', 'command_seq', 'source_tick', 'kind', 'name'];
+const COMMAND_BASE_FIELDS = ['schema', 'command_seq', 'source_tick', 'kind', 'node_id'];
 const COMMAND_FIELDS = Object.freeze({
   'node-create': new Set([
-    ...COMMAND_BASE_FIELDS, 'parent_name', 'prefab_id', 'transform_mode',
-    'transform', 'visible', 'state',
+    ...COMMAND_BASE_FIELDS, 'parent_node_id', 'prefab_id', 'transform_mode', 'visible', 'state',
   ]),
-  'node-set-transform': new Set([...COMMAND_BASE_FIELDS, 'transform']),
-  'node-set-parent': new Set([...COMMAND_BASE_FIELDS, 'parent_name']),
+  'node-set-transform': new Set(COMMAND_BASE_FIELDS),
+  'node-set-parent': new Set([...COMMAND_BASE_FIELDS, 'parent_node_id']),
   'node-set-visible': new Set([...COMMAND_BASE_FIELDS, 'visible']),
   'node-set-state': new Set([...COMMAND_BASE_FIELDS, 'state']),
   'node-replace-prefab': new Set([
@@ -63,10 +62,10 @@ export class DisplayRecordError extends Error {
   }
 }
 
-// Parsing creates the matrix buffer and this move operation transfers that unique
-// value to the Authority port. Arbitrary typed arrays and legacy TRS objects fail closed.
-export function takeOwnedDisplayMatrix(value) {
-  if (!OWNED_MATRICES.delete(value)) fail('display-transform-ownership-invalid');
+// Parsing creates one contiguous tensor and this move operation transfers that unique
+// value to the Authority port. Arbitrary typed arrays and already-consumed tensors fail closed.
+export function takeOwnedDisplayMatrixTensor(value) {
+  if (!OWNED_MATRIX_TENSORS.delete(value)) fail('display-transform-ownership-invalid');
   return value;
 }
 
@@ -80,48 +79,53 @@ export function parseDisplayCheckpoint(value, { header, maximumJsonDepth = 256 }
   if (encodedLastCommandSeq !== lastCommandSeq) {
     fail('display-checkpoint-command-cursor-mismatch');
   }
+  const matrixPoolSize = reader.u32('display-matrix-pool-size-invalid');
+  const count = reader.u32('display-checkpoint-nodes-invalid');
+  if (count > matrixPoolSize) fail('display-checkpoint-nodes-invalid');
+  const matrixPool = reader.matrixTensor(matrixPoolSize, {
+    code: 'display-matrix-pool-invalid',
+    semantic: false,
+  });
   const sceneName = logicalName(reader.string('display-scene-name-invalid'),
     'display-scene-name-invalid');
   const sceneCatalogHash = reader.hash();
   const prefabCatalogHash = reader.hash();
   const stateSchemaHash = reader.hash();
-  const count = reader.u32('display-checkpoint-nodes-invalid');
-  const minimumNodeBytes = 2 + 4 + 2 + 1 + MATRIX_BYTES + 4;
+  const minimumNodeBytes = 4 + 4 + 2 + 1 + 4;
   if (count > Math.floor(reader.remaining / minimumNodeBytes)) {
     fail('display-checkpoint-nodes-invalid');
   }
   const nodes = [];
   const seen = new Set();
-  const depths = [];
+  const depths = new Map();
   for (let index = 0; index < count; index += 1) {
-    const name = authorityName(reader.string('display-node-name-invalid'),
-      'display-node-name-invalid');
-    if (seen.has(name)) fail('display-checkpoint-node-duplicate');
-    const parentIndex = reader.u32('display-checkpoint-parent-order-invalid');
-    if (parentIndex !== NULL_PARENT_INDEX && parentIndex >= index) {
+    const id = reader.nodeId(matrixPoolSize, 'display-node-id-invalid');
+    if (seen.has(id)) fail('display-checkpoint-node-duplicate');
+    const encodedParentId = reader.u32('display-checkpoint-parent-order-invalid');
+    if (encodedParentId !== NULL_PARENT_INDEX && !seen.has(encodedParentId)) {
       fail('display-checkpoint-parent-order-invalid');
     }
-    const parentName = parentIndex === NULL_PARENT_INDEX ? null : nodes[parentIndex].name;
+    const parentId = encodedParentId === NULL_PARENT_INDEX ? null : encodedParentId;
     const prefab = prefabId(reader.string('display-prefab-id-invalid'));
     const nodeFlags = reader.u8('display-checkpoint-node-flags-invalid');
     if ((nodeFlags & ~0x03) !== 0) fail('display-checkpoint-node-flags-invalid');
-    const transform = reader.matrix();
     const state = reader.state(maximumJsonDepth);
-    const depth = parentIndex === NULL_PARENT_INDEX ? 1 : depths[parentIndex] + 1;
+    const depth = parentId === null ? 1 : depths.get(parentId) + 1;
     if (depth > 128) fail('display-checkpoint-node-depth-limit');
     const node = Object.freeze({
-      name,
-      parentName,
+      nodeId: id,
+      parentNodeId: parentId,
       prefabId: prefab,
       transformMode: (nodeFlags & 0x02) === 0 ? 'initial' : 'live',
-      transform,
       visible: (nodeFlags & 0x01) !== 0,
       state,
     });
     nodes.push(node);
-    seen.add(name);
-    depths.push(depth);
+    seen.add(id);
+    depths.set(id, depth);
   }
+  validateCheckpointMatrixPool(matrixPool, matrixPoolSize, seen);
+  canonicalizeActiveMatrixRows(matrixPool, seen);
   reader.done('display-checkpoint-trailing-bytes');
   return Object.freeze({
     schema: DISPLAY_CHECKPOINT_SCHEMA,
@@ -130,6 +134,8 @@ export function parseDisplayCheckpoint(value, { header, maximumJsonDepth = 256 }
     prefabCatalogHash,
     stateSchemaHash,
     lastCommandSeq,
+    matrixPoolSize,
+    matrixPool,
     nodes: Object.freeze(nodes),
   });
 }
@@ -145,22 +151,44 @@ export function parseDisplayCommandStream(value, {
   const base = reader.u64('display-command-base-invalid');
   const encodedSourceTick = reader.u64('display-command-source-tick-invalid');
   const count = reader.u32('display-command-list-invalid');
-  if (count > Math.floor(reader.remaining / 3)) fail('display-command-list-invalid');
+  if (count > MAXIMUM_COMMANDS_PER_PAYLOAD) fail('display-command-count-limit');
   if (base !== baseCommandSeq) fail('display-command-base-mismatch');
   if (base + count > Number.MAX_SAFE_INTEGER) fail('display-command-sequence-invalid');
   const last = base + count;
   if (last !== header?.last_command_seq) fail('display-command-cursor-mismatch');
   const sourceTick = safeInteger(header?.source_tick, 'display-command-source-tick-invalid');
   if (encodedSourceTick !== sourceTick) fail('display-command-source-tick-mismatch');
+  const matrixPoolSize = reader.u32('display-matrix-pool-size-invalid');
+  const dirtyCount = reader.u32('display-transform-dirty-count-invalid');
+  if (dirtyCount > matrixPoolSize
+      || dirtyCount > Math.floor(reader.remaining / (4 + MATRIX_BYTES))) {
+    fail('display-transform-dirty-count-invalid');
+  }
+  const dirtyNodeIds = reader.nodeIds(dirtyCount, matrixPoolSize);
+  const dirtyMatrices = reader.matrixTensor(dirtyCount, {
+    code: 'display-transform-matrix-invalid',
+    semantic: true,
+  });
+  if (count > Math.floor(reader.remaining / 5)) fail('display-command-list-invalid');
   const commands = [];
   for (let index = 0; index < count; index += 1) {
-    commands.push(readCommand(reader, base + index + 1, sourceTick, maximumJsonDepth));
+    commands.push(readCommand(
+      reader,
+      base + index + 1,
+      sourceTick,
+      maximumJsonDepth,
+      matrixPoolSize,
+    ));
   }
+  validateDirtyMatrixTargets(commands, dirtyNodeIds);
   reader.done('display-command-stream-trailing-bytes');
   return Object.freeze({
     schema: DISPLAY_COMMAND_STREAM_SCHEMA,
     baseCommandSeq: base,
     lastCommandSeq: last,
+    matrixPoolSize,
+    dirtyNodeIds,
+    dirtyMatrices,
     commands: Object.freeze(commands),
   });
 }
@@ -169,7 +197,7 @@ export function encodeDisplayCheckpoint(value) {
   record(value, 'display-checkpoint-invalid');
   exact(value, new Set([
     'schema', 'scene_name', 'scene_catalog_hash', 'prefab_catalog_hash',
-    'state_schema_hash', 'last_command_seq', 'nodes',
+    'state_schema_hash', 'last_command_seq', 'matrix_pool_size', 'matrix_pool', 'nodes',
   ]), 'display-checkpoint-fields-invalid');
   if (value.schema !== DISPLAY_CHECKPOINT_SCHEMA) fail('display-checkpoint-schema-invalid');
   const sceneName = logicalName(value.scene_name, 'display-scene-name-invalid');
@@ -177,25 +205,36 @@ export function encodeDisplayCheckpoint(value) {
   const prefabCatalogHash = hash(value.prefab_catalog_hash, 'display-prefab-catalog-hash-invalid');
   const stateSchemaHash = hash(value.state_schema_hash, 'display-state-schema-hash-invalid');
   const lastCommandSeq = safeInteger(value.last_command_seq, 'display-last-command-seq-invalid');
+  const matrixPoolSize = poolSize(value.matrix_pool_size);
   if (!Array.isArray(value.nodes)) fail('display-checkpoint-nodes-invalid');
-  if (value.nodes.length > 0xffffffff) fail('display-checkpoint-nodes-invalid');
+  if (value.nodes.length > matrixPoolSize) fail('display-checkpoint-nodes-invalid');
 
-  const nodes = normalizeBaselineNodes(value.nodes);
-  const indices = new Map(nodes.map((node, index) => [node.name, index]));
+  const nodes = normalizeBaselineNodes(value.nodes, matrixPoolSize);
+  const matrixPool = normalizeMatrixTensor(
+    value.matrix_pool,
+    matrixPoolSize,
+    'display-matrix-pool-invalid',
+  );
+  validateCheckpointMatrixPool(
+    matrixPool,
+    matrixPoolSize,
+    new Set(nodes.map((node) => node.nodeId)),
+  );
   const writer = new BinaryWriter();
   writer.commonHeader(CHECKPOINT_MAGIC);
   writer.u64(lastCommandSeq);
+  writer.u32(matrixPoolSize);
+  writer.u32(nodes.length);
+  writer.matrixTensor(matrixPool);
   writer.string(sceneName);
   writer.hash(sceneCatalogHash);
   writer.hash(prefabCatalogHash);
   writer.hash(stateSchemaHash);
-  writer.u32(nodes.length);
   for (const node of nodes) {
-    writer.string(node.name);
-    writer.u32(node.parentName === null ? NULL_PARENT_INDEX : indices.get(node.parentName));
+    writer.u32(node.nodeId);
+    writer.u32(node.parentNodeId === null ? NULL_PARENT_INDEX : node.parentNodeId);
     writer.string(node.prefabId);
     writer.u8((node.visible ? 0x01 : 0) | (node.transformMode === 'live' ? 0x02 : 0));
-    writer.matrix(node.transform);
     writer.state(node.state);
   }
   return writer.finish();
@@ -204,15 +243,20 @@ export function encodeDisplayCheckpoint(value) {
 export function encodeDisplayCommandStream(value, { sourceTick: expectedSourceTick } = {}) {
   record(value, 'display-command-stream-invalid');
   exact(value, new Set([
-    'schema', 'base_command_seq', 'last_command_seq', 'commands',
+    'schema', 'base_command_seq', 'last_command_seq', 'matrix_pool_size',
+    'dirty_node_ids', 'dirty_matrices', 'commands',
   ]), 'display-command-stream-fields-invalid');
   if (value.schema !== DISPLAY_COMMAND_STREAM_SCHEMA) {
     fail('display-command-stream-schema-invalid');
   }
   const base = safeInteger(value.base_command_seq, 'display-command-base-invalid');
   const last = safeInteger(value.last_command_seq, 'display-last-command-seq-invalid');
+  const matrixPoolSize = poolSize(value.matrix_pool_size);
   if (!Array.isArray(value.commands)) fail('display-command-list-invalid');
-  if (value.commands.length > 0xffffffff || base + value.commands.length > Number.MAX_SAFE_INTEGER
+  if (value.commands.length > MAXIMUM_COMMANDS_PER_PAYLOAD) {
+    fail('display-command-count-limit');
+  }
+  if (base + value.commands.length > Number.MAX_SAFE_INTEGER
       || last !== base + value.commands.length) {
     fail('display-command-sequence-invalid');
   }
@@ -226,71 +270,90 @@ export function encodeDisplayCommandStream(value, { sourceTick: expectedSourceTi
     command,
     base + index + 1,
     sourceTick,
+    matrixPoolSize,
   ));
+  const dirtyNodeIds = normalizeDirtyNodeIds(value.dirty_node_ids, matrixPoolSize);
+  const dirtyMatrices = normalizeMatrixTensor(
+    value.dirty_matrices,
+    dirtyNodeIds.length,
+    'display-transform-matrix-invalid',
+  );
+  validateMatrixTensorSemantics(dirtyMatrices, dirtyNodeIds.length,
+    'display-transform-matrix-invalid');
+  validateDirtyMatrixTargets(commands, dirtyNodeIds);
   const writer = new BinaryWriter();
   writer.commonHeader(COMMAND_STREAM_MAGIC);
   writer.u64(base);
   writer.u64(sourceTick);
   writer.u32(commands.length);
+  writer.u32(matrixPoolSize);
+  writer.u32(dirtyNodeIds.length);
+  for (const id of dirtyNodeIds) writer.u32(id);
+  writer.matrixTensor(dirtyMatrices);
   for (const command of commands) writeCommand(writer, command);
   return writer.finish();
 }
 
-function normalizeBaselineNodes(values) {
+function normalizeBaselineNodes(values, matrixPoolSize) {
   const seen = new Set();
   const depths = new Map();
   return values.map((node) => {
-    const normalized = normalizeBaselineNode(node);
-    if (seen.has(normalized.name)) fail('display-checkpoint-node-duplicate');
-    if (normalized.parentName !== null && !seen.has(normalized.parentName)) {
+    const normalized = normalizeBaselineNode(node, matrixPoolSize);
+    if (seen.has(normalized.nodeId)) fail('display-checkpoint-node-duplicate');
+    if (normalized.parentNodeId !== null && !seen.has(normalized.parentNodeId)) {
       fail('display-checkpoint-parent-order-invalid');
     }
-    const depth = normalized.parentName === null
+    const depth = normalized.parentNodeId === null
       ? 1
-      : depths.get(normalized.parentName) + 1;
+      : depths.get(normalized.parentNodeId) + 1;
     if (depth > 128) fail('display-checkpoint-node-depth-limit');
-    seen.add(normalized.name);
-    depths.set(normalized.name, depth);
+    seen.add(normalized.nodeId);
+    depths.set(normalized.nodeId, depth);
     return normalized;
   });
 }
 
-function readCommand(reader, commandSeq, sourceTick, maximumJsonDepth) {
+function readCommand(reader, commandSeq, sourceTick, maximumJsonDepth, matrixPoolSize) {
   const opcode = reader.u8('display-command-kind-invalid');
   const kind = KIND_BY_OPCODE[opcode];
   if (kind === undefined) fail('display-command-kind-invalid');
-  const name = authorityName(reader.string('display-node-name-invalid'),
-    'display-node-name-invalid');
+  const id = reader.nodeId(matrixPoolSize, 'display-node-id-invalid');
   const common = {
     schema: NODE_COMMAND_SCHEMA,
     commandSeq,
     sourceTick,
     kind,
-    name,
+    nodeId: id,
   };
   switch (kind) {
     case 'node-create': {
-      const parentName = nullableAuthorityName(reader.nullableString('display-parent-name-invalid'));
+      const parentId = reader.nullableNodeId(matrixPoolSize, 'display-parent-node-id-invalid');
+      if (parentId === id) fail('display-parent-node-id-invalid');
       const prefab = prefabId(reader.string('display-prefab-id-invalid'));
       const flags = reader.u8('display-command-flags-invalid');
       if ((flags & ~0x03) !== 0) fail('display-command-flags-invalid');
       return Object.freeze({
         ...common,
-        parentName,
+        parentNodeId: parentId,
         prefabId: prefab,
         transformMode: (flags & 0x02) === 0 ? 'initial' : 'live',
-        transform: reader.matrix(),
         visible: (flags & 0x01) !== 0,
         state: reader.state(maximumJsonDepth),
       });
     }
     case 'node-set-transform':
-      return Object.freeze({ ...common, transform: reader.matrix() });
-    case 'node-set-parent':
+      return Object.freeze(common);
+    case 'node-set-parent': {
+      const parentId = reader.nullableNodeId(
+        matrixPoolSize,
+        'display-parent-node-id-invalid',
+      );
+      if (parentId === id) fail('display-parent-node-id-invalid');
       return Object.freeze({
         ...common,
-        parentName: nullableAuthorityName(reader.nullableString('display-parent-name-invalid')),
+        parentNodeId: parentId,
       });
+    }
     case 'node-set-visible': {
       const visible = reader.u8('display-node-visible-invalid');
       if (visible > 1) fail('display-node-visible-invalid');
@@ -313,20 +376,18 @@ function readCommand(reader, commandSeq, sourceTick, maximumJsonDepth) {
 
 function writeCommand(writer, command) {
   writer.u8(OPCODE_BY_KIND[command.kind]);
-  writer.string(command.name);
+  writer.u32(command.nodeId);
   switch (command.kind) {
     case 'node-create':
-      writer.nullableString(command.parentName);
+      writer.u32(command.parentNodeId === null ? NULL_PARENT_INDEX : command.parentNodeId);
       writer.string(command.prefabId);
       writer.u8((command.visible ? 0x01 : 0) | (command.transformMode === 'live' ? 0x02 : 0));
-      writer.matrix(command.transform);
       writer.state(command.state);
       break;
     case 'node-set-transform':
-      writer.matrix(command.transform);
       break;
     case 'node-set-parent':
-      writer.nullableString(command.parentName);
+      writer.u32(command.parentNodeId === null ? NULL_PARENT_INDEX : command.parentNodeId);
       break;
     case 'node-set-visible':
       writer.u8(command.visible ? 1 : 0);
@@ -345,21 +406,24 @@ function writeCommand(writer, command) {
   }
 }
 
-function normalizeBaselineNode(value) {
+function normalizeBaselineNode(value, matrixPoolSize) {
   record(value, 'display-checkpoint-node-invalid');
   exact(value, BASELINE_FIELDS, 'display-checkpoint-node-fields-invalid');
   return Object.freeze({
-    name: authorityName(value.name, 'display-node-name-invalid'),
-    parentName: nullableAuthorityName(value.parent_name),
+    nodeId: boundedNodeId(value.node_id, matrixPoolSize, 'display-node-id-invalid'),
+    parentNodeId: nullableBoundedNodeId(
+      value.parent_node_id,
+      matrixPoolSize,
+      'display-parent-node-id-invalid',
+    ),
     prefabId: prefabId(value.prefab_id),
     transformMode: transformMode(value.transform_mode),
-    transform: normalizeMatrix(value.transform),
     visible: boolean(value.visible, 'display-node-visible-invalid'),
     state: normalizeState(value.state),
   });
 }
 
-function normalizeCommand(value, expectedSequence, sourceTick) {
+function normalizeCommand(value, expectedSequence, sourceTick, matrixPoolSize) {
   record(value, 'display-command-invalid');
   const fields = COMMAND_FIELDS[value.kind];
   if (!fields) fail('display-command-kind-invalid');
@@ -376,26 +440,39 @@ function normalizeCommand(value, expectedSequence, sourceTick) {
     commandSeq: expectedSequence,
     sourceTick,
     kind: value.kind,
-    name: authorityName(value.name, 'display-node-name-invalid'),
+    nodeId: boundedNodeId(value.node_id, matrixPoolSize, 'display-node-id-invalid'),
   };
   switch (value.kind) {
-    case 'node-create':
+    case 'node-create': {
+      const parentNodeId = nullableBoundedNodeId(
+        value.parent_node_id,
+        matrixPoolSize,
+        'display-parent-node-id-invalid',
+      );
+      if (parentNodeId === common.nodeId) fail('display-parent-node-id-invalid');
       return Object.freeze({
         ...common,
-        parentName: nullableAuthorityName(value.parent_name),
+        parentNodeId,
         prefabId: prefabId(value.prefab_id),
         transformMode: transformMode(value.transform_mode),
-        transform: normalizeMatrix(value.transform),
         visible: boolean(value.visible, 'display-node-visible-invalid'),
         state: normalizeState(value.state),
       });
+    }
     case 'node-set-transform':
-      return Object.freeze({ ...common, transform: normalizeMatrix(value.transform) });
-    case 'node-set-parent':
+      return Object.freeze(common);
+    case 'node-set-parent': {
+      const parentNodeId = nullableBoundedNodeId(
+        value.parent_node_id,
+        matrixPoolSize,
+        'display-parent-node-id-invalid',
+      );
+      if (parentNodeId === common.nodeId) fail('display-parent-node-id-invalid');
       return Object.freeze({
         ...common,
-        parentName: nullableAuthorityName(value.parent_name),
+        parentNodeId,
       });
+    }
     case 'node-set-visible':
       return Object.freeze({
         ...common,
@@ -416,23 +493,72 @@ function normalizeCommand(value, expectedSequence, sourceTick) {
   }
 }
 
-function normalizeMatrix(value) {
-  if (!(value instanceof Float32Array) || value.length !== MATRIX_LENGTH) {
-    fail('display-transform-matrix-invalid');
-  }
-  for (let index = 0; index < MATRIX_LENGTH; index += 1) {
-    if (!Number.isFinite(value[index])) fail('display-transform-matrix-invalid');
-  }
-  if (value[3] !== 0 || value[7] !== 0 || value[11] !== 0 || value[15] !== 1) {
-    fail('display-transform-matrix-invalid');
-  }
-  const determinant = value[0] * (value[5] * value[10] - value[9] * value[6])
-    - value[4] * (value[1] * value[10] - value[9] * value[2])
-    + value[8] * (value[1] * value[6] - value[5] * value[2]);
-  if (!Number.isFinite(determinant) || determinant <= 0) {
-    fail('display-transform-matrix-invalid');
+function normalizeMatrixTensor(value, count, code) {
+  if (!(value instanceof Float32Array) || value.length !== count * MATRIX_LENGTH) fail(code);
+  for (let index = 0; index < value.length; index += 1) {
+    if (!Number.isFinite(value[index])) fail(code);
   }
   return value;
+}
+
+function validateMatrixAt(value, offset, code) {
+  if (value[offset + 3] !== 0 || value[offset + 7] !== 0
+      || value[offset + 11] !== 0 || value[offset + 15] !== 1) fail(code);
+  const determinant = value[offset] * (
+    value[offset + 5] * value[offset + 10] - value[offset + 9] * value[offset + 6]
+  ) - value[offset + 4] * (
+    value[offset + 1] * value[offset + 10] - value[offset + 9] * value[offset + 2]
+  ) + value[offset + 8] * (
+    value[offset + 1] * value[offset + 6] - value[offset + 5] * value[offset + 2]
+  );
+  if (!Number.isFinite(determinant) || determinant <= 0) fail(code);
+}
+
+function validateMatrixTensorSemantics(value, count, code) {
+  for (let index = 0; index < count; index += 1) {
+    validateMatrixAt(value, index * MATRIX_LENGTH, code);
+  }
+}
+
+function canonicalizeActiveMatrixRows(value, activeNodeIds) {
+  for (const id of activeNodeIds) {
+    const offset = id * MATRIX_LENGTH;
+    for (let index = 0; index < MATRIX_LENGTH; index += 1) {
+      if (Object.is(value[offset + index], -0)) value[offset + index] = 0;
+    }
+  }
+}
+
+function validateCheckpointMatrixPool(value, matrixPoolSize, activeNodeIds) {
+  for (let id = 0; id < matrixPoolSize; id += 1) {
+    const offset = id * MATRIX_LENGTH;
+    if (activeNodeIds.has(id)) {
+      validateMatrixAt(value, offset, 'display-transform-matrix-invalid');
+      continue;
+    }
+    for (let index = 0; index < MATRIX_LENGTH; index += 1) {
+      if (!Object.is(value[offset + index], 0)) {
+        fail('display-matrix-pool-tombstone-invalid');
+      }
+    }
+  }
+}
+
+function validateDirtyMatrixTargets(commands, dirtyNodeIds) {
+  const remaining = new Set(dirtyNodeIds);
+  let targetCount = 0;
+  for (const command of commands) {
+    if (command.kind !== 'node-create' && command.kind !== 'node-set-transform') continue;
+    targetCount += 1;
+    if (!remaining.delete(command.nodeId)) {
+      fail(dirtyNodeIds.includes(command.nodeId)
+        ? 'display-transform-target-duplicate'
+        : 'display-transform-dirty-target-mismatch');
+    }
+  }
+  if (targetCount !== dirtyNodeIds.length || remaining.size !== 0) {
+    fail('display-transform-dirty-target-mismatch');
+  }
 }
 
 function normalizeState(value) {
@@ -448,14 +574,34 @@ function cloneAndFreeze(value) {
   return Object.freeze(result);
 }
 
-function authorityName(value, code) {
-  if (typeof value !== 'string' || ENCODER.encode(value).byteLength > 192
-      || !AUTHORITY_NAME.test(value)) fail(code);
+function poolSize(value) {
+  if (!Number.isSafeInteger(value) || value < 0 || value > NULL_PARENT_INDEX) {
+    fail('display-matrix-pool-size-invalid');
+  }
   return value;
 }
 
-function nullableAuthorityName(value) {
-  return value === null ? null : authorityName(value, 'display-parent-name-invalid');
+function boundedNodeId(value, matrixPoolSize, code) {
+  if (!Number.isSafeInteger(value) || value < 0 || value === NULL_PARENT_INDEX
+      || value >= matrixPoolSize) fail(code);
+  return value;
+}
+
+function nullableBoundedNodeId(value, matrixPoolSize, code) {
+  return value === null ? null : boundedNodeId(value, matrixPoolSize, code);
+}
+
+function normalizeDirtyNodeIds(value, matrixPoolSize) {
+  if (!(value instanceof Uint32Array) || value.length > matrixPoolSize) {
+    fail('display-transform-dirty-ids-invalid');
+  }
+  let previous = -1;
+  for (const id of value) {
+    boundedNodeId(id, matrixPoolSize, 'display-transform-dirty-id-invalid');
+    if (id <= previous) fail('display-transform-dirty-id-order-invalid');
+    previous = id;
+  }
+  return value;
 }
 
 function logicalName(value, code) {
@@ -576,18 +722,57 @@ class BinaryReader {
     return result;
   }
 
-  matrix() {
-    this.require(MATRIX_BYTES, 'display-transform-matrix-truncated');
-    // Allocate a standalone buffer: Authority never observes a view into the packet bytes.
-    const result = new Float32Array(MATRIX_LENGTH);
-    for (let index = 0; index < MATRIX_LENGTH; index += 1) {
-      const value = this.view.getFloat32(this.offset, true);
-      this.offset += 4;
-      if (!Number.isFinite(value)) fail('display-transform-matrix-invalid');
-      result[index] = value === 0 ? 0 : value;
+  nodeId(matrixPoolSize, code) {
+    return boundedNodeId(this.u32(code), matrixPoolSize, code);
+  }
+
+  nullableNodeId(matrixPoolSize, code) {
+    const value = this.u32(code);
+    return value === NULL_PARENT_INDEX ? null : boundedNodeId(value, matrixPoolSize, code);
+  }
+
+  nodeIds(count, matrixPoolSize) {
+    const bytes = this.take(count * 4, 'display-transform-dirty-ids-truncated');
+    const result = new Uint32Array(count);
+    if (LITTLE_ENDIAN) {
+      new Uint8Array(result.buffer).set(bytes);
     }
-    normalizeMatrix(result);
-    OWNED_MATRICES.add(result);
+    const source = LITTLE_ENDIAN
+      ? null
+      : new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    let previous = -1;
+    for (let index = 0; index < count; index += 1) {
+      const id = LITTLE_ENDIAN
+        ? result[index]
+        : source.getUint32(index * 4, true);
+      boundedNodeId(id, matrixPoolSize, 'display-transform-dirty-id-invalid');
+      if (id <= previous) fail('display-transform-dirty-id-order-invalid');
+      result[index] = id;
+      previous = id;
+    }
+    return result;
+  }
+
+  matrixTensor(count, { code, semantic }) {
+    const valueCount = count * MATRIX_LENGTH;
+    const bytes = this.take(valueCount * 4, 'display-transform-matrix-truncated');
+    // Allocate one standalone tensor: Authority never observes a view into packet bytes.
+    const result = new Float32Array(valueCount);
+    if (LITTLE_ENDIAN) {
+      new Uint8Array(result.buffer).set(bytes);
+    }
+    const source = LITTLE_ENDIAN
+      ? null
+      : new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    for (let index = 0; index < valueCount; index += 1) {
+      const value = source === null ? result[index] : source.getFloat32(index * 4, true);
+      if (!Number.isFinite(value)) fail(code);
+      result[index] = semantic && Object.is(value, -0) ? 0 : value;
+    }
+    if (semantic) {
+      validateMatrixTensorSemantics(result, count, code);
+    }
+    OWNED_MATRIX_TENSORS.add(result);
     return result;
   }
 
@@ -678,10 +863,9 @@ class BinaryWriter {
     this.raw(bytes);
   }
 
-  matrix(value) {
-    normalizeMatrix(value);
-    this.ensure(MATRIX_BYTES);
-    for (let index = 0; index < MATRIX_LENGTH; index += 1) {
+  matrixTensor(value) {
+    this.ensure(value.length * 4);
+    for (let index = 0; index < value.length; index += 1) {
       const entry = value[index];
       this.view.setFloat32(this.offset, entry === 0 ? 0 : entry, true);
       this.offset += 4;

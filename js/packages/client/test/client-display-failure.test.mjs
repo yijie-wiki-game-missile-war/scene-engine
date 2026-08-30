@@ -85,12 +85,12 @@ test('canonical Wire fixtures install and commit against the canonical Display c
   assert.ok(checkpoint.ackPacket instanceof Uint8Array);
   assert.ok(commit.ackPacket instanceof Uint8Array);
   const view = client.currentDisplayView();
-  const aircraft = view.getNode('py/aircraft');
+  const aircraft = view.getNode('py/1');
   assert.equal(view.health, 'ready');
   assert.equal(aircraft.localTransform[4], 0.25);
   assert.equal(aircraft.localTransform[12], 1.5);
   assert.equal(aircraft.visibleSelf, false);
-  assert.notEqual(view.getNode('prefab/py/aircraft/body'), null);
+  assert.notEqual(view.getNode('prefab/py/1/body'), null);
 });
 
 test('rejected thenables are observed while synchronous barriers fail closed', async (t) => {
@@ -214,6 +214,7 @@ test('real DisplayRuntime returns no ACK for command or world-overflow commit fa
     sceneCatalogHash: catalogIdentity.sceneCatalogHash,
     prefabCatalogHash: catalogIdentity.prefabCatalogHash,
     stateSchemaHash: catalogIdentity.stateSchemaHash,
+    matrixPoolSize: 2,
   }));
   assert.ok(checkpoint.ackPacket instanceof Uint8Array);
   const beforeCommit = client.currentCommit();
@@ -227,7 +228,7 @@ test('real DisplayRuntime returns no ACK for command or world-overflow commit fa
         commands: [
           command('node-set-visible', 1, 1, { visible: false }),
           command('node-set-state', 2, 1, {
-            name: 'py/missing',
+            node_id: 1,
             state: { mode: 'unreachable' },
           }),
         ],
@@ -240,7 +241,7 @@ test('real DisplayRuntime returns no ACK for command or world-overflow commit fa
   assert.strictEqual(client.currentCommit(), beforeCommit);
   assert.strictEqual(client.currentWorldState(), beforeWorld);
   const failedView = client.currentDisplayView();
-  assert.equal(failedView.getNode('py/unit-1').visibleSelf, false);
+  assert.equal(failedView.getNode('py/0').visibleSelf, false);
   assert.equal(failedView.health, 'projection-invalid');
   assert.equal(runtimes[0].summary().health, 'projection-invalid');
   assert.throws(
@@ -257,11 +258,15 @@ test('real DisplayRuntime returns no ACK for command or world-overflow commit fa
     0, 0, 0, 1,
   ]);
   const nodes = Array.from({ length: 101 }, (_, index) => baselineNode(
-    `py/deep-${index}`,
-    index === 0 ? null : `py/deep-${index - 1}`,
-  )).map((node) => ({ ...node, transform: localScale }));
+    index,
+    index === 0 ? null : index - 1,
+  ));
+  const matrixPool = new Float32Array(nodes.length * 16);
+  for (const node of nodes) matrixPool.set(localScale, node.node_id * 16);
   const overflowCheckpoint = overflowClient.applyPacket(checkpointPacket({
     nodes,
+    matrixPoolSize: nodes.length,
+    matrixPool,
     sceneCatalogHash: catalogIdentity.sceneCatalogHash,
     prefabCatalogHash: catalogIdentity.prefabCatalogHash,
     stateSchemaHash: catalogIdentity.stateSchemaHash,
@@ -279,8 +284,9 @@ test('real DisplayRuntime returns no ACK for command or world-overflow commit fa
   assert.throws(() => {
     overflowOutcome = overflowClient.applyPacket(commitPacket({
       commands: [command('node-set-transform', 1, 1, {
-        name: 'py/deep-0', transform: hugeRootScale,
+        node_id: 0, matrix: hugeRootScale,
       })],
+      matrixPoolSize: nodes.length,
     }));
   }, (error) => error.code === 'display-transform-world-nonfinite');
   assert.equal(overflowOutcome, noOverflowOutcome, 'overflow commit must not return an ACK outcome');

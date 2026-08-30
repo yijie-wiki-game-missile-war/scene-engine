@@ -389,7 +389,7 @@ function profileKind(profile, index) {
   return 'particle';
 }
 
-function authorityName(index) { return `py/scale-${String(index).padStart(5, '0')}`; }
+function authorityName(index) { return `py/${index}`; }
 
 function transformFor(index, tick, bindings) {
   const width = Math.max(1, Math.ceil(Math.sqrt(bindings)));
@@ -532,15 +532,18 @@ function createFixture(runtime, catalog, options) {
   };
   let nestedItems = null;
   if (options.profile === 'nested') {
+    runtime.authority.installNodeMatrixPool({
+      poolSize: 1,
+      matrices: new Float32Array(IDENTITY),
+    });
     nestedItems = initialNestedItems(options.bindings);
     selectionCounts.mesh = options.bindings;
     const started = process.hrtime.bigint();
     runtime.authority.createNode({
-      name: 'py/nested-root',
-      parentName: null,
+      nodeId: 0,
+      parentNodeId: null,
       prefabId: IDS.prefabNestedOwner,
       transformMode: 'live',
-      transform: IDENTITY,
       visible: true,
       state: { items: nestedItems },
     });
@@ -548,16 +551,23 @@ function createFixture(runtime, catalog, options) {
     return { samples, selectionCounts, nestedItems, authorityRoots: 1 };
   }
 
+  const matrixPool = new Float32Array(options.bindings * 16);
+  for (let index = 0; index < options.bindings; index += 1) {
+    matrixPool.set(transformFor(index, 0, options.bindings), index * 16);
+  }
+  runtime.authority.installNodeMatrixPool({
+    poolSize: options.bindings,
+    matrices: matrixPool,
+  });
   for (let index = 0; index < options.bindings; index += 1) {
     const kind = profileKind(options.profile, index);
     selectionCounts[kind] += 1;
     const started = process.hrtime.bigint();
     runtime.authority.createNode({
-      name: authorityName(index),
-      parentName: null,
+      nodeId: index,
+      parentNodeId: null,
       prefabId: catalog.items[kind].id,
       transformMode: 'live',
-      transform: transformFor(index, 0, options.bindings),
       visible: true,
       state: {},
     });
@@ -585,7 +595,7 @@ function applyTick(runtime, fixture, options, state) {
       );
       nextItems[key] = nextEntry;
       state.lastTransforms.push({
-        name: `prefab/py/nested-root/items/${key}`,
+        name: `prefab/py/0/items/${key}`,
         expected: nextEntry.transform,
       });
     }
@@ -596,7 +606,12 @@ function applyTick(runtime, fixture, options, state) {
     };
     runtime.commitGate.begin(cursor);
     try {
-      runtime.authority.setNodeState({ name: 'py/nested-root', state: { items: nextItems } });
+      runtime.authority.applyNodeTransformBatch({
+        poolSize: 1,
+        nodeIds: new Uint32Array(),
+        matrices: new Float32Array(),
+      });
+      runtime.authority.setNodeState({ nodeId: 0, state: { items: nextItems } });
       runtime.commitGate.seal(cursor);
     } catch (error) {
       runtime.commitGate.fail(error);
@@ -612,15 +627,22 @@ function applyTick(runtime, fixture, options, state) {
     };
     runtime.commitGate.begin(cursor);
     try {
+      const updates = [];
       for (let ordinal = 0; ordinal < updateCount; ordinal += 1) {
         const index = (state.logicalUpdates + ordinal) % options.bindings;
         const nextTransform = transformFor(index, nextCommitSeq, options.bindings);
-        runtime.authority.setNodeTransform({
-          name: authorityName(index),
-          transform: nextTransform,
-        });
+        updates.push({ nodeId: index, transform: nextTransform });
         state.lastTransforms.push({ name: authorityName(index), expected: nextTransform });
       }
+      const sorted = [...updates].sort((left, right) => left.nodeId - right.nodeId);
+      const matrices = new Float32Array(sorted.length * 16);
+      sorted.forEach(({ transform }, index) => matrices.set(transform, index * 16));
+      runtime.authority.applyNodeTransformBatch({
+        poolSize: options.bindings,
+        nodeIds: new Uint32Array(sorted.map(({ nodeId }) => nodeId)),
+        matrices,
+      });
+      for (const { nodeId } of updates) runtime.authority.setNodeTransform({ nodeId });
       runtime.commitGate.seal(cursor);
     } catch (error) {
       runtime.commitGate.fail(error);
@@ -643,7 +665,7 @@ function sampleFinalTransforms(runtime, fixture, options, state) {
     if (options.profile === 'nested') {
       const key = 'item-00000';
       candidates = [{
-        name: `prefab/py/nested-root/items/${key}`,
+        name: `prefab/py/0/items/${key}`,
         expected: fixture.nestedItems[key].transform,
       }];
     } else {

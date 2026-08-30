@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regenerate the frozen cross-language Scene Engine wire@3/display@5 fixtures."""
+"""Regenerate the frozen cross-language Scene Engine wire@3/display@6 fixtures."""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from scene_engine.display import (  # noqa: E402
     DisplayCatalogIdentity,
     DisplayCommand,
+    DisplayMatrixPool,
     DisplayNode,
     DisplayTransform,
     encode_display_checkpoint,
@@ -134,20 +135,18 @@ process.stdout.write(JSON.stringify(toDisplayCatalogIdentityRecord(identity)));
 
 
 def node(
-    name: str,
+    node_id: int,
     *,
-    x: float = 0.0,
-    parent_name: str | None = None,
+    parent_node_id: int | None = None,
     prefab_id: str = "unit.basic",
     visible: bool = True,
     state: dict | None = None,
 ) -> DisplayNode:
     return DisplayNode(
-        name=name,
-        parent_name=parent_name,
+        node_id=node_id,
+        parent_node_id=parent_node_id,
         prefab_id=prefab_id,
         transform_mode="live",
-        transform=transform(x),
         visible=visible,
         state=state or {"animation": "idle"},
     )
@@ -163,7 +162,7 @@ def main() -> None:
     args = parser.parse_args()
     catalog_identity_path, catalog_identity_bytes, catalog = catalog_identity_fixture()
     wire_root = ROOT / "fixtures" / "wire-v3"
-    display_root = ROOT / "fixtures" / "display-v5"
+    display_root = ROOT / "fixtures" / "display-v6"
     tree_root = ROOT / "fixtures" / "json-tree-v1"
     package_wire_root = ROOT / "js" / "packages" / "client" / "fixtures" / "wire-v3"
     package_log = ROOT / "js" / "packages" / "client" / "fixtures" / "packet-log"
@@ -175,39 +174,53 @@ def main() -> None:
         reset(target)
     catalog_identity_path.write_bytes(catalog_identity_bytes)
 
+    matrix_pool = DisplayMatrixPool()
+    root_id = matrix_pool.append(transform(0.0))
+    aircraft_id = matrix_pool.append(transform(0.0))
+    doomed_id = matrix_pool.append(transform(-1.0))
     initial_nodes = (
-        node("py/root"),
-        node("py/aircraft", parent_name="py/root"),
+        node(root_id),
+        node(aircraft_id, parent_node_id=root_id),
+        node(doomed_id, parent_node_id=root_id),
     )
     display_checkpoint = encode_display_checkpoint(
         scene_name="main",
         catalog=catalog,
         last_command_seq=0,
+        matrix_pool=matrix_pool,
         nodes=initial_nodes,
     )
+    display_checkpoint.confirm_published()
+    transient_id = matrix_pool.append(transform(0.0))
+    matrix_pool.set(aircraft_id, transform(1.5))
+    matrix_pool.retire(doomed_id)
     commands = (
         DisplayCommand.create_node(
-            node("py/transient", parent_name="py/root")
+            node(transient_id, parent_node_id=root_id)
         ),
-        DisplayCommand.set_transform("py/aircraft", transform(1.5)),
-        DisplayCommand.set_parent("py/aircraft", "py/root"),
-        DisplayCommand.set_visible("py/aircraft", False),
-        DisplayCommand.set_state("py/aircraft", {"animation": "moving"}),
+        DisplayCommand.set_transform(aircraft_id),
+        DisplayCommand.set_parent(aircraft_id, root_id),
+        DisplayCommand.set_visible(aircraft_id, False),
+        DisplayCommand.set_state(aircraft_id, {"animation": "moving"}),
         DisplayCommand.replace_prefab(
-            "py/aircraft", "unit.basic", {"animation": "damaged"}
+            aircraft_id, "unit.basic", {"animation": "damaged"}
         ),
-        DisplayCommand.remove("py/transient"),
+        DisplayCommand.remove(doomed_id),
     )
     display_tick, command_cursor = encode_display_command_stream(
         base_command_seq=0,
         source_tick=1,
+        matrix_pool=matrix_pool,
         commands=commands,
     )
+    display_tick.confirm_published()
     display_input, final_cursor = encode_display_command_stream(
         base_command_seq=command_cursor,
         source_tick=1,
+        matrix_pool=matrix_pool,
         commands=(),
     )
+    display_input.confirm_published()
 
     snapshot = {
         "meta": {
@@ -272,21 +285,23 @@ def main() -> None:
         display_commands=display_input,
     )
     final_nodes = (
-        node("py/root"),
+        node(root_id),
         node(
-            "py/aircraft",
-            x=1.5,
-            parent_name="py/root",
+            aircraft_id,
+            parent_node_id=root_id,
             visible=False,
             state={"animation": "damaged"},
         ),
+        node(transient_id, parent_node_id=root_id),
     )
     final_display_checkpoint = encode_display_checkpoint(
         scene_name="main",
         catalog=catalog,
         last_command_seq=final_cursor,
+        matrix_pool=matrix_pool,
         nodes=final_nodes,
     )
+    final_display_checkpoint.confirm_published()
     final_snapshot = {
         "meta": {
             "float": 2.5,

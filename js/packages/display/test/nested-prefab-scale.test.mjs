@@ -110,10 +110,10 @@ function dynamicOwner({ id, childPrefab, maximumInstances, gameplayType, resolve
   });
 }
 
-function authorityCommand(name, prefabId, state) {
+function authorityCommand(nodeId, prefabId, state) {
   return {
-    name,
-    parentName: null,
+    nodeId,
+    parentNodeId: null,
     prefabId,
     transformMode: 'live',
     transform: IDENTITY,
@@ -200,11 +200,11 @@ test('640 dynamic children reconcile by ledger identity without full NodeIndex s
   const fakeBackend = fakeBackends[0];
   const scans = instrumentNodeIndex(index);
   const durations = {};
-  const ownerName = 'py/nested-scale';
+  const ownerName = 'py/0';
 
   try {
     durations.initialize = time(() => commitAuthority(runtime, () => runtime.authority.createNode(
-      authorityCommand(ownerName, definitions.owner.id, scaleState()),
+      authorityCommand(0, definitions.owner.id, scaleState()),
     ), { sourceTickDelta: 1 }));
     assert.deepEqual(scans.counts, { values: 0, findByPrefix: 0 });
     assert.equal(runtime.summary().nodeCount, SCALE_CHILD_COUNT + 5);
@@ -212,12 +212,12 @@ test('640 dynamic children reconcile by ledger identity without full NodeIndex s
     assert.equal(animationSystem._players.size, 0);
     assert.equal(renderSystem._entries.size, 1, 'the Scene camera is the only RenderComponent');
 
-    const retainedName = 'prefab/py/nested-scale/children/child-0320';
+    const retainedName = 'prefab/py/0/children/child-0320';
     const retainedNode = index.require(retainedName);
     const retainedProbe = retainedNode.requireComponent('probe');
     scans.reset();
     durations.retain = time(() => commitAuthority(runtime, () => runtime.authority.setNodeState({
-      name: ownerName,
+      nodeId: 0,
       state: scaleState({ valueOffset: 10_000 }),
     }), { sourceTickDelta: 1 }));
     assert.deepEqual(scans.counts, { values: 0, findByPrefix: 0 });
@@ -226,21 +226,21 @@ test('640 dynamic children reconcile by ledger identity without full NodeIndex s
     assert.equal(retainedProbe.properties.value, 10_320);
     assert.equal(scheduler._registered.size, SCALE_CHILD_COUNT);
 
-    const removedName = 'prefab/py/nested-scale/children/child-0000';
+    const removedName = 'prefab/py/0/children/child-0000';
     const removedNode = index.require(removedName);
     const removedProbe = removedNode.requireComponent('probe');
     const plusOneMinusOne = scaleState({ start: 1, count: SCALE_CHILD_COUNT, valueOffset: 20_000 });
     scans.reset();
     durations.plusOneMinusOne = time(() => commitAuthority(
       runtime,
-      () => runtime.authority.setNodeState({ name: ownerName, state: plusOneMinusOne }),
+      () => runtime.authority.setNodeState({ nodeId: 0, state: plusOneMinusOne }),
       { sourceTickDelta: 1 },
     ));
     assert.deepEqual(scans.counts, { values: 0, findByPrefix: 0 });
     assert.equal(index.get(removedName), null);
     assert.equal(removedNode.disposed, true);
     assert.equal(removedProbe.disposed, true);
-    assert.notEqual(index.get('prefab/py/nested-scale/children/child-0640'), null);
+    assert.notEqual(index.get('prefab/py/0/children/child-0640'), null);
     assert.strictEqual(index.require(retainedName), retainedNode);
     assert.equal(scheduler._registered.size, SCALE_CHILD_COUNT);
     assert.equal(runtime.summary().nodeCount, SCALE_CHILD_COUNT + 5);
@@ -313,7 +313,7 @@ async function stageHarness() {
     configureComponents: configureStageProbe,
   });
   commitAuthority(harness.runtime, () => harness.runtime.authority.createNode(authorityCommand(
-    'py/nested-stage',
+    0,
     definitions.owner.id,
     { children: { kept: { tag: 'kept', value: 1, failure: null } } },
   )), { sourceTickDelta: 1 });
@@ -334,7 +334,7 @@ function beginFailingNestedState(runtime, children) {
   runtime.commitGate.begin(cursor);
   let caught = null;
   try {
-    runtime.authority.setNodeState({ name: 'py/nested-stage', state: { children } });
+    runtime.authority.setNodeState({ nodeId: 0, state: { children } });
   } catch (error) {
     caught = error;
   }
@@ -342,14 +342,14 @@ function beginFailingNestedState(runtime, children) {
 }
 
 function assertStagedFailureIsAtomic(runtime, before, staged) {
-  const keptName = 'prefab/py/nested-stage/children/kept';
+  const keptName = 'prefab/py/0/children/kept';
   assert.strictEqual(runtime._nodeIndex.require(keptName), before.node);
   assert.strictEqual(runtime._nodeIndex.require(keptName).requireComponent('probe'), before.probe);
   assert.strictEqual(before.probe.properties, before.properties);
   assert.strictEqual(before.authority.state, before.authorityState);
   assert.equal(before.probe.properties.value, 1);
   for (const key of ['aa-first', 'bb-fails', 'cc-later']) {
-    assert.equal(runtime._nodeIndex.get(`prefab/py/nested-stage/children/${key}`), null);
+    assert.equal(runtime._nodeIndex.get(`prefab/py/0/children/${key}`), null);
   }
   assert.equal(runtime.summary().nodeCount, before.nodeCount);
   assert.deepEqual(runtime.summary().cursor, before.cursor);
@@ -361,9 +361,9 @@ function assertStagedFailureIsAtomic(runtime, before, staged) {
 }
 
 function captureLiveStageBaseline(runtime) {
-  const node = runtime._nodeIndex.require('prefab/py/nested-stage/children/kept');
+  const node = runtime._nodeIndex.require('prefab/py/0/children/kept');
   const probe = node.requireComponent('probe');
-  const authority = runtime._nodeIndex.require('py/nested-stage').requireComponent('authority');
+  const authority = runtime._nodeIndex.require('py/0').requireComponent('authority');
   return {
     node,
     probe,
