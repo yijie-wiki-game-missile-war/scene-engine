@@ -27,8 +27,6 @@ Python 测试由 `uv run python -m pytest -q` 按 `pyproject.toml` 的 `tests/` 
 | [`test_recording_v2.py`](../../tests/test_recording_v2.py) | packet-log 精确 packet bytes、command cursor 索引、INCOMPLETE/seal 生命周期、stream progression、周期 checkpoint anchor 和损坏记录拒绝。 |
 | [`test_catalog_identity.py`](../../tests/test_catalog_identity.py) | Python 加载 JavaScript 构建的 Display catalog identity，严格校验封闭字段和小写 SHA-256。 |
 | [`test_import_surface.py`](../../tests/test_import_surface.py) | Python 根包公开导出、版本和当前模块集合，防止旧模块或额外 API 回流。 |
-| [`test_display_benchmark.py`](../../tests/test_display_benchmark.py) | 500-node benchmark 工具的参数约束、quick/formal 模式、报告结构和阈值判定函数。它是工具行为测试，随 pytest 全量套件运行，不是独立 benchmark 门禁。 |
-| [`test_verify_cutover.py`](../../tests/test_verify_cutover.py) | package tarball、npm file install、wheel metadata/source 和 release archive 文件比较函数的拒绝与一致性行为。它是工具行为测试，随 pytest 全量套件运行，不是独立 release gate。 |
 | [`test_python_js_communication_e2e.py`](../../tests/test_python_js_communication_e2e.py) | 32 roots checkpoint、多次 transform commit、exact Wire/ACK bytes、长度帧本地 Node 子进程、canonical JavaScript catalog identity、Client/Display cursor、最终 World 与 Transform digest；另以小规模 windowed CLI smoke 检查 in-flight/pending 峰值和最终归零。 |
 
 ## JavaScript Client

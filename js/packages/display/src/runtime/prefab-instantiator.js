@@ -186,7 +186,6 @@ export class PrefabInstantiator {
     this._animationSystem = animationSystem;
     this._onCleanupErrors = onCleanupErrors;
     this._scopes = new Map();
-    this._disposed = false;
     this._disposeErrors = null;
   }
 
@@ -261,16 +260,6 @@ export class PrefabInstantiator {
     return plan;
   }
 
-  applyValidatedPatch(scopeOrRecord, patch) {
-    const record = scopeOrRecord.records instanceof Map
-      ? scopeOrRecord.records.get(ROOT_INSTANCE_PATH) : scopeOrRecord;
-    this._applyDirectPatch(record, patch);
-  }
-
-  applyState(scope, state, displayState = {}) {
-    return this.reconcileState(scope, state, displayState);
-  }
-
   reconcileState(scope, state, displayState = {}) {
     if (!scope || scope.disposed || this._scopes.get(scope.root) !== scope) {
       fail('display-prefab-scope-missing');
@@ -342,10 +331,6 @@ export class PrefabInstantiator {
         const record = diff.retained.get(desired.instancePath)
           ?? stagedRecords.get(desired.instancePath);
         if (!record) fail('display-prefab-scope-missing');
-        record.state = desired.state;
-        record.sourceKind = desired.sourceKind;
-        record.sourceKey = desired.sourceKey;
-        record.slotKey = desired.slotKey;
         nextRecords.set(desired.instancePath, record);
       }
       scope.records = nextRecords;
@@ -404,20 +389,12 @@ export class PrefabInstantiator {
         if (!node.disposed) node._markDisposed();
       } catch (error) { errors.push(error); }
     }
-    if (scope.removeRootOnDispose) {
-      try {
-        if (scope.root._graph) scope.root._graph.detach(scope.root);
-        if (scope.nodeIndex.get(scope.root.name) === scope.root) scope.nodeIndex.unregister(scope.root);
-        if (!scope.root.disposed) scope.root._markDisposed();
-      } catch (error) { errors.push(error); }
-    }
     this._scopes.delete(scope.root);
     return Object.freeze(errors);
   }
 
   dispose(reason = 'prefab-instantiator-disposed') {
     if (this._disposeErrors !== null) return this._disposeErrors;
-    this._disposed = true;
     const errors = [];
     for (const scope of [...this._scopes.values()].reverse()) {
       try { errors.push(...this.disposeScope(scope, reason)); } catch (error) { errors.push(error); }
@@ -497,7 +474,6 @@ export class PrefabInstantiator {
       scope.authorityComponent = authorityComponent;
       scope.shadowParent = shadowParent;
       scope.shadowNodeIndex = shadowIndex;
-      scope.transferRoot = true;
       return scope;
     } catch (error) {
       if (scope) this._rollbackPrepared(scope);
@@ -650,8 +626,6 @@ export class PrefabInstantiator {
       ownedNodes: [],
       attached: false,
       disposed: false,
-      removeRootOnDispose: false,
-      transferRoot: false,
       shadowParent: null,
       adoptedIntoScope: false,
     };
@@ -670,12 +644,7 @@ export class PrefabInstantiator {
     const record = {
       instancePath: plan.instancePath,
       parentInstancePath: plan.parentInstancePath,
-      sourceKind: plan.sourceKind,
-      sourceKey: plan.sourceKey,
-      slotKey: plan.slotKey,
-      prefabId: plan.compiled.id,
       compiled: plan.compiled,
-      state: plan.state,
       root,
       mountNode,
       ownsRoot,
@@ -898,8 +867,6 @@ export class PrefabInstantiator {
       ownedNodes: [],
       attached: false,
       disposed: false,
-      removeRootOnDispose: false,
-      transferRoot: false,
       shadowParent,
       shadowNodeIndex: shadowIndex,
       liveParent,
@@ -944,7 +911,6 @@ export class PrefabInstantiator {
       nodeGraph: scope.nodeGraph,
       componentContext: scope.componentContext,
       shadowParent: null,
-      transferRoot: false,
     };
     return this._suspendBundle(bundle, { includeRoot: false });
   }
@@ -1204,16 +1170,6 @@ export class PrefabInstantiator {
     if (!rootRecord) fail('display-prefab-scope-missing');
     scope.compiled = rootRecord.compiled;
     scope.nodeByPath = rootRecord.nodeByPath;
-    scope.componentByPath = rootRecord.componentByPath;
-    scope.nodes = scope.ownedNodes;
-    scope.componentsByNode = new Map();
-    scope.components = [];
-    for (const record of scope.records.values()) {
-      for (const [node, components] of record.componentsByNode) {
-        scope.componentsByNode.set(node, components);
-        scope.components.push(...components);
-      }
-    }
   }
 
   _createCandidateSurface({ diff, stages, hiddenLiveNames, retainedOverrides,

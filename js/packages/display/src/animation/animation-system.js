@@ -252,12 +252,11 @@ export class AnimationSystem {
         `Animation player ${player.key} must be placed on a bound Prefab root node, not ${node.name}.`);
     }
     if (this._players.has(player)) fail('display-animation-player-duplicate');
+    const declaredAnimationId = player.properties.animationId;
     const record = {
       component: player,
       prefabScope,
       rootNode: node,
-      declaredAnimationId: player.properties.animationId,
-      declaredDescriptor: null,
       declaredBindings: [],
       currentAnimationId: null,
       descriptor: null,
@@ -270,13 +269,12 @@ export class AnimationSystem {
       pendingDeclaredChange: false,
     };
     this._players.set(player, record);
-    if (record.declaredAnimationId !== null) {
+    if (declaredAnimationId !== null) {
       const descriptor = requireAnimationDescriptor(this._resourceRegistry,
-        record.declaredAnimationId);
+        declaredAnimationId);
       const bindings = this._resolveBindings(record, descriptor, false);
-      record.declaredDescriptor = descriptor;
       record.declaredBindings = bindings;
-      if (player.enabled) this._startAnimation(record, record.declaredAnimationId);
+      if (player.enabled) this._startAnimation(record, declaredAnimationId);
     }
     this._requestDraw();
   }
@@ -355,7 +353,6 @@ export class AnimationSystem {
   propertiesChanged(player) {
     const record = this._players.get(player);
     if (!record) return;
-    record.declaredAnimationId = player.properties.animationId;
     // Authority state patches may change both a player's declared clip and the target
     // Sprite atlas. Reconcile all players only after the complete transaction candidate
     // exists, so resolver property order cannot expose an invalid intermediate binding.
@@ -496,8 +493,6 @@ export class AnimationSystem {
       }
       plans.push({
         record,
-        declaredAnimationId,
-        declaredDescriptor,
         declaredBindings,
         animationId,
         descriptor,
@@ -509,8 +504,6 @@ export class AnimationSystem {
     let changed = false;
     for (const plan of plans) {
       const { record } = plan;
-      record.declaredAnimationId = plan.declaredAnimationId;
-      record.declaredDescriptor = plan.declaredDescriptor;
       record.declaredBindings = plan.declaredBindings;
       if (!record.pendingDeclaredChange) continue;
       record.pendingDeclaredChange = false;

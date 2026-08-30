@@ -147,7 +147,6 @@ export class DisplayRuntime {
     });
     this._animationSystem = new AnimationSystem({
       resourceRegistry,
-      nodeIndex: this._nodeIndex,
       renderSystem: this._renderSystem,
       onNeedsDraw: () => this.requestDraw(),
     });

@@ -143,8 +143,6 @@ export class RenderSystem {
     this._onNeedsDraw?.();
   }
 
-  hasAnimationOverride(component) { return this._animationOverrides.has(component); }
-
   effectiveProperties(component) {
     const override = this._animationOverrides.get(component);
     return override === undefined ? component.properties
@@ -411,13 +409,6 @@ export class RenderSystem {
       this._pending.delete(job);
     });
     this._identityBarriers.set(identityKey(entry.identity), job);
-    this._pending.add(job);
-  }
-
-  _trackMaybePromise(value, code) {
-    if (!value || typeof value.then !== 'function') return;
-    const job = Promise.resolve(value).catch((error) => this._report(code, error))
-      .finally(() => this._pending.delete(job));
     this._pending.add(job);
   }
 

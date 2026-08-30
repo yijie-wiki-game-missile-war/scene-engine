@@ -131,9 +131,9 @@ function prefabLocalNodeName(rootName, localPath) {
     ? `${rootName}/${localPath}` : `prefab/${rootName}/${localPath}`;
 }
 
-function spriteBinding(harness, nodeName = 'py/walk') {
+function spriteBinding(harness, nodeName = 'py/walk', componentKey = 'sprite') {
   return harness.fakeBackends.at(-1).bindings.get(
-    JSON.stringify([prefabLocalNodeName(nodeName, 'body'), 'sprite']),
+    JSON.stringify([prefabLocalNodeName(nodeName, 'body'), componentKey]),
   );
 }
 
@@ -1062,21 +1062,21 @@ test('switching clips clears overrides and batching ownership from targets the n
     const firstSprite = body.getComponent('first');
     const secondSprite = body.getComponent('second');
     assert.equal(harness.runtime._renderSystem.effectiveProperties(firstSprite).frame, 1);
-    assert.equal(harness.runtime._renderSystem.hasAnimationOverride(firstSprite), true);
-    assert.equal(harness.runtime._renderSystem.hasAnimationOverride(secondSprite), false);
+    assert.equal(spriteBinding(harness, 'py/walk', 'first').patch.batchable, false);
+    assert.equal(spriteBinding(harness, 'py/walk', 'second').patch.batchable, true);
 
     playerComponent(harness).playAnimation('animator', second.id);
     harness.frames.step(0);
     assert.equal(harness.runtime._renderSystem.effectiveProperties(firstSprite).frame, 0,
       'the omitted target immediately exposes its base frame');
-    assert.equal(harness.runtime._renderSystem.hasAnimationOverride(firstSprite), false);
+    assert.equal(spriteBinding(harness, 'py/walk', 'first').patch.batchable, true);
     assert.equal(harness.runtime._renderSystem.effectiveProperties(secondSprite).frame, 3);
-    assert.equal(harness.runtime._renderSystem.hasAnimationOverride(secondSprite), true);
+    assert.equal(spriteBinding(harness, 'py/walk', 'second').patch.batchable, false);
 
     playerComponent(harness).stopAnimation('animator');
     harness.frames.step(0);
     assert.equal(harness.runtime._renderSystem.effectiveProperties(secondSprite).frame, 2);
-    assert.equal(harness.runtime._renderSystem.hasAnimationOverride(secondSprite), false);
+    assert.equal(spriteBinding(harness, 'py/walk', 'second').patch.batchable, true);
   });
 
 test('stop restores the newest base properties, not a start-time snapshot', async (t) => {
