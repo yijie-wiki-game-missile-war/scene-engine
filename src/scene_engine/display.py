@@ -1,4 +1,4 @@
-"""Display Node/Component publication records for the current R2 contract.
+"""Display Node/Component publication records for the matrix-native contract.
 
 The product publishes a complete checkpoint baseline and, after that, only
 single-target logical commands.  Engine owns the command sequence and source
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 import re
+import struct
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -18,10 +19,10 @@ from .errors import ConfigurationError
 from .json_tree import validate_json_value
 
 
-DISPLAY_CODEC = "scene-engine-display-node@3"
-DISPLAY_CHECKPOINT_SCHEMA = "scene-engine-display-checkpoint@3"
-DISPLAY_COMMAND_STREAM_SCHEMA = "scene-engine-display-command-stream@3"
-DISPLAY_COMMAND_SCHEMA = "scene-engine-node-command@3"
+DISPLAY_CODEC = "scene-engine-display-node@5"
+DISPLAY_CHECKPOINT_SCHEMA = "scene-engine-display-checkpoint@5"
+DISPLAY_COMMAND_STREAM_SCHEMA = "scene-engine-display-command-stream@5"
+DISPLAY_COMMAND_SCHEMA = "scene-engine-node-command@5"
 MAXIMUM_NODE_NAME_BYTES = 192
 MAXIMUM_PREFAB_ID_BYTES = 192
 MAXIMUM_SCENE_NAME_BYTES = 96
@@ -30,6 +31,7 @@ MAXIMUM_NODE_DEPTH = 128
 _NODE_SEGMENT = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _PREFAB_ID = re.compile(r"^[a-z0-9][a-z0-9._@-]*(?:/[a-z0-9][a-z0-9._@-]*)*$")
 _HASH = re.compile(r"^[0-9a-f]{64}$")
+_MATRIX4_F32 = struct.Struct("<16f")
 _COMMAND_KINDS = frozenset(
     {
         "node-create",
@@ -41,58 +43,6 @@ _COMMAND_KINDS = frozenset(
         "node-remove",
     }
 )
-
-
-class _ImmutableDict(dict[str, Any]):
-    """JSON-compatible mapping that cannot be changed after construction."""
-
-    @staticmethod
-    def _immutable(*_args: Any, **_kwargs: Any) -> None:
-        raise TypeError("validated display command streams are immutable")
-
-    __setitem__ = _immutable
-    __delitem__ = _immutable
-    __ior__ = _immutable
-    clear = _immutable
-    pop = _immutable
-    popitem = _immutable
-    setdefault = _immutable
-    update = _immutable
-
-
-class _ImmutableList(list[Any]):
-    """JSON-compatible sequence that cannot be changed after construction."""
-
-    @staticmethod
-    def _immutable(*_args: Any, **_kwargs: Any) -> None:
-        raise TypeError("validated display command streams are immutable")
-
-    __setitem__ = _immutable
-    __delitem__ = _immutable
-    __iadd__ = _immutable
-    __imul__ = _immutable
-    append = _immutable
-    clear = _immutable
-    extend = _immutable
-    insert = _immutable
-    pop = _immutable
-    remove = _immutable
-    reverse = _immutable
-    sort = _immutable
-
-
-class ValidatedDisplayCommandStream(_ImmutableDict):
-    """Seal proving a command stream was built from validated records."""
-
-    def __init__(
-        self, value: Mapping[str, Any], *, source_tick: int, maximum_json_depth: int
-    ) -> None:
-        dict.__init__(self, value)
-        object.__setattr__(self, "source_tick", source_tick)
-        object.__setattr__(self, "maximum_json_depth", maximum_json_depth)
-
-    def __setattr__(self, _name: str, _value: Any) -> None:
-        raise TypeError("validated display command streams are immutable")
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,63 +83,241 @@ class DisplayCatalogIdentity:
 
 @dataclass(frozen=True, slots=True, init=False)
 class DisplayTransform:
-    """The sole local TRS stored by one display Node."""
+    """One opaque column-major binary32 local matrix payload."""
 
-    position: tuple[float, float, float]
-    rotation_xyzw: tuple[float, float, float, float]
-    scale: tuple[float, float, float]
+    _matrix_bytes: bytes
 
     def __init__(
         self,
         *,
-        position: Sequence[float],
-        rotation_xyzw: Sequence[float],
-        scale: Sequence[float],
+        matrix_bytes: bytes,
     ) -> None:
-        normalized_position = _finite_vector(position, 3, "position")
-        normalized_rotation = _finite_vector(rotation_xyzw, 4, "rotation_xyzw")
-        magnitude = math.sqrt(sum(value * value for value in normalized_rotation))
-        if magnitude == 0:
-            raise ConfigurationError("rotation_xyzw must not be the zero quaternion")
-        normalized_scale = _finite_vector(scale, 3, "scale")
-        if any(value <= 0 for value in normalized_scale):
-            raise ConfigurationError("scale components must be greater than zero")
-        object.__setattr__(self, "position", normalized_position)
-        object.__setattr__(
-            self,
-            "rotation_xyzw",
-            tuple(value / magnitude for value in normalized_rotation),
-        )
-        object.__setattr__(self, "scale", normalized_scale)
+        if not isinstance(matrix_bytes, bytes) or len(matrix_bytes) != _MATRIX4_F32.size:
+            raise ConfigurationError(
+                "transform matrix_bytes must contain exactly 64 bytes"
+            )
+        object.__setattr__(self, "_matrix_bytes", matrix_bytes)
+
+    @classmethod
+    def from_matrix(cls, matrix: Sequence[float]) -> "DisplayTransform":
+        """Pack exactly sixteen values once as opaque little-endian binary32 bits."""
+
+        return cls(matrix_bytes=_pack_matrix_bytes(matrix))
 
     @classmethod
     def identity(cls) -> "DisplayTransform":
-        return cls(
-            position=(0.0, 0.0, 0.0),
-            rotation_xyzw=(0.0, 0.0, 0.0, 1.0),
-            scale=(1.0, 1.0, 1.0),
+        return cls.from_matrix(
+            (1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1)
+        )
+
+    @classmethod
+    def from_trs(
+        cls,
+        position: Sequence[float] = (0, 0, 0),
+        rotation_xyzw: Sequence[float] = (0, 0, 0, 1),
+        scale: Sequence[float] = (1, 1, 1),
+    ) -> "DisplayTransform":
+        """Build one binary32 matrix from a transient TRS description."""
+
+        px, py, pz = _finite_vector(position, 3, "position")
+        x, y, z, w = _normalized_vector(
+            rotation_xyzw,
+            4,
+            "rotation_xyzw",
+            "rotation_xyzw must not be the zero quaternion",
+        )
+        sx, sy, sz = _positive_vector(scale, "scale")
+        x2 = x + x
+        y2 = y + y
+        z2 = z + z
+        xx = x * x2
+        xy = x * y2
+        xz = x * z2
+        yy = y * y2
+        yz = y * z2
+        zz = z * z2
+        wx = w * x2
+        wy = w * y2
+        wz = w * z2
+        return cls.from_matrix(
+            (
+                (1 - (yy + zz)) * sx,
+                (xy + wz) * sx,
+                (xz - wy) * sx,
+                0,
+                (xy - wz) * sy,
+                (1 - (xx + zz)) * sy,
+                (yz + wx) * sy,
+                0,
+                (xz + wy) * sz,
+                (yz - wx) * sz,
+                (1 - (xx + yy)) * sz,
+                0,
+                px,
+                py,
+                pz,
+                1,
+            )
         )
 
     @classmethod
     def from_record(cls, value: Any) -> "DisplayTransform":
-        if not isinstance(value, Mapping) or set(value) != {
-            "position",
-            "rotationXyzw",
-            "scale",
-        }:
-            raise ConfigurationError("transform fields are invalid")
-        return cls(
-            position=value["position"],
-            rotation_xyzw=value["rotationXyzw"],
-            scale=value["scale"],
+        return cls.from_matrix(value)
+
+    @property
+    def matrix(self) -> tuple[float, ...]:
+        return _MATRIX4_F32.unpack(self._matrix_bytes)
+
+    @property
+    def matrix_bytes(self) -> bytes:
+        return self._matrix_bytes
+
+    def to_record(self) -> list[float]:
+        return list(self.matrix)
+
+    def composed(self, local: "DisplayTransform") -> "DisplayTransform":
+        """Return ``self * local`` for column-vector hierarchy composition."""
+
+        if not isinstance(local, DisplayTransform):
+            raise ConfigurationError("local must be DisplayTransform")
+        return DisplayTransform.from_matrix(_multiply_matrix4(self.matrix, local.matrix))
+
+    def with_translation(self, position: Sequence[float]) -> "DisplayTransform":
+        """Return a copy with its parent-space translation replaced."""
+
+        px, py, pz = _finite_vector(position, 3, "position")
+        matrix = list(self.matrix)
+        matrix[12:15] = (px, py, pz)
+        return DisplayTransform.from_matrix(matrix)
+
+    def with_scale(self, scale: Sequence[float]) -> "DisplayTransform":
+        """Set positive basis-column lengths while retaining their directions."""
+
+        targets = _positive_vector(scale, "scale")
+        matrix = list(self.matrix)
+        for column, target in enumerate(targets):
+            offset = column * 4
+            length = math.hypot(*matrix[offset : offset + 3])
+            if not math.isfinite(length) or length == 0:
+                raise ConfigurationError("transform basis column must be nonzero")
+            for row in range(3):
+                matrix[offset + row] = matrix[offset + row] / length * target
+        return DisplayTransform.from_matrix(matrix)
+
+    def translated_self(self, offset: Sequence[float]) -> "DisplayTransform":
+        """Translate along this matrix's own basis (``basis * offset``)."""
+
+        x, y, z = _finite_vector(offset, 3, "offset")
+        matrix = list(self.matrix)
+        matrix[12] += matrix[0] * x + matrix[4] * y + matrix[8] * z
+        matrix[13] += matrix[1] * x + matrix[5] * y + matrix[9] * z
+        matrix[14] += matrix[2] * x + matrix[6] * y + matrix[10] * z
+        return DisplayTransform.from_matrix(matrix)
+
+    def translated_parent(self, offset: Sequence[float]) -> "DisplayTransform":
+        """Translate directly in the matrix's parent coordinate space."""
+
+        x, y, z = _finite_vector(offset, 3, "offset")
+        matrix = list(self.matrix)
+        matrix[12] += x
+        matrix[13] += y
+        matrix[14] += z
+        return DisplayTransform.from_matrix(matrix)
+
+    def rotated_self(
+        self, axis: Sequence[float], radians: float
+    ) -> "DisplayTransform":
+        """Right-multiply the basis by an axis-angle rotation."""
+
+        rotation = _axis_angle_basis(axis, radians)
+        return DisplayTransform.from_matrix(
+            _replace_basis(
+                self.matrix,
+                _multiply_basis(_matrix_basis(self.matrix), rotation),
+            )
         )
 
-    def to_record(self) -> dict[str, list[float]]:
-        return {
-            "position": list(self.position),
-            "rotationXyzw": list(self.rotation_xyzw),
-            "scale": list(self.scale),
-        }
+    def rotated_parent(
+        self, axis: Sequence[float], radians: float
+    ) -> "DisplayTransform":
+        """Left-multiply the basis by an axis-angle rotation."""
+
+        rotation = _axis_angle_basis(axis, radians)
+        return DisplayTransform.from_matrix(
+            _replace_basis(
+                self.matrix,
+                _multiply_basis(rotation, _matrix_basis(self.matrix)),
+            )
+        )
+
+    def scaled_self(self, scale: Sequence[float]) -> "DisplayTransform":
+        """Right-multiply the basis by a positive diagonal scale."""
+
+        sx, sy, sz = _positive_vector(scale, "scale")
+        matrix = list(self.matrix)
+        for column, factor in enumerate((sx, sy, sz)):
+            offset = column * 4
+            for row in range(3):
+                matrix[offset + row] *= factor
+        return DisplayTransform.from_matrix(matrix)
+
+    def scaled_parent(self, scale: Sequence[float]) -> "DisplayTransform":
+        """Left-multiply the basis by a positive diagonal scale."""
+
+        sx, sy, sz = _positive_vector(scale, "scale")
+        matrix = list(self.matrix)
+        for column in range(3):
+            offset = column * 4
+            matrix[offset] *= sx
+            matrix[offset + 1] *= sy
+            matrix[offset + 2] *= sz
+        return DisplayTransform.from_matrix(matrix)
+
+    def transform_point(self, point: Sequence[float]) -> tuple[float, float, float]:
+        """Transform a point with homogeneous ``w=1``."""
+
+        x, y, z = _finite_vector(point, 3, "point")
+        matrix = self.matrix
+        return _finite_tuple3(
+            matrix[0] * x + matrix[4] * y + matrix[8] * z + matrix[12],
+            matrix[1] * x + matrix[5] * y + matrix[9] * z + matrix[13],
+            matrix[2] * x + matrix[6] * y + matrix[10] * z + matrix[14],
+        )
+
+    def inverse_transform_point(
+        self, point: Sequence[float]
+    ) -> tuple[float, float, float]:
+        """Transform a parent-space point into this matrix's local space."""
+
+        x, y, z = _finite_vector(point, 3, "point")
+        matrix = self.matrix
+        return _inverse_transform_vector(
+            matrix,
+            (x - matrix[12], y - matrix[13], z - matrix[14]),
+        )
+
+    def transform_vector(
+        self, vector: Sequence[float]
+    ) -> tuple[float, float, float]:
+        """Transform a vector with homogeneous ``w=0``."""
+
+        x, y, z = _finite_vector(vector, 3, "vector")
+        matrix = self.matrix
+        return _finite_tuple3(
+            matrix[0] * x + matrix[4] * y + matrix[8] * z,
+            matrix[1] * x + matrix[5] * y + matrix[9] * z,
+            matrix[2] * x + matrix[6] * y + matrix[10] * z,
+        )
+
+    def inverse_transform_vector(
+        self, vector: Sequence[float]
+    ) -> tuple[float, float, float]:
+        """Apply the inverse linear basis to a parent-space vector."""
+
+        return _inverse_transform_vector(
+            self.matrix,
+            _finite_vector(vector, 3, "vector"),
+        )
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -211,7 +339,7 @@ class DisplayNode:
         parent_name: str | None,
         prefab_id: str,
         transform_mode: str,
-        transform: DisplayTransform | Mapping[str, Any],
+        transform: DisplayTransform | Sequence[float],
         visible: bool,
         state: Mapping[str, Any],
     ) -> None:
@@ -253,10 +381,12 @@ class DisplayNode:
 
 @dataclass(frozen=True, slots=True, init=False)
 class DisplayCommand:
-    """One independently validated logical mutation with exactly one target.
+    """One closed logical mutation with exactly one product-owned target.
 
     Commands are closed records. Product code must use the named constructors so
-    an invalid kind/field combination cannot be assembled dynamically.
+    an invalid kind/field combination cannot be assembled dynamically. Mutation
+    target names are trusted on this Python hot path and validated at decoded
+    command boundaries and by the browser Client before Display mutation.
     """
 
     kind: str
@@ -272,13 +402,20 @@ class DisplayCommand:
     def create_node(cls, node: DisplayNode) -> "DisplayCommand":
         if not isinstance(node, DisplayNode):
             raise ConfigurationError("node-create requires DisplayNode")
-        record = node.to_record()
-        name = record.pop("name")
-        return _new_display_command(kind="node-create", name=name, **record)
+        return _new_display_command(
+            kind="node-create",
+            name=node.name,
+            parent_name=node.parent_name,
+            prefab_id=node.prefab_id,
+            transform_mode=node.transform_mode,
+            transform=node.transform,
+            visible=node.visible,
+            state=node.state,
+        )
 
     @classmethod
     def set_transform(
-        cls, name: str, transform: DisplayTransform | Mapping[str, Any]
+        cls, name: str, transform: DisplayTransform | Sequence[float]
     ) -> "DisplayCommand":
         return _new_display_command(
             kind="node-set-transform", name=name, transform=transform
@@ -328,10 +465,97 @@ class DisplayCommand:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class ValidatedDisplayCheckpoint:
+    """Typed seal for a parent-first Display checkpoint."""
+
+    scene_name: str
+    catalog: DisplayCatalogIdentity
+    last_command_seq: int
+    nodes: tuple[DisplayNode, ...]
+    maximum_json_depth: int
+
+    def __post_init__(self) -> None:
+        _scene_name(self.scene_name)
+        if not isinstance(self.catalog, DisplayCatalogIdentity):
+            raise ConfigurationError("catalog must be DisplayCatalogIdentity")
+        _safe_integer(self.last_command_seq, "last_command_seq")
+        if (
+            not isinstance(self.nodes, tuple)
+            or _ordered_baseline(self.nodes) != self.nodes
+        ):
+            raise ConfigurationError("validated display checkpoint nodes are invalid")
+        expected_depth = max(
+            (_maximum_json_depth(node.state) for node in self.nodes),
+            default=0,
+        )
+        if (
+            isinstance(self.maximum_json_depth, bool)
+            or not isinstance(self.maximum_json_depth, int)
+            or self.maximum_json_depth != expected_depth
+        ):
+            raise ConfigurationError("validated display checkpoint depth is invalid")
+
+    def to_record(self) -> dict[str, Any]:
+        return {
+            "schema": DISPLAY_CHECKPOINT_SCHEMA,
+            "scene_name": self.scene_name,
+            **self.catalog.to_record(),
+            "last_command_seq": self.last_command_seq,
+            "nodes": [node.to_record() for node in self.nodes],
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ValidatedDisplayCommandStream:
+    """Typed seal retaining validated commands and their matrix owners."""
+
+    base_command_seq: int
+    source_tick: int
+    last_command_seq: int
+    commands: tuple[DisplayCommand, ...]
+    maximum_json_depth: int
+
+    def __post_init__(self) -> None:
+        _safe_integer(self.base_command_seq, "base_command_seq")
+        _safe_integer(self.source_tick, "source_tick")
+        _safe_integer(self.last_command_seq, "last_command_seq")
+        normalized = _logical_commands(self.commands)
+        if normalized != self.commands:
+            raise ConfigurationError("validated display command stream is invalid")
+        if self.last_command_seq != self.base_command_seq + len(self.commands):
+            raise ConfigurationError("validated display command stream cursor is invalid")
+        expected_depth = max(
+            (_command_json_depth(command) for command in self.commands),
+            default=0,
+        )
+        if (
+            isinstance(self.maximum_json_depth, bool)
+            or not isinstance(self.maximum_json_depth, int)
+            or self.maximum_json_depth != expected_depth
+        ):
+            raise ConfigurationError("validated display command stream depth is invalid")
+
+    def to_record(self) -> dict[str, Any]:
+        return {
+            "schema": DISPLAY_COMMAND_STREAM_SCHEMA,
+            "base_command_seq": self.base_command_seq,
+            "last_command_seq": self.last_command_seq,
+            "commands": [
+                command.to_record(
+                    command_seq=self.base_command_seq + ordinal,
+                    source_tick=self.source_tick,
+                )
+                for ordinal, command in enumerate(self.commands, 1)
+            ],
+        }
+
+
 def _new_display_command(*, kind: str, name: str, **fields: Any) -> DisplayCommand:
     if kind not in _COMMAND_KINDS:
         raise ConfigurationError("display command kind is invalid")
-    _authority_name(name, "name")
+    if not isinstance(name, str):
+        raise ConfigurationError("display command target name must be a string")
     normalized = _normalize_command_fields(kind, name, fields)
     command = object.__new__(DisplayCommand)
     object.__setattr__(command, "kind", kind)
@@ -346,21 +570,24 @@ def encode_display_checkpoint(
     catalog: DisplayCatalogIdentity,
     last_command_seq: int,
     nodes: Sequence[DisplayNode],
-) -> dict[str, Any]:
-    """Build the JSON attachment used to construct a fresh DisplayRuntime."""
+) -> ValidatedDisplayCheckpoint:
+    """Build the typed baseline consumed by the binary Wire codec."""
 
     _scene_name(scene_name)
     if not isinstance(catalog, DisplayCatalogIdentity):
         raise ConfigurationError("catalog must be DisplayCatalogIdentity")
     _safe_integer(last_command_seq, "last_command_seq")
     normalized_nodes = _ordered_baseline(nodes)
-    return {
-        "schema": DISPLAY_CHECKPOINT_SCHEMA,
-        "scene_name": scene_name,
-        **catalog.to_record(),
-        "last_command_seq": last_command_seq,
-        "nodes": [node.to_record() for node in normalized_nodes],
-    }
+    return ValidatedDisplayCheckpoint(
+        scene_name=scene_name,
+        catalog=catalog,
+        last_command_seq=last_command_seq,
+        nodes=normalized_nodes,
+        maximum_json_depth=max(
+            (_maximum_json_depth(node.state) for node in normalized_nodes),
+            default=0,
+        ),
+    )
 
 
 def validate_display_nodes(nodes: Sequence[DisplayNode]) -> tuple[DisplayNode, ...]:
@@ -374,37 +601,25 @@ def encode_display_command_stream(
     base_command_seq: int,
     source_tick: int,
     commands: Sequence[DisplayCommand],
-) -> tuple[dict[str, Any], int]:
+) -> tuple[ValidatedDisplayCommandStream, int]:
     """Assign strict stream-global sequence numbers to logical commands."""
 
     _safe_integer(base_command_seq, "base_command_seq")
     _safe_integer(source_tick, "source_tick")
     normalized = _logical_commands(commands)
-    records: list[_ImmutableDict] = []
-    maximum_record_depth = -1
-    cursor = base_command_seq
-    for command in normalized:
-        cursor += 1
-        record, record_depth = _sealed_command_record(
-            command,
-            command_seq=cursor,
-            source_tick=source_tick,
-        )
-        records.append(record)
-        maximum_record_depth = max(maximum_record_depth, record_depth)
+    cursor = base_command_seq + len(normalized)
+    if cursor > (1 << 53) - 1:
+        raise ConfigurationError("last_command_seq must be a non-negative safe integer")
     maximum_json_depth = max(
-        1,
-        maximum_record_depth + 2 if records else 1,
+        (_command_json_depth(command) for command in normalized),
+        default=0,
     )
     return (
         ValidatedDisplayCommandStream(
-            {
-                "schema": DISPLAY_COMMAND_STREAM_SCHEMA,
-                "base_command_seq": base_command_seq,
-                "last_command_seq": cursor,
-                "commands": _ImmutableList(records),
-            },
+            base_command_seq=base_command_seq,
             source_tick=source_tick,
+            last_command_seq=cursor,
+            commands=normalized,
             maximum_json_depth=maximum_json_depth,
         ),
         cursor,
@@ -520,6 +735,7 @@ def _command_from_record(value: Any) -> DisplayCommand:
     }
     if kind not in expected_by_kind or set(value) != common | expected_by_kind[kind]:
         raise ConfigurationError("display command record fields are invalid")
+    _authority_name(value["name"], "name")
     return _new_display_command(
         kind=kind,
         name=value["name"],
@@ -574,15 +790,24 @@ def _normalize_command_fields(
         if actual != required:
             raise ConfigurationError("node-create fields are invalid")
         node = DisplayNode(name=name, **fields)
-        record = node.to_record()
-        record.pop("name")
-        return record
+        return {
+            "parent_name": node.parent_name,
+            "prefab_id": node.prefab_id,
+            "transform_mode": node.transform_mode,
+            "transform": node.transform,
+            "visible": node.visible,
+            "state": node.state,
+        }
     if kind == "node-set-transform":
         if actual != {"transform"}:
             raise ConfigurationError("node-set-transform fields are invalid")
         value = fields["transform"]
-        transform = value if isinstance(value, DisplayTransform) else DisplayTransform.from_record(value)
-        return {"transform": transform.to_record()}
+        transform = (
+            value
+            if isinstance(value, DisplayTransform)
+            else DisplayTransform.from_record(value)
+        )
+        return {"transform": transform}
     if kind == "node-set-parent":
         if actual != {"parent_name"}:
             raise ConfigurationError("node-set-parent fields are invalid")
@@ -664,18 +889,185 @@ def _plain_state(value: Any) -> Mapping[str, Any]:
     return _freeze(owned)
 
 
+def _finite_number(value: Any, field: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ConfigurationError(f"{field} must be a finite number")
+    try:
+        number = float(value)
+    except OverflowError as exc:
+        raise ConfigurationError(f"{field} must be a finite number") from exc
+    if not math.isfinite(number):
+        raise ConfigurationError(f"{field} must be a finite number")
+    return number
+
+
 def _finite_vector(value: Any, length: int, field: str) -> tuple[float, ...]:
-    if not isinstance(value, (tuple, list)) or len(value) != length:
-        raise ConfigurationError(f"{field} must have {length} components")
-    result: list[float] = []
-    for item in value:
-        if isinstance(item, bool) or not isinstance(item, (int, float)):
-            raise ConfigurationError(f"{field} components must be finite numbers")
-        number = float(item)
-        if not math.isfinite(number):
-            raise ConfigurationError(f"{field} components must be finite numbers")
-        result.append(number)
+    if (
+        not isinstance(value, Sequence)
+        or isinstance(value, (str, bytes, bytearray, memoryview))
+        or len(value) != length
+    ):
+        raise ConfigurationError(
+            f"{field} must contain exactly {length} finite numbers"
+        )
+    try:
+        return tuple(_finite_number(item, field) for item in value)
+    except ConfigurationError as exc:
+        raise ConfigurationError(
+            f"{field} must contain exactly {length} finite numbers"
+        ) from exc
+
+
+def _positive_vector(value: Any, field: str) -> tuple[float, float, float]:
+    x, y, z = _finite_vector(value, 3, field)
+    if x <= 0 or y <= 0 or z <= 0:
+        raise ConfigurationError(f"{field} components must be greater than zero")
+    return x, y, z
+
+
+def _normalized_vector(
+    value: Any,
+    length: int,
+    field: str,
+    zero_message: str,
+) -> tuple[float, ...]:
+    vector = _finite_vector(value, length, field)
+    maximum = max(abs(item) for item in vector)
+    if maximum == 0:
+        raise ConfigurationError(zero_message)
+    scaled = tuple(item / maximum for item in vector)
+    magnitude = math.sqrt(sum(item * item for item in scaled))
+    return tuple(item / magnitude for item in scaled)
+
+
+def _multiply_matrix4(
+    left: Sequence[float], right: Sequence[float]
+) -> tuple[float, ...]:
+    result = [0.0] * 16
+    for column in range(4):
+        for row in range(4):
+            result[column * 4 + row] = sum(
+                left[index * 4 + row] * right[column * 4 + index]
+                for index in range(4)
+            )
     return tuple(result)
+
+
+def _matrix_basis(matrix: Sequence[float]) -> tuple[float, ...]:
+    return (
+        matrix[0],
+        matrix[1],
+        matrix[2],
+        matrix[4],
+        matrix[5],
+        matrix[6],
+        matrix[8],
+        matrix[9],
+        matrix[10],
+    )
+
+
+def _replace_basis(
+    matrix: Sequence[float], basis: Sequence[float]
+) -> tuple[float, ...]:
+    result = list(matrix)
+    result[0:3] = basis[0:3]
+    result[4:7] = basis[3:6]
+    result[8:11] = basis[6:9]
+    return tuple(result)
+
+
+def _multiply_basis(
+    left: Sequence[float], right: Sequence[float]
+) -> tuple[float, ...]:
+    result = [0.0] * 9
+    for column in range(3):
+        for row in range(3):
+            result[column * 3 + row] = sum(
+                left[index * 3 + row] * right[column * 3 + index]
+                for index in range(3)
+            )
+    return tuple(result)
+
+
+def _axis_angle_basis(
+    axis: Sequence[float], radians: float
+) -> tuple[float, ...]:
+    x, y, z = _normalized_vector(
+        axis,
+        3,
+        "axis",
+        "axis must not be the zero vector",
+    )
+    angle = _finite_number(radians, "radians")
+    cosine = math.cos(angle)
+    sine = math.sin(angle)
+    remainder = 1 - cosine
+    return (
+        remainder * x * x + cosine,
+        remainder * x * y + sine * z,
+        remainder * x * z - sine * y,
+        remainder * x * y - sine * z,
+        remainder * y * y + cosine,
+        remainder * y * z + sine * x,
+        remainder * x * z + sine * y,
+        remainder * y * z - sine * x,
+        remainder * z * z + cosine,
+    )
+
+
+def _finite_tuple3(x: float, y: float, z: float) -> tuple[float, float, float]:
+    if not all(math.isfinite(value) for value in (x, y, z)):
+        raise ConfigurationError("transform result must contain finite numbers")
+    return tuple(0.0 if value == 0 else value for value in (x, y, z))
+
+
+def _inverse_transform_vector(
+    matrix: Sequence[float], vector: Sequence[float]
+) -> tuple[float, float, float]:
+    a00 = matrix[0]
+    a01 = matrix[4]
+    a02 = matrix[8]
+    a10 = matrix[1]
+    a11 = matrix[5]
+    a12 = matrix[9]
+    a20 = matrix[2]
+    a21 = matrix[6]
+    a22 = matrix[10]
+    inverse00 = a11 * a22 - a12 * a21
+    inverse01 = a02 * a21 - a01 * a22
+    inverse02 = a01 * a12 - a02 * a11
+    inverse10 = a12 * a20 - a10 * a22
+    inverse11 = a00 * a22 - a02 * a20
+    inverse12 = a02 * a10 - a00 * a12
+    inverse20 = a10 * a21 - a11 * a20
+    inverse21 = a01 * a20 - a00 * a21
+    inverse22 = a00 * a11 - a01 * a10
+    determinant = a00 * inverse00 + a01 * inverse10 + a02 * inverse20
+    if not math.isfinite(determinant) or determinant <= 0:
+        raise ConfigurationError("transform matrix determinant must be greater than zero")
+    reciprocal = 1 / determinant
+    x, y, z = vector
+    return _finite_tuple3(
+        (inverse00 * x + inverse01 * y + inverse02 * z) * reciprocal,
+        (inverse10 * x + inverse11 * y + inverse12 * z) * reciprocal,
+        (inverse20 * x + inverse21 * y + inverse22 * z) * reciprocal,
+    )
+
+
+def _pack_matrix_bytes(value: Any) -> bytes:
+    if (
+        not isinstance(value, Sequence)
+        or isinstance(value, (str, bytes, bytearray, memoryview))
+        or len(value) != 16
+    ):
+        raise ConfigurationError("transform must be a sixteen-value matrix")
+    try:
+        return _MATRIX4_F32.pack(*value)
+    except (OverflowError, struct.error, TypeError) as exc:
+        raise ConfigurationError(
+            "transform must contain sixteen float32-packable values"
+        ) from exc
 
 
 def _safe_integer(value: Any, field: str) -> int:
@@ -700,6 +1092,8 @@ def _freeze(value: Any) -> Any:
 
 
 def _thaw(value: Any) -> Any:
+    if isinstance(value, DisplayTransform):
+        return value.to_record()
     if isinstance(value, Mapping):
         return {key: _thaw(item) for key, item in value.items()}
     if isinstance(value, tuple):
@@ -707,49 +1101,18 @@ def _thaw(value: Any) -> Any:
     return value
 
 
-def _sealed_command_record(
-    command: DisplayCommand, *, command_seq: int, source_tick: int
-) -> tuple[_ImmutableDict, int]:
-    frozen_fields, fields_depth = _seal_json(command.fields)
-    if not isinstance(frozen_fields, _ImmutableDict):  # pragma: no cover - invariant.
-        raise AssertionError("display command fields must form an object")
-    return (
-        _ImmutableDict(
-            {
-                "schema": DISPLAY_COMMAND_SCHEMA,
-                "command_seq": command_seq,
-                "source_tick": source_tick,
-                "kind": command.kind,
-                "name": command.name,
-                **frozen_fields,
-            }
-        ),
-        max(1, fields_depth),
-    )
+def _command_json_depth(command: DisplayCommand) -> int:
+    if command.kind in {"node-create", "node-set-state", "node-replace-prefab"}:
+        return _maximum_json_depth(command.fields["state"])
+    return 0
 
 
-def _seal_json(value: Any) -> tuple[Any, int]:
-    """Own an already validated JSON value and retain its maximum wire depth."""
-
-    if value is None or isinstance(value, (str, bool, int, float)):
-        return value, 0
+def _maximum_json_depth(value: Any) -> int:
     if isinstance(value, Mapping):
-        items: dict[str, Any] = {}
-        maximum_child_depth = -1
-        for key, item in value.items():
-            sealed, child_depth = _seal_json(item)
-            items[key] = sealed
-            maximum_child_depth = max(maximum_child_depth, child_depth)
-        return _ImmutableDict(items), maximum_child_depth + 1
-    if isinstance(value, (list, tuple)):
-        items = []
-        maximum_child_depth = -1
-        for item in value:
-            sealed, child_depth = _seal_json(item)
-            items.append(sealed)
-            maximum_child_depth = max(maximum_child_depth, child_depth)
-        return _ImmutableList(items), maximum_child_depth + 1
-    raise AssertionError("validated display command contains a non-JSON value")
+        return max((_maximum_json_depth(item) + 1 for item in value.values()), default=0)
+    if isinstance(value, tuple):
+        return max((_maximum_json_depth(item) + 1 for item in value), default=0)
+    return 0
 
 
 __all__ = [
@@ -763,6 +1126,7 @@ __all__ = [
     "DisplayTransform",
     "MAXIMUM_NODE_DEPTH",
     "MAXIMUM_NODE_NAME_BYTES",
+    "ValidatedDisplayCheckpoint",
     "ValidatedDisplayCommandStream",
     "encode_display_checkpoint",
     "encode_display_command_stream",

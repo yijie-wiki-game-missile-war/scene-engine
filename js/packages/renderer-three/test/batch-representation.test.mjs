@@ -60,7 +60,13 @@ function assertExclusiveRepresentation(backend, record) {
   const batch = batchFor(backend, record);
   assert.equal(record.batched, batch !== null);
   assert.equal(record.handle.object.visible, record.visible && !record.batched);
-  if (batch) assert.equal(record.handle.object.visible, false);
+  if (batch) {
+    assert.equal(record.handle.object.visible, false);
+    assert.equal(record.handle.object.parent, null,
+      'the inactive ordinary representation is absent from the Three scene graph');
+  } else {
+    assert.strictEqual(record.handle.object.parent, record.nodeRoot);
+  }
   return batch;
 }
 
@@ -97,6 +103,31 @@ test('batched transform update never reveals the ordinary object', async () => {
   backend.prepareFrame(frame(camera, 1));
   assert.deepEqual(instanceMatrix(batchFor(backend, record), record).toArray(), moved.toArray());
   assertExclusiveRepresentation(backend, record);
+  backend.dispose();
+});
+
+test('dirty batch updates upload only changed matrices and conservatively expand cached bounds', async () => {
+  const { backend, camera, bindings } = await createMeshScenario(8);
+  backend.prepareFrame(frame(camera));
+  const record = recordFor(backend, bindings[0]);
+  const batch = batchFor(backend, record);
+  batch.object.computeBoundingSphere();
+  const before = batch.object.boundingSphere.clone();
+  const moved = new THREE.Matrix4().makeTranslation(1_000, 0, 0);
+
+  backend.updateBinding(bindings[0], patch('py/item-0', 'mesh', MESH_PROPERTIES, moved));
+  backend.prepareFrame(frame(camera, 1));
+
+  const expected = batch.object.geometry.boundingSphere.clone().applyMatrix4(moved);
+  assert.ok(batch.object.boundingSphere.radius > before.radius);
+  assert.ok(batch.object.boundingSphere.center.distanceTo(expected.center) + expected.radius
+    <= batch.object.boundingSphere.radius + 1e-9,
+  'the conservative batch bound contains the moved instance without a full rescan');
+  assert.equal(batch.object.instanceMatrix.usage, THREE.DynamicDrawUsage);
+  assert.deepEqual(batch.object.instanceMatrix.updateRanges, [{
+    start: record.batchIndex * batch.object.instanceMatrix.itemSize,
+    count: batch.object.instanceMatrix.itemSize,
+  }]);
   backend.dispose();
 });
 
@@ -251,4 +282,113 @@ test('capture and diagnostics retain correct binding, batch, and instance counts
   assert.equal(capture.instanceCount, 2);
   assert.equal(capture.drawCount, 0);
   backend.dispose();
+});
+
+test('backend disposal never restores inactive ordinary batch representations', async () => {
+  const { backend, camera, bindings } = await createMeshScenario(3);
+  backend.prepareFrame(frame(camera));
+  const records = bindings.map((binding) => recordFor(backend, binding));
+  const ordinaryObjects = records.map((record) => record.handle.object);
+  const nodeRoots = records.map((record) => record.nodeRoot);
+  let addedDuringDispose = 0;
+  for (const object of ordinaryObjects) {
+    object.addEventListener('added', () => { addedDuringDispose += 1; });
+  }
+
+  backend.dispose();
+
+  assert.equal(addedDuringDispose, 0);
+  assert.equal(backend._root.children.length, 0);
+  for (const object of ordinaryObjects) assert.equal(object.parent, null);
+  for (const nodeRoot of nodeRoots) assert.equal(nodeRoot.parent, null);
+});
+
+test('destroy bursts avoid individual Node root splices before synchronous bulk cleanup', async () => {
+  for (const cleanup of ['prepare', 'dispose']) {
+    const { backend, camera, bindings } = await createMeshScenario(4);
+    backend.prepareFrame(frame(camera));
+    const nodeRoots = bindings.map((binding) => recordFor(backend, binding).nodeRoot);
+    let individualRemovals = 0;
+    for (const nodeRoot of nodeRoots) {
+      const removeFromParent = nodeRoot.removeFromParent;
+      nodeRoot.removeFromParent = function countIndividualRemoval() {
+        if (this.parent === backend._root) individualRemovals += 1;
+        return removeFromParent.call(this);
+      };
+    }
+
+    for (const binding of bindings) backend.destroyBinding(binding);
+
+    assert.equal(individualRemovals, 0,
+      'destroying sibling bindings must not splice each empty Node root from the parent');
+    assert.equal(backend._nodes.size, 1, 'only the live camera retains logical Node ownership');
+    for (const nodeRoot of nodeRoots) {
+      assert.strictEqual(nodeRoot.parent, backend._root,
+        'empty roots remain only until the next bulk cleanup point');
+      assert.equal(nodeRoot.children.length, 0);
+    }
+
+    if (cleanup === 'prepare') {
+      backend.prepareFrame(frame(camera, 1));
+      assert.equal(backend._root.children.length, 1, 'the live camera root remains attached');
+      backend.dispose();
+    } else {
+      backend.dispose();
+      assert.equal(backend._root.children.length, 0);
+    }
+    assert.equal(individualRemovals, 0);
+    for (const nodeRoot of nodeRoots) assert.equal(nodeRoot.parent, null);
+  }
+});
+
+test('destroy bursts compact empty Node roots in one microtask without a camera or frame', async () => {
+  const { backend, registry } = createHarness({ descriptors: INLINE_RESOURCES });
+  const bindings = await Promise.all(Array.from({ length: 16 }, (_, index) =>
+    backend.createBinding(descriptor(`py/idle-${index}`, 'mesh', 'render.mesh@1',
+      MESH_PROPERTIES, registry))));
+  const nodeRoots = bindings.map((binding) => recordFor(backend, binding).nodeRoot);
+  const detachEmptyNodeRoots = backend._detachEmptyNodeRoots.bind(backend);
+  let cleanupPasses = 0;
+  backend._detachEmptyNodeRoots = () => {
+    cleanupPasses += 1;
+    return detachEmptyNodeRoots();
+  };
+
+  for (const binding of bindings) backend.destroyBinding(binding);
+
+  assert.equal(backend._nodes.size, 0);
+  assert.equal(backend._root.children.length, bindings.length);
+  await Promise.resolve();
+  assert.equal(cleanupPasses, 1);
+  assert.equal(backend._root.children.length, 0);
+  assert.equal(backend.diagnostics().bindingCount, 0);
+  assert.equal(backend.diagnostics().resourceLeaseCount, 0);
+  for (const nodeRoot of nodeRoots) assert.equal(nodeRoot.parent, null);
+  backend.dispose();
+});
+
+test('backend disposal bulk-detaches many batch groups before disposing each group', async () => {
+  const groupCount = 8;
+  const { backend, camera, bindings } = await createMeshScenario(groupCount * 2);
+  for (let index = 0; index < bindings.length; index += 1) {
+    const properties = Object.freeze({ ...MESH_PROPERTIES, renderOrder: Math.floor(index / 2) });
+    backend.updateBinding(bindings[index], patch(`py/item-${index}`, 'mesh', properties));
+  }
+  backend.prepareFrame(frame(camera));
+  assert.equal(backend._batches.length, groupCount);
+  const batchObjects = backend._batches.map((batch) => batch.object);
+  let individualParentedRemovals = 0;
+  for (const object of batchObjects) {
+    const removeFromParent = object.removeFromParent;
+    object.removeFromParent = function countParentedRemoval() {
+      if (this.parent === backend._batchRoot) individualParentedRemovals += 1;
+      return removeFromParent.call(this);
+    };
+  }
+
+  backend.dispose();
+
+  assert.equal(individualParentedRemovals, 0);
+  assert.equal(backend._batchRoot.children.length, 0);
+  for (const object of batchObjects) assert.equal(object.parent, null);
 });

@@ -1,6 +1,6 @@
-# JavaScript Client 0.10
+# JavaScript Client 0.12
 
-`@scene-engine/client@0.10.0` is the only browser packet decoder, immutable WorldState owner, cumulative ACK barrier and Display
+`@scene-engine/client@0.12.0` is the only browser packet decoder, immutable WorldState owner, cumulative ACK barrier and Display
 session bridge. Its root exports:
 
 ```text
@@ -42,7 +42,7 @@ ACK handling.
 
 Checkpoint processing:
 
-1. validates the packet, World snapshot and parent-first Display baseline;
+1. validates the packet, World snapshot and parent-first binary Display baseline, including every float32 matrix;
 2. creates a fresh candidate session;
 3. reads `runtime.catalogIdentity()` and compares all three SHA-256 values with the checkpoint;
 4. installs `sceneName` only after identity matches;
@@ -99,3 +99,8 @@ Use:
 
 Replay feeds exact recorded Engine packet bytes through the same `applyPacket` and AuthorityPort path. The Client owns no second
 Node graph or Transform cache.
+
+The Client reads every local Matrix4 directly into an owned Float32Array and is the first semantic acceptance gate for Python's
+opaque 64-byte payload. It validates the finite affine/right-handed contract, canonicalizes negative zero, and passes that
+matrix to Authority without TRS decomposition. Packet storage is never aliased: mutating or releasing the input packet after
+`applyPacket` cannot alter an installed Node. Display then copies the value into its own private local matrix owner.

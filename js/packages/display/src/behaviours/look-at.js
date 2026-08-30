@@ -1,5 +1,6 @@
 import { BehaviourComponent } from '../component/behaviour-component.js';
 import { enumValue, exactKeys, tuple } from '../internal.js';
+import { composeMatrix4FromQuaternion, decomposeNonShearedMatrix4 } from '../math/matrix4.js';
 import { quaternionFromForward } from '../math/quaternion.js';
 import { localDirectionForWorldFacing } from '../math/transform.js';
 import { assertNodeName } from '../node/node-name.js';
@@ -30,13 +31,14 @@ export class LookAtComponent extends BehaviourComponent {
     const display = frame.display;
     const target = this.properties.targetNodeName === null
       ? this.properties.targetPosition
-      : display.nodes.require(this.properties.targetNodeName).getWorldTransform().position;
+      : display.nodes.require(this.properties.targetNodeName).getWorldTransform().slice(12, 15);
     const node = this.node;
+    const local = decomposeNonShearedMatrix4(node.localTransform);
     const nodeWorld = node.getWorldTransform();
     const direction = [
-      target[0] - nodeWorld.position[0],
-      target[1] - nodeWorld.position[1],
-      target[2] - nodeWorld.position[2],
+      target[0] - nodeWorld[12],
+      target[1] - nodeWorld[13],
+      target[2] - nodeWorld[14],
     ];
     const parentWorld = node.parentName === null
       ? null : display.nodes.require(node.parentName).getWorldTransform();
@@ -46,11 +48,9 @@ export class LookAtComponent extends BehaviourComponent {
       this.properties.axisMode,
     );
     const rotation = quaternionFromForward(localDirection, 'full');
-    this.setDrivenLocalTransform({
-      position: node.localTransform.position,
-      rotationXyzw: rotation,
-      scale: node.localTransform.scale,
-    });
+    this.setDrivenLocalTransform(composeMatrix4FromQuaternion(
+      rotation, local.scale, local.position, [],
+    ));
   }
 }
 

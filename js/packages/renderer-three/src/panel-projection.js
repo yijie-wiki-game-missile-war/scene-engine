@@ -107,8 +107,8 @@ export function installInstancedPanelProjection(object, material, count) {
       intersectPanel(this, world, anchor, raycaster, hits, index);
     }
   };
-  return (index, value) => {
+  const setAt = (index, value) => {
     anchors.setXYZW(index, value?.[0] ?? 0, value?.[1] ?? 0, value?.[2] ?? 0, value === null ? 0 : 1);
-    anchors.needsUpdate = true;
   };
+  return Object.freeze({ attribute: anchors, setAt });
 }

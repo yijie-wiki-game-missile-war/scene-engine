@@ -4,10 +4,15 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 
+import scripts.benchmark_python_js_communication as benchmark_module
+from scene_engine import DisplayCatalogIdentity
 from scripts.benchmark_python_js_communication import (
+    CommunicationProgram,
+    CommunicationWorld,
     PROFILE_ROUNDTRIP,
     run_benchmark,
 )
@@ -24,7 +29,11 @@ def test_32_roots_cross_python_js_wire_and_ack_with_final_display_state() -> Non
         profile=PROFILE_ROUNDTRIP,
     )
 
+    assert report["schema"] == "scene-engine-python-js-communication@2"
     assert report["status"] == "PASS"
+    assert report["transformDigestEncoding"] == (
+        "node-name-nul-le-f32-matrix16-nul"
+    )
     assert report["parameters"] == {
         "roots": 32,
         "commits": 6,
@@ -35,7 +44,13 @@ def test_32_roots_cross_python_js_wire_and_ack_with_final_display_state() -> Non
     }
     assert report["commits"]["totalCommands"] == 48
     assert report["commits"]["pythonTickToAck"]["samples"] == 6
+    assert report["commits"]["pythonTickToTransport"]["samples"] == 6
     assert report["commits"]["lengthFrameToAck"]["samples"] == 6
+    assert report["commits"]["pythonTickToTransport"]["p50Ms"] > 0
+    assert report["commits"]["latencySemantics"]["pythonTickToTransport"] == (
+        "runtime pump start through transport send entry; windowed profile includes "
+        "Python flow-control queueing"
+    )
     assert report["commits"]["engineBytes"] > 0
     assert report["commits"]["ackBytes"] > 0
     assert all(report["correctness"].values())
@@ -44,6 +59,8 @@ def test_32_roots_cross_python_js_wire_and_ack_with_final_display_state() -> Non
     assert report["flowControl"]["final"]["inFlightCount"] == 0
     assert report["flowControl"]["final"]["pendingCount"] == 0
     peer = report["final"]["peer"]
+    assert peer["schema"] == "scene-engine-python-js-communication-peer@2"
+    assert peer["transformDigestEncoding"] == report["transformDigestEncoding"]
     assert peer["enginePacketCount"] == 7
     assert peer["transformDigest"]["rootCount"] == 32
     assert peer["finalCommit"]["commitSeq"] == 6
@@ -88,7 +105,11 @@ def test_benchmark_cli_prints_one_json_report_to_stdout_only() -> None:
         text=True,
     )
     report = json.loads(completed.stdout)
+    assert report["schema"] == "scene-engine-python-js-communication@2"
     assert report["status"] == "PASS"
+    assert report["transformDigestEncoding"] == (
+        "node-name-nul-le-f32-matrix16-nul"
+    )
     assert report["parameters"]["roots"] == 32
     assert report["parameters"]["updatesPerCommit"] == 4
     assert report["parameters"]["profile"] == "windowed"
@@ -96,16 +117,58 @@ def test_benchmark_cli_prints_one_json_report_to_stdout_only() -> None:
     assert report["flowControl"]["peak"]["pendingCount"] == 8
     assert report["flowControl"]["final"]["inFlightCount"] == 0
     assert report["flowControl"]["final"]["pendingCount"] == 0
-    assert set(report["commits"]["pythonTickToAck"]) == {
+    timing_fields = {
         "samples",
         "p50Ms",
         "p95Ms",
         "p99Ms",
         "maxMs",
     }
+    assert set(report["commits"]["pythonTickToAck"]) == timing_fields
+    assert set(report["commits"]["pythonTickToTransport"]) == timing_fields
+    assert report["commits"]["pythonTickToTransport"]["p50Ms"] > 0
     assert report["throughput"]["engineAndAckBytesPerSecond"] > 0
     assert report["throughput"]["displayCommandsPerSecond"] > 0
     assert completed.stderr == ""
+
+
+def test_benchmark_world_reuses_matrix_owners_without_publication_rebuild(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    world = CommunicationWorld(3)
+    initial = tuple(world.transforms)
+    program = CommunicationProgram(
+        roots=3,
+        updates_per_commit=1,
+        catalog=DisplayCatalogIdentity("a" * 64, "b" * 64, "c" * 64),
+    )
+    calls: list[tuple[float, float, float]] = []
+    original = benchmark_module.display_transform
+
+    def counted(position: tuple[float, float, float]):
+        calls.append(position)
+        return original(position)
+
+    monkeypatch.setattr(benchmark_module, "display_transform", counted)
+
+    checkpoint = program.build_checkpoint(world, None)
+    assert calls == []
+    assert all(
+        checkpoint.display_nodes[index].transform is world.transforms[index]
+        for index in range(3)
+    )
+
+    mutation = program.step(
+        world,
+        SimpleNamespace(commit=SimpleNamespace(source_tick=1)),
+    )
+    assert calls == [(1.0, 0.0, 1.0)]
+    assert world.transforms[0] is not initial[0]
+    assert tuple(world.transforms[1:]) == initial[1:]
+
+    commit = program.build_commit(world, mutation, None)
+    assert calls == [(1.0, 0.0, 1.0)]
+    assert commit.display_commands[0].fields["transform"] is world.transforms[0]
 
 
 def test_benchmark_rejects_a_non_positive_timeout_before_starting_a_peer() -> None:

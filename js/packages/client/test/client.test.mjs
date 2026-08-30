@@ -24,8 +24,25 @@ const {
   encodeEngineInput,
   readEnginePacket,
 } = publicApi;
-const FIXTURES = fileURLToPath(new URL('../fixtures/wire-v2/', import.meta.url));
-const PYTHON_FIXTURES = fileURLToPath(new URL('../../../../fixtures/wire-v2/', import.meta.url));
+const FIXTURES = fileURLToPath(new URL('../fixtures/wire-v3/', import.meta.url));
+const PYTHON_FIXTURES = fileURLToPath(new URL('../../../../fixtures/wire-v3/', import.meta.url));
+const DISPLAY_STREAM_MAGIC = new TextEncoder().encode('SDCS');
+
+function corruptDisplayStreamU64(raw, relativeOffset, value) {
+  const result = raw.slice();
+  let payloadOffset = -1;
+  outer: for (let offset = 0; offset <= result.length - DISPLAY_STREAM_MAGIC.length; offset += 1) {
+    for (let index = 0; index < DISPLAY_STREAM_MAGIC.length; index += 1) {
+      if (result[offset + index] !== DISPLAY_STREAM_MAGIC[index]) continue outer;
+    }
+    payloadOffset = offset;
+    break;
+  }
+  assert.notEqual(payloadOffset, -1);
+  new DataView(result.buffer, result.byteOffset, result.byteLength)
+    .setBigUint64(payloadOffset + relativeOffset, BigInt(value), true);
+  return result;
+}
 
 test('root export surface remains the exact client allowlist', () => {
   assert.deepEqual(Object.keys(publicApi).sort(), [
@@ -41,23 +58,46 @@ test('root export surface remains the exact client allowlist', () => {
   assert.equal('maximumNodeStateBytes' in DEFAULT_ENGINE_LIMITS, false);
 });
 
-test('wire v2 fixture has JSON display checkpoint and ACK command cursor', async () => {
+test('client package and Display codec versions are the frozen matrix-native release', async () => {
+  const packageJson = JSON.parse(await readFile(new URL('../package.json', import.meta.url)));
+  assert.equal(packageJson.version, '0.12.0');
+  assert.throws(() => encodePacket('engine.checkpoint', {
+    schema: 'scene-engine-wire@3',
+    type: 'engine.checkpoint',
+    stream_id: STREAM_ID,
+    commit_seq: 0,
+    source_tick: 0,
+    world_revision: 0,
+    last_command_seq: 0,
+    world_codec: WORLD_CODEC,
+    display_codec: 'scene-engine-display-node@4',
+  }), (error) => error.code === 'display-codec-unsupported');
+});
+
+test('wire v3 fixture has binary display checkpoint and ACK command cursor', async () => {
   const { factory, sessions } = createMockDisplayFactory();
   const client = new SceneEngineClient({ createDisplaySession: factory });
   const raw = new Uint8Array(await readFile(`${FIXTURES}/checkpoint.bin`));
   const decoded = readEnginePacket(raw);
-  assert.equal(decoded.header.schema, 'scene-engine-wire@2');
-  assert.equal(decoded.header.display_codec, 'scene-engine-display-node@3');
+  assert.equal(decoded.header.schema, 'scene-engine-wire@3');
+  assert.equal(decoded.header.display_codec, 'scene-engine-display-node@5');
   assert.deepEqual(decoded.attachments.map(({ kind, encoding }) => [kind, encoding]), [
     ['world_snapshot', 'json'],
-    ['display_checkpoint', 'json'],
+    ['display_checkpoint', 'raw'],
   ]);
 
   const result = client.applyPacket(raw);
   const ack = readEnginePacket(result.ackPacket);
+  const identity = JSON.parse(await readFile(new URL(
+    '../../../../fixtures/display-catalog-v2/identity.json', import.meta.url,
+  )));
   assert.equal(ack.header.last_command_seq, 0);
   assert.deepEqual(client.currentDisplayView(), { sessionId: 1 });
-  assert.equal(sessions[0].metadata.sceneCatalogHash, HASH_A);
+  assert.deepEqual({
+    scene_catalog_hash: sessions[0].metadata.sceneCatalogHash,
+    prefab_catalog_hash: sessions[0].metadata.prefabCatalogHash,
+    state_schema_hash: sessions[0].metadata.stateSchemaHash,
+  }, identity);
   assert.deepEqual(sessions[0].log.map(([kind]) => kind), [
     'installScene', 'createNode', 'createNode', 'activate', 'start', 'summary',
   ]);
@@ -73,7 +113,47 @@ test('wire v2 fixture has JSON display checkpoint and ACK command cursor', async
   assert.equal('getWorldPose' in client, false);
 });
 
-test('applies canonical Python wire@2 fixtures through exact Authority payloads', async () => {
+test('packaged wire v3 fixtures are exact copies of the canonical generated corpus', async () => {
+  for (const name of [
+    'checkpoint.bin',
+    'commit-tick.bin',
+    'commit-input.bin',
+    'input.bin',
+    'ack.bin',
+    'input-result.bin',
+  ]) {
+    assert.deepEqual(
+      new Uint8Array(await readFile(`${FIXTURES}/${name}`)),
+      new Uint8Array(await readFile(`${PYTHON_FIXTURES}/${name}`)),
+      name,
+    );
+  }
+});
+
+test('Authority takes a packet-independent Float32Array and preserves shear exactly', () => {
+  const { factory, sessions } = createMockDisplayFactory();
+  const client = new SceneEngineClient({ createDisplaySession: factory });
+  const shear = new Float32Array([
+    2, 0.25, 0, 0,
+    0.5, 3, 0.75, 0,
+    0, 0.5, 4, 0,
+    7, 8, 9, 1,
+  ]);
+  const raw = checkpointPacket({
+    nodes: [{ ...baselineNode(), transform: shear }],
+  });
+  client.applyPacket(raw);
+  const authorityTransform = sessions[0].log.find(([kind]) => kind === 'createNode')[1]
+    .transform;
+  assert.ok(authorityTransform instanceof Float32Array);
+  assert.deepEqual(authorityTransform, shear);
+  assert.notStrictEqual(authorityTransform, shear);
+  assert.notStrictEqual(authorityTransform.buffer, raw.buffer);
+  raw.fill(0);
+  assert.deepEqual(authorityTransform, shear);
+});
+
+test('applies canonical Python wire@3 fixtures through exact Authority payloads', async () => {
   const { factory, sessions } = createMockDisplayFactory();
   const client = new SceneEngineClient({ createDisplaySession: factory });
   const checkpoint = client.applyPacket(new Uint8Array(
@@ -252,7 +332,8 @@ test('commit validates all commands then applies one Authority call per target b
     'setNodeState', 'replaceNodePrefab', 'removeNode', 'seal', 'summary',
   ]);
   const transformRecord = sessions[0].log.find(([kind]) => kind === 'setNodeTransform')[1];
-  assert.deepEqual(transformRecord.transform.rotationXyzw, [0, 0, 0, 1]);
+  assert.ok(transformRecord.transform instanceof Float32Array);
+  assert.deepEqual([...transformRecord.transform], [...transform(3)]);
   assert.deepEqual(Object.keys(transformRecord), ['name', 'transform']);
   assert.equal(Object.isFrozen(transformRecord), true);
 });
@@ -272,17 +353,17 @@ test('empty command stream still seals and ACKs while preserving command cursor'
   assert.equal(client.currentWorldState().tick, 1);
 });
 
-test('invalid sequence fails before draw gate and leaves installed pointers unchanged', () => {
+test('invalid binary command base fails before draw gate and leaves pointers unchanged', () => {
   const { factory, sessions } = createMockDisplayFactory();
   const client = new SceneEngineClient({ createDisplaySession: factory });
   client.applyPacket(checkpointPacket());
   const before = client.capture();
-  const raw = commitPacket({
-    commands: [command('node-set-visible', 2, 1, { visible: false })],
-  });
+  const raw = corruptDisplayStreamU64(commitPacket({
+    commands: [command('node-set-visible', 1, 1, { visible: false })],
+  }), 8, 1);
   assert.throws(
     () => client.applyPacket(raw),
-    (error) => error.code === 'display-command-sequence-invalid',
+    (error) => error.code === 'display-command-base-mismatch',
   );
   const after = client.capture();
   assert.strictEqual(after.commit, before.commit);
@@ -291,16 +372,16 @@ test('invalid sequence fails before draw gate and leaves installed pointers unch
   assert.throws(() => client.applyPacket(raw), (error) => error.code === 'client-failed');
 });
 
-test('validates the entire command stream before the first Authority mutation', () => {
+test('validates the binary source-tick seal before the first Authority mutation', () => {
   const { factory, sessions } = createMockDisplayFactory();
   const client = new SceneEngineClient({ createDisplaySession: factory });
   client.applyPacket(checkpointPacket());
-  const raw = commitPacket({
+  const raw = corruptDisplayStreamU64(commitPacket({
     commands: [
       command('node-set-visible', 1, 1, { visible: false }),
-      command('node-set-state', 2, 2, { state: { mode: 'wrong-tick' } }),
+      command('node-set-state', 2, 1, { state: { mode: 'wrong-tick' } }),
     ],
-  });
+  }), 16, 2);
   assert.throws(
     () => client.applyPacket(raw),
     (error) => error.code === 'display-command-source-tick-mismatch',
@@ -464,7 +545,7 @@ test('input observes commit cursor and input_result has no state side effect', (
 
   const before = client.currentCommit();
   const resultPacket = encodePacket('engine.input_result', {
-    schema: 'scene-engine-wire@2',
+    schema: 'scene-engine-wire@3',
     type: 'engine.input_result',
     input_id: 'browser:1',
     status: 'no-op',
@@ -478,12 +559,12 @@ test('input observes commit cursor and input_result has no state side effect', (
   });
 });
 
-test('v1 packet fails closed without a compatibility decoder', async () => {
-  const v2 = new Uint8Array(await readFile(`${FIXTURES}/checkpoint.bin`));
-  const v1 = v2.slice();
-  v1[4] = 1;
+test('v2 packet fails closed without a compatibility decoder', async () => {
+  const v3 = new Uint8Array(await readFile(`${FIXTURES}/checkpoint.bin`));
+  const v2 = v3.slice();
+  v2[4] = 2;
   assert.throws(
-    () => readEnginePacket(v1),
+    () => readEnginePacket(v2),
     (error) => error.code === 'packet-version-invalid',
   );
 });

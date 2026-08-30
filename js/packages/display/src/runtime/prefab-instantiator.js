@@ -12,6 +12,7 @@ import {
 import {
   composeWorldTransform,
   copyWorldTransform,
+  IDENTITY_TRANSFORM,
   snapshotWorldTransform,
   writeWorldTransform,
 } from '../math/transform.js';
@@ -119,7 +120,7 @@ function candidateNodePlacement(node, overrides) {
   const parent = node.parent === null ? null : candidateNodePlacement(node.parent, overrides);
   const placement = {
     world: composeWorldTransform(parent?.world ?? null,
-      overrides.transforms.get(node) ?? node.localTransform),
+      overrides.transforms.get(node) ?? node._localTransform),
     visible: (parent?.visible ?? true)
       && (overrides.visibility.get(node) ?? node.visibleSelf),
   };
@@ -418,17 +419,13 @@ export class PrefabInstantiator {
     const shadowParent = new Node({
       name: liveParent.name,
       sceneToken: target._sceneToken,
-      transform: {
-        position: parentPlacement.world.position,
-        rotationXyzw: parentPlacement.world.rotationXyzw,
-        scale: parentPlacement.world.scale,
-      },
+      transform: IDENTITY_TRANSFORM,
       visible: parentPlacement.visible,
     });
     const shadowRoot = new Node({
       name: target.name,
       sceneToken: target._sceneToken,
-      transform: target.localTransform,
+      transform: target._localTransform,
       visible: target.visibleSelf,
       label: target.label,
     });
@@ -739,7 +736,7 @@ export class PrefabInstantiator {
   _applyRetainedPlan(record, plan) {
     const undos = [];
     const setTransform = (node, value) => {
-      const previous = node.localTransform;
+      const previous = node._localTransform;
       node.setLocalTransform(value);
       undos.push(() => node.setLocalTransform(previous));
     };
@@ -841,11 +838,7 @@ export class PrefabInstantiator {
     const shadowParent = new Node({
       name: liveParent.name,
       sceneToken: liveParent._sceneToken,
-      transform: {
-        position: parentWorld.position,
-        rotationXyzw: parentWorld.rotationXyzw,
-        scale: parentWorld.scale,
-      },
+      transform: IDENTITY_TRANSFORM,
       visible: parentVisible,
     });
     const root = new Node({

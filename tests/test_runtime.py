@@ -26,6 +26,7 @@ from scene_engine.display import (
     DisplayNode,
     DisplayTransform,
 )
+from scene_engine.display_binary import decode_display_command_stream_binary
 from scene_engine.session import PacketRef
 from scene_engine.wire import (
     AttachmentKind,
@@ -189,10 +190,25 @@ def catalog() -> DisplayCatalogIdentity:
 
 
 def transform(world: World) -> DisplayTransform:
-    return DisplayTransform(
-        position=(world.value, 0.0, 0.0),
-        rotation_xyzw=(0.0, 0.0, 0.0, 1.0),
-        scale=(1.0, 1.0, 1.0),
+    return DisplayTransform.from_matrix(
+        (
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            world.value,
+            0.0,
+            0.0,
+            1.0,
+        )
     )
 
 
@@ -304,7 +320,11 @@ def test_tick_and_changed_input_have_one_commit_cursor_and_display_seal() -> Non
         AttachmentKind.WORLD_PATCH,
         AttachmentKind.DISPLAY_COMMAND_STREAM,
     ]
-    command_stream = tick.attachments[1].value
+    command_stream = decode_display_command_stream_binary(
+        tick.attachments[1].bytes,
+        expected_source_tick=tick.header["source_tick"],
+        expected_last_command_seq=tick.header["last_command_seq"],
+    )
     assert command_stream["base_command_seq"] == 0
     assert command_stream["last_command_seq"] == tick.header["last_command_seq"] == 2
     assert [record["kind"] for record in command_stream["commands"]] == [
@@ -321,7 +341,12 @@ def test_tick_and_changed_input_have_one_commit_cursor_and_display_seal() -> Non
     assert changed.header["source_tick"] == 1
     assert changed.header["world_revision"] == changed.header["commit_seq"] == 2
     assert changed.header["last_command_seq"] == 2
-    assert changed.attachments[1].value["commands"] == []
+    changed_stream = decode_display_command_stream_binary(
+        changed.attachments[1].bytes,
+        expected_source_tick=changed.header["source_tick"],
+        expected_last_command_seq=changed.header["last_command_seq"],
+    )
+    assert changed_stream["commands"] == []
     assert world.value == 4.0
 
 

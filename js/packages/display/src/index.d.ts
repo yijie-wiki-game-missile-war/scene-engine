@@ -3,35 +3,55 @@ export type JSONValue = JSONPrimitive | readonly JSONValue[] | { readonly [key: 
 export type JSONRecord = { readonly [key: string]: JSONValue };
 
 export type Vec3 = readonly [number, number, number];
-export type QuaternionXyzw = readonly [number, number, number, number];
 export type Matrix4 = readonly [
   number, number, number, number,
   number, number, number, number,
   number, number, number, number,
   number, number, number, number,
 ];
+export type Matrix4Input = Matrix4 | Float32Array;
 
-export interface DisplayTransform {
-  readonly position: Vec3;
-  readonly rotationXyzw: QuaternionXyzw;
-  readonly scale: Vec3;
-}
-
-export interface WorldTransform extends DisplayTransform {
-  readonly matrix: Matrix4;
-}
+export type DisplayTransform = Matrix4;
+export type WorldTransform = Matrix4;
 
 export interface MutableNumericArray {
   readonly length: number;
   [index: number]: number;
 }
 
-export interface WorldTransformOutput {
-  readonly position: MutableNumericArray;
-  readonly rotationXyzw: MutableNumericArray;
-  readonly scale: MutableNumericArray;
-  readonly matrix?: MutableNumericArray;
+export type WorldTransformOutput = MutableNumericArray;
+
+export interface DisplayTransformFacade {
+  identity(): DisplayTransform;
+  fromTRS(value?: Readonly<{
+    position?: Vec3;
+    rotationXyzw?: readonly [number, number, number, number];
+    scale?: Vec3;
+  }>): DisplayTransform;
+  compose(parent: Matrix4Input | Float64Array, local: Matrix4Input | Float64Array): DisplayTransform;
+  withTranslation(matrix: Matrix4Input | Float64Array, position: Vec3): DisplayTransform;
+  withScale(matrix: Matrix4Input | Float64Array, scale: Vec3): DisplayTransform;
+  translatedSelf(matrix: Matrix4Input | Float64Array, translation: Vec3): DisplayTransform;
+  translatedParent(matrix: Matrix4Input | Float64Array, translation: Vec3): DisplayTransform;
+  rotatedSelf(
+    matrix: Matrix4Input | Float64Array,
+    axis: Vec3,
+    radians: number,
+  ): DisplayTransform;
+  rotatedParent(
+    matrix: Matrix4Input | Float64Array,
+    axis: Vec3,
+    radians: number,
+  ): DisplayTransform;
+  scaledSelf(matrix: Matrix4Input | Float64Array, scale: Vec3): DisplayTransform;
+  scaledParent(matrix: Matrix4Input | Float64Array, scale: Vec3): DisplayTransform;
+  transformPoint(matrix: Matrix4Input | Float64Array, point: Vec3): Vec3;
+  inverseTransformPoint(matrix: Matrix4Input | Float64Array, point: Vec3): Vec3;
+  transformVector(matrix: Matrix4Input | Float64Array, vector: Vec3): Vec3;
+  inverseTransformVector(matrix: Matrix4Input | Float64Array, vector: Vec3): Vec3;
 }
+
+export const DisplayTransform: Readonly<DisplayTransformFacade>;
 
 export interface DisplayCursor {
   readonly commitSeq: number;
@@ -280,7 +300,7 @@ export class Component<P extends JSONRecord = JSONRecord> {
   readonly properties: Readonly<P>;
   readonly drivesTransform: boolean;
   setEnabled(enabled: boolean): void;
-  setDrivenLocalTransform(transform: DisplayTransform): void;
+  setDrivenLocalTransform(transform: Matrix4Input): void;
   setAnimation(playerKey: string, animationId: string): void;
   playAnimation(playerKey: string, animationId: string): void;
   stopAnimation(playerKey: string): void;
@@ -372,14 +392,14 @@ export interface AuthorityNodeRecord {
   readonly parentName: string | null;
   readonly prefabId: string;
   readonly transformMode: 'initial' | 'live';
-  readonly transform: DisplayTransform;
+  readonly transform: Matrix4Input;
   readonly visible: boolean;
   readonly state: JSONRecord;
 }
 
 export interface AuthorityPort {
   createNode(command: AuthorityNodeRecord): string;
-  setNodeTransform(command: { readonly name: string; readonly transform: DisplayTransform }): undefined;
+  setNodeTransform(command: { readonly name: string; readonly transform: Matrix4Input }): undefined;
   setNodeParent(command: { readonly name: string; readonly parentName: string | null }): undefined;
   setNodeVisible(command: { readonly name: string; readonly visible: boolean }): undefined;
   setNodeState(command: { readonly name: string; readonly state: JSONRecord }): undefined;
@@ -525,11 +545,11 @@ export class BillboardComponent extends BehaviourComponent { static readonly typ
 export class LookAtComponent extends BehaviourComponent { static readonly typeId: 'behavior.look-at@1'; static readonly tickPhase: 'before-render'; static readonly drivesTransform: true; }
 
 export const TICKS_PER_SECOND: 60;
-export const DISPLAY_RUNTIME_SCHEMA: 'scene-engine-display-node@3';
+export const DISPLAY_RUNTIME_SCHEMA: 'scene-engine-display-node@5';
 export const DISPLAY_SUMMARY_SCHEMA: 'scene-engine-display-summary@1';
-export const DISPLAY_CATALOG_MANIFEST_SCHEMA: 'scene-engine-display-catalog-manifest@1';
-export const SCENE_DEFINITION_SCHEMA: 'scene-engine-scene-definition@1';
-export const PREFAB_DEFINITION_SCHEMA: 'scene-engine-prefab-definition@3';
+export const DISPLAY_CATALOG_MANIFEST_SCHEMA: 'scene-engine-display-catalog-manifest@2';
+export const SCENE_DEFINITION_SCHEMA: 'scene-engine-scene-definition@2';
+export const PREFAB_DEFINITION_SCHEMA: 'scene-engine-prefab-definition@4';
 export const RESOURCE_REGISTRY_SCHEMA: 'scene-engine-resource-registry@1';
 export const ANIMATION_RESOURCE_SCHEMA: 'scene-engine-animation-resource@2';
 

@@ -1,4 +1,8 @@
 import { DISPLAY_CODEC, encodePacket } from '../src/wire.js';
+import {
+  encodeDisplayCheckpoint,
+  encodeDisplayCommandStream,
+} from '../src/display.js';
 
 export const STREAM_ID = '00000000-0000-4000-8000-000000000002';
 export const WORLD_CODEC = 'example-world@2';
@@ -7,11 +11,12 @@ export const HASH_B = 'b'.repeat(64);
 export const HASH_C = 'c'.repeat(64);
 
 export function transform(x = 0) {
-  return {
-    position: [x, 0, 0],
-    rotationXyzw: [0, 0, 0, 1],
-    scale: [1, 1, 1],
-  };
+  return new Float32Array([
+    1, 0, 0, 0,
+    0, 1, 0, 0,
+    0, 0, 1, 0,
+    x, 0, 0, 1,
+  ]);
 }
 
 export function baselineNode(name = 'py/unit-1', parentName = null) {
@@ -38,7 +43,7 @@ export function checkpointPacket({
   stateSchemaHash = HASH_C,
 } = {}) {
   return encodePacket('engine.checkpoint', {
-    schema: 'scene-engine-wire@2',
+    schema: 'scene-engine-wire@3',
     type: 'engine.checkpoint',
     stream_id: STREAM_ID,
     commit_seq: commitSeq,
@@ -51,23 +56,23 @@ export function checkpointPacket({
     { kind: 'world_snapshot', encoding: 'json', value: worldSnapshot },
     {
       kind: 'display_checkpoint',
-      encoding: 'json',
-      value: {
-        schema: 'scene-engine-display-checkpoint@3',
+      encoding: 'raw',
+      value: encodeDisplayCheckpoint({
+        schema: 'scene-engine-display-checkpoint@5',
         scene_name: 'main',
         scene_catalog_hash: sceneCatalogHash,
         prefab_catalog_hash: prefabCatalogHash,
         state_schema_hash: stateSchemaHash,
         last_command_seq: lastCommandSeq,
         nodes,
-      },
+      }),
     },
   ]);
 }
 
 export function command(kind, commandSeq, sourceTick, fields = {}) {
   return {
-    schema: 'scene-engine-node-command@3',
+    schema: 'scene-engine-node-command@5',
     command_seq: commandSeq,
     source_tick: sourceTick,
     kind,
@@ -94,7 +99,7 @@ export function commitPacket({
 } = {}) {
   const lastCommandSeq = baseCommandSeq + commands.length;
   return encodePacket('engine.commit', {
-    schema: 'scene-engine-wire@2',
+    schema: 'scene-engine-wire@3',
     type: 'engine.commit',
     stream_id: STREAM_ID,
     commit_seq: commitSeq,
@@ -109,13 +114,13 @@ export function commitPacket({
     { kind: 'world_patch', encoding: 'json', value: worldPatch },
     {
       kind: 'display_command_stream',
-      encoding: 'json',
-      value: {
-        schema: 'scene-engine-display-command-stream@3',
+      encoding: 'raw',
+      value: encodeDisplayCommandStream({
+        schema: 'scene-engine-display-command-stream@5',
         base_command_seq: baseCommandSeq,
         last_command_seq: lastCommandSeq,
         commands,
-      },
+      }, { sourceTick }),
     },
   ]);
 }

@@ -31,7 +31,6 @@ export class ThreeRenderBackend {
     this._registry = normalized.resourceRegistry;
     this._onHealth = normalized.onHealth;
     this._implementation = Object.freeze({ ...DEFAULT_THREE_IMPLEMENTATION, ...implementation });
-    this._controller = new AbortController();
     this._disposed = false;
     this._failure = null;
     this._drawCount = 0;
@@ -41,14 +40,21 @@ export class ThreeRenderBackend {
     this._pixelRatio = 1;
     this._bindings = new Map();
     this._records = new WeakMap();
+    this._allRecords = new Set();
+    this._recordSignalHubs = new Map();
     this._reservations = new Set();
     this._nodes = new Map();
     this._pending = new Set();
     this._backgroundKey = null;
     this._activeCamera = null;
     this._batches = [];
-    this._batchSignature = null;
     this._batchDirty = true;
+    this._dirtyBatchRecords = new Set();
+    this._continuousRecords = new Set();
+    this._nodeRootCleanupScheduled = false;
+    this._batchWorldMatrix = new THREE.Matrix4();
+    this._batchFinalMatrix = new THREE.Matrix4();
+    this._batchInstanceSphere = new THREE.Sphere();
 
     this._scene = new THREE.Scene();
     this._root = new THREE.Group();
@@ -115,20 +121,29 @@ export class ThreeRenderBackend {
       nodeRoot: null,
       visible: true,
       batched: false,
+      batch: null,
+      batchIndex: -1,
       panelAnchorWorld: null,
-      worldMatrix: Object.freeze([1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 1]),
+      worldMatrix: Object.freeze([
+        1, 0, 0, 0,
+        0, 1, 0, 0,
+        0, 0, 1, 0,
+        0, 0, 0, 1,
+      ]),
       controller: new AbortController(),
       pendingReplacement: null,
       generation: 0,
       destroyed: false,
       unlinkSignal: null,
     };
-    const unlinkBackendSignal = linkSignal(this._controller.signal, record.controller);
-    const unlinkDescriptorSignal = linkSignal(descriptor.signal, record.controller);
-    record.unlinkSignal = () => { unlinkBackendSignal(); unlinkDescriptorSignal(); };
+    this._allRecords.add(record);
+    record.unlinkSignal = this._linkRecordSignal(descriptor.signal, record.controller);
     const operation = this._completeBinding(record).catch((error) => {
       this._reservations.delete(key);
       if (this._backgroundKey === key && !this._bindings.has(key)) this._backgroundKey = null;
+      this._allRecords.delete(record);
+      record.unlinkSignal?.(); record.unlinkSignal = null;
+      record.controller.abort('binding-create-failed');
       this._releaseRecordResources(record);
       if (!isAbort(error) && !this._disposed) {
         const wrapped = wrapError('three-binding-create-failed', error);
@@ -158,6 +173,7 @@ export class ThreeRenderBackend {
       record.nodeRoot.matrixWorldNeedsUpdate = true;
     }
     this._applyRecordVisibility(record);
+    if (record.batched) this._dirtyBatchRecords.add(record);
     const eligibilityChanged = patch.batchable !== record.batchable;
     if (eligibilityChanged) {
       // Eligibility is part of the latest logical binding state even while a
@@ -191,6 +207,8 @@ export class ThreeRenderBackend {
       record.handle.update(patch.properties);
       record.properties = patch.properties;
       this._applyRecordVisibility(record);
+      if (record.batchable && record.handle.batchFingerprint
+          && typeof record.handle.createBatch === 'function') this._batchDirty = true;
     } catch (error) {
       const wrapped = wrapError('three-binding-update-failed', error); this._failure = wrapped;
       this._emitHealth({ phase: 'binding-update', record, errorCode: wrapped.code,
@@ -213,10 +231,10 @@ export class ThreeRenderBackend {
       fail('three-active-camera-invalid');
     }
     this._activeCamera = cameraRecord;
-    for (const record of this._bindings.values()) record.handle.sample(frame);
+    for (const record of this._continuousRecords) record.handle.sample(frame);
     this._updateBatches();
     const requiresContinuousDraw = this._pending.size > 0
-      || [...this._bindings.values()].some((record) => record.handle.requiresContinuousDraw === true);
+      || this._continuousRecords.size > 0;
     return Object.freeze({ requiresContinuousDraw });
   }
 
@@ -396,10 +414,17 @@ export class ThreeRenderBackend {
     this._disposed = true;
     this._externalSignal?.removeEventListener?.('abort', this._externalAbort);
     this._resizeObserver?.disconnect();
-    this._controller.abort('backend-disposed');
-    this._disposeBatches();
+    for (const record of this._allRecords) record.controller.abort('backend-disposed');
+    this._clearRecordSignalHubs();
+    // Destruction does not need to restore inactive ordinary representations.
+    // Keeping both batches and Node roots detached avoids quadratic parent-array
+    // removal while a large backend is being retired or rebuilt.
+    this._disposeBatches(false);
     for (const record of [...this._bindings.values()]) this._destroyRecord(record, true);
+    this._detachAllNodeRoots();
     this._bindings.clear(); this._reservations.clear(); this._nodes.clear();
+    this._allRecords.clear();
+    this._dirtyBatchRecords.clear(); this._continuousRecords.clear();
     this._resources.dispose();
     this._scene.background = null; this._scene.environment = null;
     this._root.removeFromParent(); this._batchRoot.removeFromParent();
@@ -425,6 +450,7 @@ export class ThreeRenderBackend {
     handle.resize?.(this._width / this._height);
     handle.setPanelAnchor?.(record.panelAnchorWorld);
     record.handle = handle;
+    if (handle.requiresContinuousDraw === true) this._continuousRecords.add(record);
     if (handle.object) {
       record.nodeRoot = this._acquireNodeRoot(record.identity.nodeName);
       record.nodeRoot.add(handle.object);
@@ -462,8 +488,10 @@ export class ThreeRenderBackend {
         handle.setPanelAnchor?.(record.panelAnchorWorld);
         this._disposeBatches();
         const previousHandle = record.handle; const previousLeases = record.leases;
+        this._continuousRecords.delete(record);
         if (previousHandle.object) previousHandle.object.removeFromParent();
         record.handle = handle; record.leases = leases; record.properties = latestProperties;
+        if (handle.requiresContinuousDraw === true) this._continuousRecords.add(record);
         record.resourceIds = resourceIds;
         if (handle.object) {
           record.nodeRoot ??= this._acquireNodeRoot(record.identity.nodeName);
@@ -499,16 +527,19 @@ export class ThreeRenderBackend {
 
   _destroyRecord(record, disposing = false) {
     if (record.destroyed) return;
-    this._disposeBatches();
+    if (!disposing) this._disposeBatches();
+    this._dirtyBatchRecords.delete(record);
+    this._continuousRecords.delete(record);
     record.destroyed = true; record.generation += 1;
     this._cancelReplacement(record, 'binding-destroyed', false);
-    record.unlinkSignal?.();
+    record.unlinkSignal?.(); record.unlinkSignal = null;
+    this._allRecords.delete(record);
     this._bindings.delete(record.key); this._reservations.delete(record.key);
     if (this._backgroundKey === record.key) this._backgroundKey = null;
     if (this._activeCamera === record) this._activeCamera = null;
     record.handle?.dispose();
     record.handle = null;
-    if (record.nodeRoot) this._releaseNodeRoot(record.identity.nodeName);
+    if (record.nodeRoot && !disposing) this._releaseNodeRoot(record.identity.nodeName);
     record.nodeRoot = null;
     record.controller.abort('binding-destroyed');
     this._releaseRecordResources(record);
@@ -532,10 +563,43 @@ export class ThreeRenderBackend {
   _releaseNodeRoot(nodeName) {
     const entry = this._nodes.get(nodeName); if (!entry) return;
     entry.references -= 1;
-    if (entry.references <= 0) { entry.object.removeFromParent(); this._nodes.delete(nodeName); }
+    if (entry.references <= 0) {
+      // Logical ownership ends immediately. Leave an empty root in the private
+      // Three tree only until one microtask compacts the complete parent array.
+      // Sibling destroys in the same turn therefore never splice it one by one.
+      this._nodes.delete(nodeName);
+      this._scheduleEmptyNodeRootCleanup();
+    }
+  }
+
+  _scheduleEmptyNodeRootCleanup() {
+    if (this._nodeRootCleanupScheduled || this._disposed) return;
+    this._nodeRootCleanupScheduled = true;
+    queueMicrotask(() => {
+      this._nodeRootCleanupScheduled = false;
+      if (!this._disposed) this._detachEmptyNodeRoots();
+    });
   }
 
   _updateBatches() {
+    if (this._batchDirty) this._rebuildBatches();
+    if (this._dirtyBatchRecords.size === 0) return;
+    const touched = new Map();
+    for (const record of this._dirtyBatchRecords) {
+      if (!record.batched || record.batch === null) continue;
+      this._writeBatchRecord(record.batch, record.batchIndex, record);
+      let indices = touched.get(record.batch);
+      if (!indices) { indices = []; touched.set(record.batch, indices); }
+      indices.push(record.batchIndex);
+    }
+    this._dirtyBatchRecords.clear();
+    for (const [batch, indices] of touched) {
+      addAttributeUpdates(batch.object.instanceMatrix, indices);
+      if (batch.panelAnchorAttribute) addAttributeUpdates(batch.panelAnchorAttribute, indices);
+    }
+  }
+
+  _rebuildBatches() {
     const groups = new Map();
     for (const record of this._bindings.values()) {
       if (!record.batchable) continue;
@@ -546,51 +610,147 @@ export class ThreeRenderBackend {
     }
     const eligible = [...groups.entries()].filter(([, records]) => records.length >= 2)
       .sort(([left], [right]) => left.localeCompare(right));
-    const signature = stableData(eligible.map(([key, records]) => [key,
-      records.map((record) => record.key).sort()]));
-    if (this._batchDirty || signature !== this._batchSignature) {
-      this._disposeBatches();
-      for (const [, records] of eligible) {
-        records.sort((left, right) => left.key.localeCompare(right.key));
-        const created = records[0].handle.createBatch(records.length);
-        const batch = { ...created, records,
-          pickable: records[0].handle.pickable, localMatrix: new THREE.Matrix4().fromArray(created.localMatrix) };
-        created.object.userData.threeBatchRecords = records;
-        this._batchRoot.add(created.object); this._batches.push(batch);
-        for (const record of records) {
-          record.batched = true;
-          this._applyRecordVisibility(record);
-        }
-      }
-      this._batchSignature = signature; this._batchDirty = false;
-    }
-    const world = new THREE.Matrix4(); const final = new THREE.Matrix4();
-    for (const batch of this._batches) {
-      for (let index = 0; index < batch.records.length; index += 1) {
-        const record = batch.records[index];
-        batch.setPanelAnchorAt?.(index, record.panelAnchorWorld);
-        if (!record.visible) batch.object.setMatrixAt(index, ZERO_MATRIX);
-        else { world.fromArray(record.worldMatrix); final.multiplyMatrices(world, batch.localMatrix);
-          batch.object.setMatrixAt(index, final); }
+    this._disposeBatches();
+    for (const [, records] of eligible) {
+      records.sort((left, right) => left.key.localeCompare(right.key));
+      const created = records[0].handle.createBatch(records.length);
+      const batch = { ...created, records,
+        pickable: records[0].handle.pickable, localMatrix: new THREE.Matrix4().fromArray(created.localMatrix) };
+      batch.object.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+      batch.panelAnchorAttribute?.setUsage(THREE.DynamicDrawUsage);
+      created.object.userData.threeBatchRecords = records;
+      this._batchRoot.add(created.object); this._batches.push(batch);
+      for (let index = 0; index < records.length; index += 1) {
+        const record = records[index];
+        record.batched = true;
+        record.batch = batch;
+        record.batchIndex = index;
+        this._applyRecordVisibility(record);
+        this._writeBatchRecord(batch, index, record);
       }
       batch.object.instanceMatrix.needsUpdate = true;
+      if (batch.panelAnchorAttribute) batch.panelAnchorAttribute.needsUpdate = true;
+    }
+    this._detachEmptyNodeRoots();
+    this._dirtyBatchRecords.clear();
+    this._batchDirty = false;
+  }
+
+  _writeBatchRecord(batch, index, record) {
+    batch.setPanelAnchorAt?.(index, record.panelAnchorWorld);
+    if (!record.visible) {
+      batch.object.setMatrixAt(index, ZERO_MATRIX);
+      return;
+    }
+    this._batchWorldMatrix.fromArray(record.worldMatrix);
+    this._batchFinalMatrix.multiplyMatrices(this._batchWorldMatrix, batch.localMatrix);
+    batch.object.setMatrixAt(index, this._batchFinalMatrix);
+    if (batch.object.frustumCulled && batch.object.boundingSphere !== null) {
+      if (batch.object.geometry.boundingSphere === null) batch.object.geometry.computeBoundingSphere();
+      this._batchInstanceSphere.copy(batch.object.geometry.boundingSphere)
+        .applyMatrix4(this._batchFinalMatrix);
+      batch.object.boundingSphere.union(this._batchInstanceSphere);
     }
   }
 
-  _disposeBatches() {
+  _disposeBatches(restoreRecords = true) {
+    this._detachAllBatchObjects();
     for (const batch of this._batches) {
       for (const record of batch.records) {
         record.batched = false;
-        this._applyRecordVisibility(record);
+        record.batch = null;
+        record.batchIndex = -1;
+        if (restoreRecords) this._applyRecordVisibility(record);
       }
       batch.dispose();
     }
-    this._batches.length = 0; this._batchSignature = null; this._batchDirty = true;
+    this._batches.length = 0; this._dirtyBatchRecords.clear(); this._batchDirty = true;
   }
 
   _applyRecordVisibility(record) {
     record.handle?.applyVisibility?.(record.visible);
-    if (record.handle?.object) record.handle.object.visible = record.visible && !record.batched;
+    const object = record.handle?.object;
+    if (!object) return;
+    object.visible = record.visible && !record.batched;
+    if (!record.nodeRoot) return;
+    if (record.batched) {
+      object.removeFromParent();
+      return;
+    }
+    if (record.nodeRoot.parent !== this._root) this._root.add(record.nodeRoot);
+    if (object.parent !== record.nodeRoot) record.nodeRoot.add(object);
+  }
+
+  _detachEmptyNodeRoots() {
+    const children = this._root.children;
+    const detached = [];
+    let writeIndex = 0;
+    for (const child of children) {
+      if (child.children.length > 0) {
+        children[writeIndex] = child;
+        writeIndex += 1;
+      } else {
+        child.parent = null;
+        detached.push(child);
+      }
+    }
+    children.length = writeIndex;
+    for (const child of detached) child.dispatchEvent({ type: 'removed' });
+  }
+
+  _detachAllNodeRoots() {
+    const children = this._root.children;
+    const detached = children.slice();
+    children.length = 0;
+    for (const child of detached) {
+      child.parent = null;
+      child.dispatchEvent({ type: 'removed' });
+    }
+  }
+
+  _detachAllBatchObjects() {
+    const children = this._batchRoot.children;
+    const detached = children.slice();
+    children.length = 0;
+    for (const child of detached) {
+      child.parent = null;
+      child.dispatchEvent({ type: 'removed' });
+    }
+  }
+
+  _linkRecordSignal(signal, controller) {
+    if (!signal) return () => {};
+    let hub = this._recordSignalHubs.get(signal);
+    if (!hub) {
+      const controllers = new Set();
+      const abort = () => {
+        for (const target of controllers) target.abort(signal.reason ?? 'binding-aborted');
+      };
+      hub = { controllers, abort, listening: true };
+      this._recordSignalHubs.set(signal, hub);
+      signal.addEventListener('abort', abort, { once: true });
+    }
+    hub.controllers.add(controller);
+    if (signal.aborted) controller.abort(signal.reason ?? 'binding-aborted');
+    let linked = true;
+    return () => {
+      if (!linked) return;
+      linked = false;
+      hub.controllers.delete(controller);
+      if (!hub.listening || hub.controllers.size > 0) return;
+      hub.listening = false;
+      signal.removeEventListener('abort', hub.abort);
+      if (this._recordSignalHubs.get(signal) === hub) this._recordSignalHubs.delete(signal);
+    };
+  }
+
+  _clearRecordSignalHubs() {
+    for (const [signal, hub] of this._recordSignalHubs) {
+      if (hub.listening) signal.removeEventListener('abort', hub.abort);
+      hub.listening = false;
+      hub.controllers.clear();
+    }
+    this._recordSignalHubs.clear();
   }
 
   _requireRecord(binding) {
@@ -628,6 +788,29 @@ export function createThreeRenderBackend(options) {
 }
 
 function identityKey(value) { return JSON.stringify([value.nodeName, value.componentKey]); }
+function addAttributeUpdates(attribute, itemIndices) {
+  const pendingComponents = attribute.updateRanges.reduce(
+    (total, range) => total + range.count,
+    0,
+  );
+  if (pendingComponents + itemIndices.length * attribute.itemSize >= attribute.array.length / 4) {
+    attribute.clearUpdateRanges();
+    attribute.addUpdateRange(0, attribute.array.length);
+  } else {
+    itemIndices.sort((left, right) => left - right);
+    let start = itemIndices[0]; let previous = start;
+    for (let offset = 1; offset <= itemIndices.length; offset += 1) {
+      const current = itemIndices[offset];
+      if (current === previous + 1) { previous = current; continue; }
+      attribute.addUpdateRange(
+        start * attribute.itemSize,
+        (previous - start + 1) * attribute.itemSize,
+      );
+      start = current; previous = current;
+    }
+  }
+  attribute.needsUpdate = true;
+}
 function pointWithinCameraDepth(point, camera) {
   const viewPoint = point.clone().applyMatrix4(camera.matrixWorldInverse);
   const depth = -viewPoint.z;

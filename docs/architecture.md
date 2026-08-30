@@ -1,20 +1,20 @@
 # Current architecture
 
-Scene Engine 0.9 owns one deterministic publication and browser-projection boundary:
+Scene Engine 0.13 owns one deterministic publication and browser-projection boundary:
 
 ```text
 mutable product World
   -> EngineProgram at exactly 60 Hz
   -> ProductCheckpoint / ProductCommit
-  -> scene-engine-wire@2 exact packet bytes
+  -> scene-engine-wire@3 exact packet bytes
   -> recorder + sessions
-  -> SceneEngineClient 0.10
+  -> SceneEngineClient 0.12
        -> immutable WorldState + cumulative ACK + O(1) DisplaySummary
-       -> DisplayRuntime 0.8 AuthorityPort
+       -> DisplayRuntime 0.11 AuthorityPort
             -> one NodeIndex / one NodeGraph / one Component scheduler / one RAF
             -> one private flat Prefab materialization ledger
             -> RenderSystem
-                 -> flat ThreeRenderBackend 0.11.0 bindings
+                 -> flat ThreeRenderBackend 0.12.0 bindings
 ```
 
 The boundary is renderer-isolated: product code and Arts definitions use Display contracts, while only the browser composition
@@ -30,7 +30,7 @@ root imports the Three backend. The current Display API is browser-oriented and 
 | Node names, parent graph, local Transform and Prefab instances | DisplayRuntime | `AuthorityPort` plus read-only views |
 | Scene, Prefab, Resource, Component and state-schema catalog | DisplayRuntime composition | immutable definitions and registries |
 | renderer bindings, batching and GPU resources | Three backend | flat `RenderBackendPort` |
-| recorded bytes and Replay seek | packet-log@2 | exact Engine packets |
+| recorded bytes and Replay seek | packet-log@3 | exact Engine packets |
 
 There is no second mutable World, product Node tree, Transform cache, application RAF, ACK cursor, packet decoder or fallback
 renderer. The private Prefab materialization ledger records definition-instance provenance and owned ordinary Nodes/Components;
@@ -42,9 +42,13 @@ Python publishes only complete `py/` authority roots and later single-target mut
 existence, parent, local Transform, visibility, exact `prefabId` and complete authority state. It never publishes URLs, models,
 textures, materials, lights, cameras or Prefab-local paths.
 
+Checkpoint roots and structural parent names are validated in Python. Later mutation constructors trust the stable target
+string owned by the product instead of repeating path validation in the per-object hot path. The browser Client validates every
+decoded target before it opens the Display commit gate; an invalid trusted target therefore produces no ACK.
+
 Arts/product display code owns concrete Scene, Prefab, Resource and Component definitions. `PrefabDefinition.id` is the unique
 lookup key; `gameplayType` is non-unique state-contract metadata, so multiple Prefabs may share it. Prefab definition schema
-`scene-engine-prefab-definition@3` can compose exact child Prefab ids through fixed `prefabInstances` and bounded dynamic
+`scene-engine-prefab-definition@4` can compose exact child Prefab ids through fixed `prefabInstances` and bounded dynamic
 `prefabSlots`. The catalog compiler validates every fixed reference and every slot allowlist, including missing definitions and
 cycles, before the runtime installs any Scene.
 
@@ -123,3 +127,15 @@ targets are ordinary Components in the one runtime graph.
 The backend owns only renderer resources and flat `(nodeName, componentKey)` bindings. It never reconstructs a business tree or
 returns Three objects. Disposal stops scheduling, aborts pending work, unloads Scene and Prefab materializations, clears the
 private ledger, releases Components, resource leases and backend bindings, and is idempotent.
+
+Transform has one representation end to end: a column-major local Matrix4 carried as 64 little-endian binary32 bytes. Python
+owns those bytes as an opaque immutable payload and appends them to the binary Display attachment unchanged; it checks only
+their type and fixed length. Client decodes an owned Float32Array and is the first semantic gate: it canonicalizes negative zero
+and rejects nonfinite, non-affine, reflected or singular matrices before Authority opens. Display repeats that validation and
+owns one private Float32Array per Node. NodeGraph derives the sole world matrix with direct
+`parentWorld * localMatrix` multiplication into Float64Array storage. No layer owns a parallel TRS or decomposes the matrix
+during publication.
+
+Python `DisplayTransform` and the JavaScript `DisplayTransform` facade expose pure Matrix4 convenience operations. They never
+mutate a Node, bypass Authority, or cache position/rotation/scale beside the matrix. Python's raw byte owner is not implicitly
+repacked or semantically revalidated; browser-side helpers continue to return canonical accepted matrices.

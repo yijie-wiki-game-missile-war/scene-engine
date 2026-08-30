@@ -68,8 +68,9 @@ identity = DisplayCatalogIdentity.from_record(record)
 ```
 
 Checkpoint nodes are complete parent-first `py/` authority roots. Product code chooses stable names, exact registered
-`prefab_id`, transform mode, one local Transform, visibility and complete authority state. After checkpoint it publishes only
-single-target commands created through named constructors:
+`prefab_id`, transform mode, one opaque 64-byte little-endian binary32 local Matrix4, visibility and complete authority state.
+Python retains and publishes those matrix bytes unchanged; the browser Client is the first matrix-semantic acceptance gate.
+After checkpoint it publishes only single-target commands created through named constructors:
 
 ```python
 DisplayCommand.create_node(node)
@@ -84,11 +85,16 @@ DisplayCommand.remove(name)
 Generic `DisplayCommand(kind=..., **fields)` construction is intentionally unavailable. Engine owns `command_seq`,
 `source_tick`, stream/commit/revision and encoded bytes.
 
+Post-checkpoint mutation constructors trust their target `name` as a stable product-owned string and do not repeat canonical
+path or UTF-8 validation on every update. `DisplayNode` creation and structural parent names remain fully validated. The typed
+outbound encoder still enforces string encoding and byte bounds, while the JavaScript Client validates canonical `py/` syntax
+before opening the Display commit gate. A product that violates this trust emits a packet the Client rejects without ACK.
+
 ## Nested Prefab projection
 
-Nested Prefabs are entirely inside `@scene-engine/display@0.8.0` and Prefab definition schema
-`scene-engine-prefab-definition@3`. They do not change `scene-engine-wire@2`, `scene-engine-display-node@3`,
-`scene-engine-packet-log@2`, checkpoint records, Display commands or ACK cursors.
+Nested Prefabs are entirely inside `@scene-engine/display@0.11.0` and Prefab definition schema
+`scene-engine-prefab-definition@4`. They do not change `scene-engine-wire@3`, `scene-engine-display-node@5`,
+`scene-engine-packet-log@3`, checkpoint records, Display commands or ACK cursors.
 
 Python still creates and controls only the outer `py/` authority root. `set_state` sends one complete outer state. Display calls
 the registered synchronous resolvers, recursively derives fixed-child overrides and every dynamic slot's complete desired set,
@@ -113,7 +119,7 @@ A tick transaction is:
 3. call `step` and require `changed`;
 4. write proposed revision;
 5. call `build_commit` with the mutation's `commit_context`;
-6. validate World patch and every Display command;
+6. validate the World patch and every Display command shape/value, trusting each mutation target name;
 7. assign command sequence;
 8. encode/record once and publish shared immutable bytes;
 9. expose the committed counters.

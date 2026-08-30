@@ -15,6 +15,7 @@ import {
   defineScene,
   toDisplayCatalogIdentityRecord,
 } from '../../js/packages/display/src/index.js';
+import { IDENTITY_MATRIX } from './matrix4.mjs';
 
 export const COMMUNICATION_SCENE_ID = 'communication';
 export const COMMUNICATION_PREFAB_ID = 'communication/root';
@@ -24,12 +25,6 @@ export const COMMUNICATION_AUTHORITY_STATE_SCHEMAS = Object.freeze([Object.freez
   schemaId: 'communication.root.state@1',
   revision: 1,
 })]);
-
-const IDENTITY_TRANSFORM = Object.freeze({
-  position: Object.freeze([0, 0, 0]),
-  rotationXyzw: Object.freeze([0, 0, 0, 1]),
-  scale: Object.freeze([1, 1, 1]),
-});
 
 const RENDERER_PROFILE = Object.freeze({
   drawMode: 'requested',
@@ -60,7 +55,7 @@ export function communicationScene() {
     nodes: [{
       localName: 'camera',
       parentLocalName: null,
-      transform: IDENTITY_TRANSFORM,
+      transform: IDENTITY_MATRIX,
       components: [{
         key: 'camera',
         type: 'render.camera@1',

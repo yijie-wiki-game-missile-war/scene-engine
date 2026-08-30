@@ -256,10 +256,11 @@ function createSpriteHandle(asset, descriptor, initialProperties) {
       const batchTexture = texture.clone(); batchTexture.needsUpdate = true;
       const batchMaterial = material.clone(); batchMaterial.map = batchTexture;
       const batch = new THREE.InstancedMesh(batchGeometry, batchMaterial, count);
-      const setPanelAnchorAt = installInstancedPanelProjection(batch, batchMaterial, count);
+      const panelProjection = installInstancedPanelProjection(batch, batchMaterial, count);
       const local = new THREE.Matrix4().makeScale(properties.width, properties.height, 1).toArray();
       batch.renderOrder = properties.renderOrder;
-      return { object: batch, localMatrix: local, setPanelAnchorAt,
+      return { object: batch, localMatrix: local, setPanelAnchorAt: panelProjection.setAt,
+        panelAnchorAttribute: panelProjection.attribute,
         dispose() { batch.removeFromParent(); batchGeometry.dispose(); batchMaterial.dispose();
           batchTexture.dispose(); } };
     },

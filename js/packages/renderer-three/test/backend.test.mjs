@@ -14,6 +14,29 @@ import {
   patch,
 } from './support.mjs';
 
+test('new bindings own a complete identity world matrix before the first Display update', async () => {
+  const { backend, registry } = createHarness({ descriptors: INLINE_RESOURCES });
+  const camera = await backend.createBinding(descriptor('scene/camera', 'camera',
+    'render.camera@1', CAMERA_PROPERTIES, registry));
+  const properties = { meshResourceId: 'mesh/triangle', materialResourceId: 'material/standard',
+    castShadow: false, receiveShadow: false, renderOrder: 0, pickable: true };
+  const bindings = await Promise.all(['a', 'b'].map((name) => backend.createBinding(
+    descriptor(`py/${name}`, 'mesh', 'render.mesh@1', properties, registry),
+  )));
+  const identity = new THREE.Matrix4().toArray();
+  for (const binding of bindings) {
+    const worldMatrix = backend._records.get(binding).worldMatrix;
+    assert.equal(worldMatrix.length, 16);
+    assert.deepEqual(worldMatrix, identity);
+  }
+
+  backend.prepareFrame(frame(camera));
+  const instance = new THREE.Matrix4();
+  backend._batches[0].object.getMatrixAt(0, instance);
+  assert.deepEqual(instance.toArray(), identity);
+  backend.dispose();
+});
+
 test('real Three bindings are flat per node and consume Engine world matrices', async () => {
   const { backend, registry, renderer } = createHarness({ descriptors: INLINE_RESOURCES });
   const camera = await backend.createBinding(descriptor('scene/camera', 'camera',
@@ -38,7 +61,8 @@ test('real Three bindings are flat per node and consume Engine world matrices', 
   assert.equal(backend.diagnostics().batchCount, 1);
   assert.equal(backend.diagnostics().instanceCount, 2);
   const nodeRoot = backend._nodes.get('py/aircraft').object;
-  assert.strictEqual(nodeRoot.parent, backend._root);
+  assert.equal(nodeRoot.parent, null,
+    'a Node root with only batched representations is absent from Three scene traversal');
   assert.equal(nodeRoot.matrixAutoUpdate, false);
   assert.deepEqual(nodeRoot.matrix.toArray(), modelMatrix.toArray());
   assert.equal(backend._root.children.some((child) => child.name.includes('parent')), false);
@@ -332,6 +356,17 @@ test('sprite has no orientation path and static sprites batch with real Three ob
   backend.prepareFrame(frame(camera));
   assert.equal(backend.diagnostics().batchCount, 1);
   assert.equal(backend._records.get(first).handle.object.rotation.x, 0);
+  const batch = backend._batches[0];
+  assert.equal(batch.panelAnchorAttribute.usage, THREE.DynamicDrawUsage);
+  backend.updateBinding(first, {
+    ...patch('py/a', 'sprite', properties, new THREE.Matrix4().makeTranslation(1, 0, 0)),
+    panelAnchorWorld: [1, 0, 0],
+  });
+  backend.prepareFrame(frame(camera, 1));
+  assert.deepEqual(batch.panelAnchorAttribute.updateRanges, [{
+    start: 0,
+    count: batch.panelAnchorAttribute.array.length,
+  }]);
   await assert.rejects(() => backend.createBinding(descriptor('py/legacy', 'sprite',
     'render.sprite@3', { ...properties, orientation: 'billboard' }, registry)),
   /three-sprite-properties-invalid/u);

@@ -1,123 +1,76 @@
-import { tuple } from '../internal.js';
 import { fail } from '../runtime/health.js';
-import { composeMatrix4, copyMatrix4, inverseTransformDirectionMatrix4,
+import { copyMatrix4, inverseTransformDirectionMatrix4, matrix4Determinant3x3,
   multiplyMatrix4 } from './matrix4.js';
-import { multiplyQuaternion, normalizeQuaternion, rotateVector } from './quaternion.js';
 
-export const IDENTITY_TRANSFORM = Object.freeze({
-  position: Object.freeze([0, 0, 0]),
-  rotationXyzw: Object.freeze([0, 0, 0, 1]),
-  scale: Object.freeze([1, 1, 1]),
-});
+export const IDENTITY_TRANSFORM = Object.freeze([
+  1, 0, 0, 0,
+  0, 1, 0, 0,
+  0, 0, 1, 0,
+  0, 0, 0, 1,
+]);
 
-export function normalizeTransform(value = IDENTITY_TRANSFORM,
+function writeNormalizedTransform(value, matrix, code) {
+  if ((!Array.isArray(value) && !ArrayBuffer.isView(value)) || value.length !== 16) fail(code);
+  for (let index = 0; index < 16; index += 1) {
+    const entry = value[index];
+    if (typeof entry !== 'number' || !Number.isFinite(entry)) fail(code);
+    const normalized = Math.fround(entry);
+    if (!Number.isFinite(normalized)) fail(code);
+    matrix[index] = Object.is(normalized, -0) ? 0 : normalized;
+  }
+  if (matrix[3] !== 0 || matrix[7] !== 0 || matrix[11] !== 0 || matrix[15] !== 1) fail(code);
+  const determinant = matrix4Determinant3x3(matrix);
+  if (!Number.isFinite(determinant) || determinant <= 0) fail(code);
+  return matrix;
+}
+
+export function normalizeTransform(value,
   code = 'display-transform-invalid') {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) fail(code);
-  const keys = Object.keys(value).sort();
-  if (keys.length !== 3 || keys[0] !== 'position' || keys[1] !== 'rotationXyzw'
-      || keys[2] !== 'scale') fail(code);
-  const position = Object.freeze(tuple(value.position, 3, code));
-  const rotationXyzw = normalizeQuaternion(value.rotationXyzw, code);
-  const scale = tuple(value.scale, 3, code);
-  if (scale.some((entry) => entry <= 0)) fail(code);
-  return Object.freeze({ position, rotationXyzw, scale: Object.freeze(scale) });
+  return Object.freeze(writeNormalizedTransform(value, new Array(16), code));
+}
+
+export function createLocalTransform(value,
+  code = 'display-transform-invalid') {
+  return writeNormalizedTransform(value, new Float32Array(16), code);
 }
 
 export function createMutableWorldTransform() {
-  const result = {
-    position: [0, 0, 0],
-    rotationXyzw: [0, 0, 0, 1],
-    scale: [1, 1, 1],
-    matrix: new Float64Array(16),
-    localMatrixScratch: new Float64Array(16),
-  };
-  composeMatrix4(result, result.matrix);
-  return result;
-}
-
-export function copyTransform(source, out) {
-  for (let index = 0; index < 3; index += 1) {
-    out.position[index] = source.position[index];
-    out.scale[index] = source.scale[index];
-  }
-  for (let index = 0; index < 4; index += 1) {
-    out.rotationXyzw[index] = source.rotationXyzw[index];
-  }
-  if (out.matrix) composeMatrix4(out, out.matrix);
-  return out;
+  return new Float64Array(IDENTITY_TRANSFORM);
 }
 
 export function composeWorldTransform(parentWorld, local, out = createMutableWorldTransform()) {
-  if (parentWorld === null) return copyTransform(local, out);
-  const scaled = [
-    local.position[0] * parentWorld.scale[0],
-    local.position[1] * parentWorld.scale[1],
-    local.position[2] * parentWorld.scale[2],
-  ];
-  const rotated = rotateVector(parentWorld.rotationXyzw, scaled);
-  for (let index = 0; index < 3; index += 1) {
-    out.position[index] = parentWorld.position[index] + rotated[index];
-    out.scale[index] = parentWorld.scale[index] * local.scale[index];
+  const world = parentWorld === null
+    ? copyMatrix4(local, out) : multiplyMatrix4(parentWorld, local, out);
+  for (let index = 0; index < 16; index += 1) {
+    if (!Number.isFinite(world[index])) fail('display-transform-world-nonfinite');
   }
-  multiplyQuaternion(parentWorld.rotationXyzw, local.rotationXyzw, out.rotationXyzw);
-  const parentMatrix = parentWorld.matrix ?? composeMatrix4(parentWorld);
-  const localMatrix = composeMatrix4(local, out.localMatrixScratch ?? new Float64Array(16));
-  multiplyMatrix4(parentMatrix, localMatrix, out.matrix);
-  out.position[0] = out.matrix[12];
-  out.position[1] = out.matrix[13];
-  out.position[2] = out.matrix[14];
-  return out;
+  return world;
 }
 
 export function copyWorldTransform(source, out) {
-  for (let index = 0; index < 3; index += 1) {
-    out.position[index] = source.position[index];
-    out.scale[index] = source.scale[index];
-  }
-  for (let index = 0; index < 4; index += 1) {
-    out.rotationXyzw[index] = source.rotationXyzw[index];
-  }
-  copyMatrix4(source.matrix, out.matrix);
-  return out;
+  return copyMatrix4(source, out);
 }
 
 export function snapshotWorldTransform(world) {
-  return Object.freeze({
-    position: Object.freeze([...world.position]),
-    rotationXyzw: Object.freeze([...world.rotationXyzw]),
-    scale: Object.freeze([...world.scale]),
-    matrix: Object.freeze(Array.from(world.matrix)),
-  });
+  return Object.freeze(Array.from(world));
 }
 
 export function writeWorldTransform(world, out) {
-  if (!out?.position || !out?.rotationXyzw || !out?.scale
-      || out.position.length < 3 || out.rotationXyzw.length < 4 || out.scale.length < 3) {
+  const numericArray = Array.isArray(out)
+    || (ArrayBuffer.isView(out) && !(out instanceof DataView));
+  if (!numericArray || !Number.isSafeInteger(out.length) || out.length < 16
+      || Object.isFrozen(out) || typeof out[0] === 'bigint') {
     fail('display-transform-output-invalid');
   }
-  for (let index = 0; index < 3; index += 1) {
-    out.position[index] = world.position[index];
-    out.scale[index] = world.scale[index];
-  }
-  for (let index = 0; index < 4; index += 1) out.rotationXyzw[index] = world.rotationXyzw[index];
-  if (out.matrix) {
-    if (out.matrix.length < 16) fail('display-transform-output-invalid');
-    for (let index = 0; index < 16; index += 1) out.matrix[index] = world.matrix[index];
-  }
-  return out;
+  return copyMatrix4(world, out);
 }
 
 export function isIdentityTransform(transform) {
-  return transform.position.every((entry) => entry === 0)
-    && transform.rotationXyzw[0] === 0
-    && transform.rotationXyzw[1] === 0
-    && transform.rotationXyzw[2] === 0
-    && Math.abs(transform.rotationXyzw[3]) === 1
-    && transform.scale.every((entry) => entry === 1);
+  return transform.every((entry, index) => entry === IDENTITY_TRANSFORM[index]);
 }
 
 export function localDirectionForWorldFacing(parentWorld, direction, axisMode) {
   const desired = axisMode === 'y-axis' ? [direction[0], 0, direction[2]] : direction;
   return parentWorld === null
-    ? desired : inverseTransformDirectionMatrix4(parentWorld.matrix, desired);
+    ? desired : inverseTransformDirectionMatrix4(parentWorld, desired);
 }

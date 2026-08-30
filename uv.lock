@@ -79,7 +79,7 @@ wheels = [
 
 [[package]]
 name = "scene-engine"
-version = "0.9.0"
+version = "0.13.0"
 source = { editable = "." }
 
 [package.dev-dependencies]

@@ -41,12 +41,12 @@ Historical reviews, migration notes, and patch reports are context only. They do
 |---|---|---|
 | Gameplay rules and mutable product World | Product | `EngineProgram` callbacks |
 | Tick, revision, commits, commands and sessions | Python runtime | `SceneEngineRuntime` |
-| Packet layout and exact codec | Python runtime + JavaScript Client | `scene-engine-wire@2` |
+| Packet layout and exact codec | Python runtime + JavaScript Client | `scene-engine-wire@3` |
 | WorldState, ACK and observer scheduling | JavaScript Client | `SceneEngineClient` |
 | Node graph, local Transform and Prefab instances | Display | `DisplayRuntime` / `AuthorityPort` |
 | Scene, Prefab, Resource, Component and state-schema catalog | Display composition | immutable definitions and registries |
 | Renderer resources, bindings, batching and draw | Three backend | flat `RenderBackendPort` |
-| Recorded bytes, seek and Replay validation | recorder + Client | `scene-engine-packet-log@2` and the live Client path |
+| Recorded bytes, seek and Replay validation | recorder + Client | `scene-engine-packet-log@3` and the live Client path |
 | Rule-space matrix encoding and coordinate checks | transform codec | `scene-engine-transform@1` |
 
 Product gameplay, product World schemas, network frameworks, HTTP, UI, game assets, visual direction, and concrete product
@@ -58,7 +58,7 @@ Scene/Prefab/Resource definitions belong outside this repository. Integrate them
 mutable product World
   -> EngineProgram
   -> SceneEngineRuntime at exactly 60 Hz
-  -> scene-engine-wire@2 exact packet bytes
+  -> scene-engine-wire@3 exact packet bytes
   -> SceneEngineClient
   -> DisplayRuntime AuthorityPort
   -> RenderSystem

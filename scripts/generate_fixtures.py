@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regenerate the frozen cross-language Scene Engine wire/display @2 fixtures."""
+"""Regenerate the frozen cross-language Scene Engine wire@3/display@5 fixtures."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import argparse
 import json
 import shutil
 import struct
+import subprocess
 import sys
 from pathlib import Path
 
@@ -40,7 +41,11 @@ from scene_engine.wire import (  # noqa: E402
 
 STREAM = "00000000-0000-4000-8000-000000000001"
 WORLD_CODEC = "example-world@1"
-CATALOG = DisplayCatalogIdentity("a" * 64, "b" * 64, "c" * 64)
+CATALOG_IDENTITY_FIELDS = {
+    "scene_catalog_hash",
+    "prefab_catalog_hash",
+    "state_schema_hash",
+}
 
 
 def canonical(value) -> bytes:
@@ -63,10 +68,68 @@ def reset(path: Path) -> None:
 
 
 def transform(x: float) -> DisplayTransform:
-    return DisplayTransform(
-        position=(x, 0.0, 0.0),
-        rotation_xyzw=(0.0, 0.0, 0.0, 1.0),
-        scale=(1.0, 1.0, 1.0),
+    return DisplayTransform.from_matrix((
+        1.0, 0.0, 0.0, 0.0,
+        0.25, 1.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        x, 0.0, 0.0, 1.0,
+    ))
+
+
+def catalog_identity_fixture() -> tuple[Path, bytes, DisplayCatalogIdentity]:
+    """Validate the authored manifest and derive identity with production JS."""
+
+    catalog_root = ROOT / "fixtures" / "display-catalog-v2"
+    manifest_path = catalog_root / "manifest.json"
+    identity_module = (
+        ROOT / "js" / "packages" / "display" / "src" / "catalog" / "identity.js"
+    )
+    script = """
+import { readFile } from 'node:fs/promises';
+const {
+  computeDisplayCatalogIdentity,
+  defineDisplayCatalogManifest,
+  toDisplayCatalogIdentityRecord,
+} = await import(process.argv[2]);
+
+const manifest = JSON.parse(await readFile(process.argv[3], 'utf8'));
+const normalized = defineDisplayCatalogManifest(manifest);
+const identity = computeDisplayCatalogIdentity(normalized);
+process.stdout.write(JSON.stringify(toDisplayCatalogIdentityRecord(identity)));
+"""
+    result = subprocess.run(
+        [
+            "node",
+            "--input-type=module",
+            "-",
+            identity_module.as_uri(),
+            str(manifest_path),
+        ],
+        cwd=ROOT,
+        input=script,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            "Display catalog manifest validation failed:\n"
+            f"{result.stderr.strip()}"
+        )
+    identity = json.loads(result.stdout)
+    if set(identity) != CATALOG_IDENTITY_FIELDS or any(
+        not isinstance(value, str) or len(value) != 64
+        for value in identity.values()
+    ):
+        raise RuntimeError("Display catalog identity generator returned an invalid record")
+    rendered = (
+        json.dumps(identity, ensure_ascii=False, allow_nan=False, indent=2).encode("utf-8")
+        + b"\n"
+    )
+    return (
+        catalog_root / "identity.json",
+        rendered,
+        DisplayCatalogIdentity.from_record(identity),
     )
 
 
@@ -75,7 +138,7 @@ def node(
     *,
     x: float = 0.0,
     parent_name: str | None = None,
-    prefab_id: str = "flight.aircraft",
+    prefab_id: str = "unit.basic",
     visible: bool = True,
     state: dict | None = None,
 ) -> DisplayNode:
@@ -98,10 +161,11 @@ def main() -> None:
         help="leave the packaged JavaScript packet-log fixture untouched",
     )
     args = parser.parse_args()
-    wire_root = ROOT / "fixtures" / "wire-v2"
-    display_root = ROOT / "fixtures" / "display-v2"
+    catalog_identity_path, catalog_identity_bytes, catalog = catalog_identity_fixture()
+    wire_root = ROOT / "fixtures" / "wire-v3"
+    display_root = ROOT / "fixtures" / "display-v5"
     tree_root = ROOT / "fixtures" / "json-tree-v1"
-    package_wire_root = ROOT / "js" / "packages" / "client" / "fixtures" / "wire-v2"
+    package_wire_root = ROOT / "js" / "packages" / "client" / "fixtures" / "wire-v3"
     package_log = ROOT / "js" / "packages" / "client" / "fixtures" / "packet-log"
     targets = [wire_root, display_root, tree_root]
     if not args.python_only:
@@ -109,27 +173,28 @@ def main() -> None:
         targets.append(package_log)
     for target in targets:
         reset(target)
+    catalog_identity_path.write_bytes(catalog_identity_bytes)
 
     initial_nodes = (
-        node("py/root", prefab_id="world.anchor"),
+        node("py/root"),
         node("py/aircraft", parent_name="py/root"),
     )
     display_checkpoint = encode_display_checkpoint(
         scene_name="main",
-        catalog=CATALOG,
+        catalog=catalog,
         last_command_seq=0,
         nodes=initial_nodes,
     )
     commands = (
         DisplayCommand.create_node(
-            node("py/transient", parent_name="py/root", prefab_id="effects.marker")
+            node("py/transient", parent_name="py/root")
         ),
         DisplayCommand.set_transform("py/aircraft", transform(1.5)),
         DisplayCommand.set_parent("py/aircraft", "py/root"),
         DisplayCommand.set_visible("py/aircraft", False),
         DisplayCommand.set_state("py/aircraft", {"animation": "moving"}),
         DisplayCommand.replace_prefab(
-            "py/aircraft", "flight.aircraft-damaged", {"animation": "damaged"}
+            "py/aircraft", "unit.basic", {"animation": "damaged"}
         ),
         DisplayCommand.remove("py/transient"),
     )
@@ -207,19 +272,18 @@ def main() -> None:
         display_commands=display_input,
     )
     final_nodes = (
-        node("py/root", prefab_id="world.anchor"),
+        node("py/root"),
         node(
             "py/aircraft",
             x=1.5,
             parent_name="py/root",
-            prefab_id="flight.aircraft-damaged",
             visible=False,
             state={"animation": "damaged"},
         ),
     )
     final_display_checkpoint = encode_display_checkpoint(
         scene_name="main",
-        catalog=CATALOG,
+        catalog=catalog,
         last_command_seq=final_cursor,
         nodes=final_nodes,
     )
@@ -272,11 +336,15 @@ def main() -> None:
         (wire_root / name).write_bytes(data)
         if not args.python_only:
             (package_wire_root / name).write_bytes(data)
+    display_checkpoint_record = display_checkpoint.to_record()
+    display_tick_record = display_tick.to_record()
+    display_input_record = display_input.to_record()
+    final_display_checkpoint_record = final_display_checkpoint.to_record()
     for name, data in {
-        "checkpoint.json": display_checkpoint,
-        "command-tick.json": display_tick,
-        "command-input-empty.json": display_input,
-        "periodic-checkpoint.json": final_display_checkpoint,
+        "checkpoint.json": display_checkpoint_record,
+        "command-tick.json": display_tick_record,
+        "command-input-empty.json": display_input_record,
+        "periodic-checkpoint.json": final_display_checkpoint_record,
     }.items():
         (display_root / name).write_bytes(canonical(data))
     (tree_root / "snapshot.json").write_bytes(canonical(snapshot))
@@ -293,21 +361,21 @@ def main() -> None:
     for name, data in malformed.items():
         (wire_root / name).write_bytes(data)
     (wire_root / "malformed-manifest.json").write_bytes(
-        canonical({"schema": "scene-engine-malformed-corpus@2", "files": sorted(malformed)})
+        canonical({"schema": "scene-engine-malformed-corpus@3", "files": sorted(malformed)})
     )
     malformed_display = {
         "command-sequence-gap.json": {
-            **display_tick,
+            **display_tick_record,
             "commands": [
-                {**display_tick["commands"][0], "command_seq": 2},
-                *display_tick["commands"][1:],
+                {**display_tick_record["commands"][0], "command_seq": 2},
+                *display_tick_record["commands"][1:],
             ],
         },
         "command-source-tick.json": {
-            **display_tick,
+            **display_tick_record,
             "commands": [
-                {**display_tick["commands"][0], "source_tick": 2},
-                *display_tick["commands"][1:],
+                {**display_tick_record["commands"][0], "source_tick": 2},
+                *display_tick_record["commands"][1:],
             ],
         },
     }

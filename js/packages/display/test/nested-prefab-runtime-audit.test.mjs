@@ -9,7 +9,7 @@ import {
   createResourceRegistry,
   definePrefab,
 } from '../src/index.js';
-import { IDENTITY, commitAuthority, createHarness } from './helpers.mjs';
+import { IDENTITY, commitAuthority, createHarness, matrixTransform } from './helpers.mjs';
 
 class CandidateIsolationProbe extends BehaviourComponent {
   static typeId = 'audit.candidate-isolation@1';
@@ -418,21 +418,19 @@ test('a newly attached nested fixed billboard sees the transaction final retaine
       name: ownerName,
       state: {
         show: true,
-        mountTransform: {
+        mountTransform: matrixTransform({
           position: [0, 0, 0],
           rotationXyzw: [0, halfSqrt, 0, halfSqrt],
           scale: [1, 1, 1],
-        },
+        }),
       },
     }), { sourceTickDelta: 1 });
 
     const world = runtime.currentView().getWorldTransform(
       'prefab/py/final-parent-pose/children/only',
     );
-    assert.ok(Math.abs(world.rotationXyzw[0]) < 1e-12);
-    assert.ok(Math.abs(world.rotationXyzw[1]) < 1e-12);
-    assert.ok(Math.abs(world.rotationXyzw[2]) < 1e-12);
-    assert.ok(Math.abs(Math.abs(world.rotationXyzw[3]) - 1) < 1e-12);
+    for (const index of [1, 2, 4, 6, 8, 9]) assert.ok(Math.abs(world[index]) < 1e-6);
+    for (const index of [0, 5, 10, 15]) assert.ok(Math.abs(world[index] - 1) < 1e-6);
   });
 
 test('bulk dynamic removal visits the flat materialization ledger only linearly', async (t) => {
@@ -1024,17 +1022,17 @@ test('a second sibling attach failure preserves every retained live baseline', a
     componentProperties: stateComponent.properties,
     cursor: runtime.summary().cursor,
     indexEntries: new Map([...runtime._nodeIndex.values()].map((node) => [node.name, node])),
-    localTransform: mount.localTransform,
+    localTransform: mount._localTransform,
     nodeCount: runtime._nodeIndex.size,
     records: scope.records,
     scopeState: scope.state,
   };
   CandidateRollbackProbe.constructed = new Set();
-  const changedTransform = {
+  const changedTransform = matrixTransform({
     position: [9, 8, 7],
     rotationXyzw: [0, 0, 0, 1],
     scale: [2, 2, 2],
-  };
+  });
   const cursor = nextCursor(runtime);
   runtime.commitGate.begin(cursor);
   let caught = null;
@@ -1056,7 +1054,7 @@ test('a second sibling attach failure preserves every retained live baseline', a
   assert.strictEqual(authority.state, baseline.authorityState);
   assert.strictEqual(scope.state, baseline.scopeState);
   assert.strictEqual(scope.records, baseline.records);
-  assert.strictEqual(mount.localTransform, baseline.localTransform);
+  assert.strictEqual(mount._localTransform, baseline.localTransform);
   assert.equal(mount.visibleSelf, true);
   assert.strictEqual(stateComponent.properties, baseline.componentProperties);
   assert.equal(runtime._nodeIndex.size, baseline.nodeCount);
@@ -1161,7 +1159,7 @@ test('multiple removed siblings regain exact order and identity after a later pa
       authorityState: authority.state,
       componentProperties: stateComponent.properties,
       cursor: runtime.summary().cursor,
-      localTransform: mount.localTransform,
+      localTransform: mount._localTransform,
       nodeCount: runtime._nodeIndex.size,
       records: scope.records,
       scopeState: scope.state,
@@ -1173,11 +1171,11 @@ test('multiple removed siblings regain exact order and identity after a later pa
       originalPropertiesChanged(component);
       if (component === stateComponent && component.properties.value === 99) throw failure;
     };
-    const changedTransform = {
+    const changedTransform = matrixTransform({
       position: [6, 5, 4],
       rotationXyzw: [0, 0, 0, 1],
       scale: [3, 3, 3],
-    };
+    });
     const cursor = nextCursor(runtime);
     runtime.commitGate.begin(cursor);
     let caught = null;
@@ -1211,7 +1209,7 @@ test('multiple removed siblings regain exact order and identity after a later pa
     assert.strictEqual(scope.records, baseline.records);
     assert.strictEqual(scope.state, baseline.scopeState);
     assert.strictEqual(authority.state, baseline.authorityState);
-    assert.deepEqual(mount.localTransform, baseline.localTransform);
+    assert.deepEqual(mount._localTransform, baseline.localTransform);
     assert.equal(mount.visibleSelf, true);
     assert.strictEqual(stateComponent.properties, baseline.componentProperties);
     assert.deepEqual(runtime.summary().cursor, baseline.cursor);

@@ -2,7 +2,7 @@ import { cloneAndFreeze, exactKeys, isPlainRecord, nonemptyString, safeInteger }
 import { fail } from '../runtime/health.js';
 import { compilePrefabCatalog } from '../resource/prefab-compiler.js';
 
-export const DISPLAY_CATALOG_MANIFEST_SCHEMA = 'scene-engine-display-catalog-manifest@1';
+export const DISPLAY_CATALOG_MANIFEST_SCHEMA = 'scene-engine-display-catalog-manifest@2';
 const SCENE_CATALOG_HASH_SCHEMA = 'scene-engine-scene-catalog-input@1';
 const PREFAB_CATALOG_HASH_SCHEMA = 'scene-engine-prefab-catalog-input@1';
 const STATE_SCHEMA_HASH_SCHEMA = 'scene-engine-state-schema-input@1';

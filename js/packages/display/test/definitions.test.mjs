@@ -10,7 +10,8 @@ import {
   definePrefab,
   defineScene,
 } from '../src/index.js';
-import { IDENTITY, RENDERER_PROFILE, emptyPrefab } from './helpers.mjs';
+import { IDENTITY, RENDERER_PROFILE, emptyPrefab,
+  matrixPosition, matrixTransform } from './helpers.mjs';
 import { assertNodeName } from '../src/node/node-name.js';
 import { compilePrefabCatalog } from '../src/resource/prefab-compiler.js';
 
@@ -67,16 +68,29 @@ test('Scene compile is closed and validates active Camera and resource reference
     prefabRegistry: prefabs }), { code: 'display-resource-missing' });
   assert.throws(() => defineScene({ ...invalid.describe(), unknown: true }),
     { code: 'display-scene-definition-invalid' });
+  assert.throws(() => defineScene({
+    ...invalid.describe(), schema: 'scene-engine-scene-definition@1',
+  }), { code: 'display-scene-definition-invalid' });
 });
 
 test('Prefab compile rejects non-identity root, duplicate local paths, and unknown fields', () => {
   const components = createComponentRegistry(); const resources = createResourceRegistry();
   const movedRoot = definePrefab({
     schema: PREFAB_DEFINITION_SCHEMA, id: 'bad', gameplayType: 'bad',
-    root: { transform: { ...IDENTITY, position: [1, 0, 0] }, components: [], children: [] },
+    root: { transform: matrixTransform({ position: [1, 0, 0] }), components: [], children: [] },
   });
   assert.throws(() => movedRoot.compile({ componentRegistry: components, resourceRegistry: resources }),
     { code: 'display-prefab-root-transform-invalid' });
+  for (const transform of [null, {
+    position: [0, 0, 0], rotationXyzw: [0, 0, 0, 1], scale: [1, 1, 1],
+  }]) {
+    const legacy = definePrefab({
+      schema: PREFAB_DEFINITION_SCHEMA, id: 'legacy', gameplayType: 'legacy',
+      root: { transform, components: [], children: [] },
+    });
+    assert.throws(() => legacy.compile({ componentRegistry: components,
+      resourceRegistry: resources }), { code: 'display-transform-invalid' });
+  }
   const duplicate = definePrefab({
     schema: PREFAB_DEFINITION_SCHEMA, id: 'duplicate', gameplayType: 'duplicate',
     root: { components: [], children: [
@@ -88,10 +102,10 @@ test('Prefab compile rejects non-identity root, duplicate local paths, and unkno
     { code: 'display-prefab-local-name-duplicate' });
 });
 
-test('Prefab schema 3 fails closed on schema 2 and normalizes fixed and dynamic declarations', () => {
-  assert.equal(PREFAB_DEFINITION_SCHEMA, 'scene-engine-prefab-definition@3');
+test('Prefab schema 4 fails closed on schema 3 and normalizes fixed and dynamic declarations', () => {
+  assert.equal(PREFAB_DEFINITION_SCHEMA, 'scene-engine-prefab-definition@4');
   assert.throws(() => definePrefab({
-    schema: 'scene-engine-prefab-definition@2',
+    schema: 'scene-engine-prefab-definition@3',
     id: 'nested/legacy',
     gameplayType: 'nested.legacy',
     root: { components: [], children: [] },
@@ -105,7 +119,7 @@ test('Prefab schema 3 fails closed on schema 2 and normalizes fixed and dynamic 
     childName: 'mount',
     prefabInstances: [{
       key: 'leaf', parentLocalPath: 'mount', prefabId: leaf.id,
-      transform: { ...IDENTITY, position: [2, 0, 0] }, visible: false, state: { value: 3 },
+      transform: matrixTransform({ position: [2, 0, 0] }), visible: false, state: { value: 3 },
     }],
   });
   const outer = nestingPrefab({
@@ -213,7 +227,7 @@ test('Prefab patch normalization produces complete fixed baselines and sorted sl
     id: 'nested/state-owner',
     prefabInstances: [{
       key: 'fixed', parentLocalPath: null, prefabId: leafA.id,
-      transform: { ...IDENTITY, position: [3, 0, 0] }, visible: false,
+      transform: matrixTransform({ position: [3, 0, 0] }), visible: false,
       state: { baseline: true },
     }],
     prefabSlots: [{
@@ -226,7 +240,7 @@ test('Prefab patch normalization produces complete fixed baselines and sorted sl
     prefabRegistry: registry });
   const baseline = owner.validatePatch({}, compiled);
   assert.equal(baseline.prefabInstances.length, 1);
-  assert.deepEqual(baseline.prefabInstances[0].transform.position, [3, 0, 0]);
+  assert.deepEqual(matrixPosition(baseline.prefabInstances[0].transform), [3, 0, 0]);
   assert.equal(baseline.prefabInstances[0].visible, false);
   assert.deepEqual(baseline.prefabInstances[0].state, { baseline: true });
   assert.deepEqual(baseline.prefabSlots, []);
@@ -235,7 +249,7 @@ test('Prefab patch normalization produces complete fixed baselines and sorted sl
     prefabInstances: { fixed: { visible: true, state: { baseline: false } } },
     prefabSlots: { units: {
       zed: { prefabId: leafB.id, state: { value: 2 } },
-      alpha: { prefabId: leafA.id, transform: { ...IDENTITY, position: [1, 0, 0] } },
+      alpha: { prefabId: leafA.id, transform: matrixTransform({ position: [1, 0, 0] }) },
     } },
   }, compiled);
   assert.equal(Object.isFrozen(desired.prefabInstances), true);
@@ -244,7 +258,7 @@ test('Prefab patch normalization produces complete fixed baselines and sorted sl
     ['units/alpha', 'units/zed']);
   assert.strictEqual(desired.prefabSlots[0].compiledPrefab,
     compiled.prefabSlots[0].allowedPrefabs[0].compiledPrefab);
-  assert.deepEqual(desired.prefabInstances[0].transform.position, [3, 0, 0]);
+  assert.deepEqual(matrixPosition(desired.prefabInstances[0].transform), [3, 0, 0]);
 
   assert.throws(() => owner.validatePatch({ prefabInstances: { missing: {} } }, compiled),
     { code: 'display-prefab-patch-target-missing' });

@@ -4,12 +4,7 @@ import test from 'node:test';
 import { Node } from '../src/node/node.js';
 import { NodeGraph } from '../src/node/node-graph.js';
 import { NodeIndex } from '../src/node/node-index.js';
-
-const IDENTITY = Object.freeze({
-  position: Object.freeze([0, 0, 0]),
-  rotationXyzw: Object.freeze([0, 0, 0, 1]),
-  scale: Object.freeze([1, 1, 1]),
-});
+import { IDENTITY, matrixPosition, matrixTransform } from './helpers.mjs';
 
 function createNode(token, name, transform = IDENTITY) {
   return new Node({ name, sceneToken: token, transform });
@@ -20,7 +15,7 @@ function createForestHarness() {
   const index = new NodeIndex();
   const graph = new NodeGraph({ nodeIndex: index });
   const nodes = {
-    root: createNode(token, 'sys/scene-root', { ...IDENTITY, position: [10, 0, 0] }),
+    root: createNode(token, 'sys/scene-root', matrixTransform({ position: [10, 0, 0] })),
     alpha: createNode(token, 'scene/main/alpha'),
     alphaLeaf: createNode(token, 'scene/main/alpha-leaf'),
     middle: createNode(token, 'scene/main/middle'),
@@ -86,7 +81,7 @@ test('restoreForest restores exact sibling order, ancestry, and pending dirty be
     onWorldTransform(node) { transformed.push(node.name); },
     onVisibility(node) { visibility.push(node.name); },
   });
-  nodes.alpha.setLocalTransform({ ...IDENTITY, position: [3, 0, 0] });
+  nodes.alpha.setLocalTransform(matrixTransform({ position: [3, 0, 0] }));
   nodes.bravo.setVisible(false);
   const originalOrder = nodes.root.children;
   const forest = [nodes.alpha, nodes.alphaLeaf, nodes.bravo, nodes.bravoLeaf];
@@ -105,7 +100,7 @@ test('restoreForest restores exact sibling order, ancestry, and pending dirty be
   for (const node of forest) assert.strictEqual(node._graph, graph);
 
   graph.flushWorldTransforms();
-  assert.deepEqual(nodes.alpha.worldTransform.position, [13, 0, 0]);
+  assert.deepEqual(matrixPosition(nodes.alpha.worldTransform), [13, 0, 0]);
   assert.equal(nodes.bravo.visibleInHierarchy, false);
   assert.equal(nodes.bravoLeaf.visibleInHierarchy, false);
   assert.deepEqual(transformed, [nodes.alpha.name, nodes.alphaLeaf.name]);

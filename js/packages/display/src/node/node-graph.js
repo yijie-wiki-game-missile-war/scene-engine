@@ -186,11 +186,9 @@ export class NodeGraph {
   }
 
   flushWorldTransforms() {
-    const roots = [...this._transformDirtyRoots];
-    this._transformDirtyRoots.clear();
+    const roots = this._takeDirtyRoots(this._transformDirtyRoots);
     for (const root of roots) this._flushTransformSubtree(root);
-    const visibilityRoots = [...this._visibilityDirtyRoots];
-    this._visibilityDirtyRoots.clear();
+    const visibilityRoots = this._takeDirtyRoots(this._visibilityDirtyRoots);
     for (const root of visibilityRoots) this._flushVisibilitySubtree(root);
     return Object.freeze({ transformCount: roots.length, visibilityCount: visibilityRoots.length });
   }
@@ -247,8 +245,23 @@ export class NodeGraph {
     for (let current = node.parent; current !== null; current = current.parent) {
       if (set.has(current)) return;
     }
-    for (const candidate of set) if (this._isAncestor(node, candidate)) set.delete(candidate);
     set.add(node);
+  }
+
+  _takeDirtyRoots(set) {
+    const roots = [];
+    for (const candidate of set) {
+      let covered = false;
+      for (let current = candidate.parent; current !== null; current = current.parent) {
+        if (set.has(current)) {
+          covered = true;
+          break;
+        }
+      }
+      if (!covered) roots.push(candidate);
+    }
+    set.clear();
+    return roots;
   }
 
   _requireRegistered(node) {

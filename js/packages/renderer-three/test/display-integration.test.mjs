@@ -13,8 +13,9 @@ import {
 import { ThreeRenderBackend } from '../src/backend.js';
 import { DEFAULT_THREE_IMPLEMENTATION } from '../src/resources.js';
 import { INLINE_RESOURCES, PROFILE, TestRenderer } from './support.mjs';
+import { IDENTITY_MATRIX } from '../../../../scripts/support/matrix4.mjs';
 
-const IDENTITY = Object.freeze({ position: [0, 0, 0], rotationXyzw: [0, 0, 0, 1], scale: [1, 1, 1] });
+const IDENTITY = IDENTITY_MATRIX;
 
 test('Display RenderSystem drives the exact backend port and rebuilds from declarative bindings', async () => {
   const resources = createResourceRegistry(INLINE_RESOURCES);

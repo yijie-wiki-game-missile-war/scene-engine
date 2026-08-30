@@ -3,35 +3,22 @@ export type JSONValue = JSONPrimitive | readonly JSONValue[] | { readonly [key: 
 export type JSONRecord = { readonly [key: string]: JSONValue };
 export type ByteSource = ArrayBuffer | ArrayBufferView;
 export type Vec3 = readonly [number, number, number];
-export type QuaternionXyzw = readonly [number, number, number, number];
 export type Matrix4 = readonly [
   number, number, number, number,
   number, number, number, number,
   number, number, number, number,
   number, number, number, number,
 ];
-
-export interface DisplayTransform {
-  readonly position: Vec3;
-  readonly rotationXyzw: QuaternionXyzw;
-  readonly scale: Vec3;
-}
-
-export interface WorldTransform extends DisplayTransform {
-  readonly matrix: Matrix4;
-}
+export type Matrix4Input = Matrix4 | Float32Array;
+export type DisplayTransform = Matrix4;
+export type WorldTransform = Matrix4;
 
 export interface MutableNumericArray {
   readonly length: number;
   [index: number]: number;
 }
 
-export interface WorldTransformOutput {
-  readonly position: MutableNumericArray;
-  readonly rotationXyzw: MutableNumericArray;
-  readonly scale: MutableNumericArray;
-  readonly matrix?: MutableNumericArray;
-}
+export type WorldTransformOutput = MutableNumericArray;
 
 export interface EngineLimits {
   readonly maximumPacketBytes: number;
@@ -130,14 +117,15 @@ export interface AuthorityNodeRecord {
   readonly parentName: string | null;
   readonly prefabId: string;
   readonly transformMode: 'initial' | 'live';
-  readonly transform: DisplayTransform;
+  /** Client supplies an owned Float32Array; the wider input type matches Display Authority. */
+  readonly transform: Matrix4Input;
   readonly visible: boolean;
   readonly state: JSONRecord;
 }
 
 export interface DisplayAuthorityPort {
   createNode(command: AuthorityNodeRecord): string;
-  setNodeTransform(command: { readonly name: string; readonly transform: DisplayTransform }): undefined;
+  setNodeTransform(command: { readonly name: string; readonly transform: Matrix4Input }): undefined;
   setNodeParent(command: { readonly name: string; readonly parentName: string | null }): undefined;
   setNodeVisible(command: { readonly name: string; readonly visible: boolean }): undefined;
   setNodeState(command: { readonly name: string; readonly state: JSONRecord }): undefined;

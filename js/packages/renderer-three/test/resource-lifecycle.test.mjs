@@ -119,7 +119,7 @@ test('ImageBitmap textures are decoded in Three UV orientation exactly once',
     }
   });
 
-test('pending create honors AbortSignal and cannot attach a late resource', async () => {
+test('pending creates sharing an AbortSignal all cancel and cannot attach a late resource', async () => {
   let resolveLoad; let disposedAsset = 0;
   const asset = { kind: 'model', descriptor: { id: 'model/slow', kind: 'model' },
     template: new THREE.Group(), templates: [new THREE.Group()] };
@@ -131,19 +131,79 @@ test('pending create honors AbortSignal and cannot attach a late resource', asyn
   const originalDispose = backend._implementation.disposeResource;
   backend._resources.disposeAsset = (value) => { disposedAsset += 1; originalDispose(value); };
   const controller = new AbortController();
-  const pending = backend.createBinding(descriptor('py/late', 'model', 'render.model@2', {
-    modelResourceId: 'model/slow', materialOverrides: {}, castShadow: false,
-    receiveShadow: false, renderOrder: 0, pickable: false,
-  }, registry, controller.signal));
+  const pending = Array.from({ length: 4 }, (_, index) => backend.createBinding(descriptor(
+    `py/late-${index}`, 'model', 'render.model@2', {
+      modelResourceId: 'model/slow', materialOverrides: {}, castShadow: false,
+      receiveShadow: false, renderOrder: 0, pickable: false,
+    }, registry, controller.signal,
+  )));
   await Promise.resolve();
   controller.abort();
   resolveLoad(asset);
-  await assert.rejects(pending, /aborted/u);
+  for (const operation of pending) await assert.rejects(operation, /aborted/u);
   await backend.whenIdle();
   assert.equal(backend.diagnostics().bindingCount, 0);
   assert.equal(backend.diagnostics().resourceLeaseCount, 0);
+  assert.equal(backend._recordSignalHubs.size, 0);
   assert.equal(disposedAsset, 1);
   backend.dispose();
+});
+
+test('bindings sharing an AbortSignal use one native listener and unlink it after the last record', async () => {
+  const { backend, registry } = createHarness({ descriptors: INLINE_RESOURCES });
+  const controller = new AbortController();
+  const signal = controller.signal;
+  const addEventListener = signal.addEventListener.bind(signal);
+  const removeEventListener = signal.removeEventListener.bind(signal);
+  let additions = 0; let removals = 0;
+  signal.addEventListener = (...arguments_) => {
+    additions += 1;
+    return addEventListener(...arguments_);
+  };
+  signal.removeEventListener = (...arguments_) => {
+    removals += 1;
+    return removeEventListener(...arguments_);
+  };
+  const bindings = await Promise.all(Array.from({ length: 4 }, (_, index) =>
+    backend.createBinding(descriptor(`scene/camera-${index}`, 'camera',
+      'render.camera@1', CAMERA_PROPERTIES, registry, signal))));
+
+  assert.equal(additions, 1);
+  assert.equal(backend._recordSignalHubs.get(signal).controllers.size, bindings.length);
+  for (const binding of bindings) backend.destroyBinding(binding);
+  assert.equal(removals, 1);
+  assert.equal(backend._recordSignalHubs.has(signal), false);
+  backend.dispose();
+});
+
+test('backend disposal clears one shared AbortSignal listener exactly once', async () => {
+  const { backend, registry } = createHarness({ descriptors: INLINE_RESOURCES });
+  const controller = new AbortController();
+  const signal = controller.signal;
+  const addEventListener = signal.addEventListener.bind(signal);
+  const removeEventListener = signal.removeEventListener.bind(signal);
+  let additions = 0; let removals = 0;
+  signal.addEventListener = (...arguments_) => {
+    additions += 1;
+    return addEventListener(...arguments_);
+  };
+  signal.removeEventListener = (...arguments_) => {
+    removals += 1;
+    return removeEventListener(...arguments_);
+  };
+  const bindings = await Promise.all(Array.from({ length: 4 }, (_, index) =>
+    backend.createBinding(descriptor(`scene/dispose-camera-${index}`, 'camera',
+      'render.camera@1', CAMERA_PROPERTIES, registry, signal))));
+  const recordControllers = bindings.map((binding) => backend._records.get(binding).controller);
+
+  assert.equal(additions, 1);
+  backend.dispose();
+
+  assert.equal(removals, 1);
+  assert.equal(backend._recordSignalHubs.size, 0);
+  assert.equal(recordControllers.every((recordController) => recordController.signal.aborted), true);
+  backend.dispose();
+  assert.equal(removals, 1);
 });
 
 test('backend disposal aborts an unscoped pending create and late work cannot reattach', async () => {

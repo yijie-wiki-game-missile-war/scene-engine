@@ -32,16 +32,17 @@
       defineScene,
     } from '/js/packages/display/src/index.js';
     import { createThreeRenderBackend } from '/js/packages/renderer-three/src/index.js';
+    import {
+      IDENTITY_MATRIX,
+      composeMatrix4,
+      matrix4AlmostEqual,
+    } from '/scripts/support/matrix4.mjs';
 
     const params = new URLSearchParams(location.search);
     const bindingCount = positiveInteger(params.get('bindings') ?? '500', 'bindings');
     const ticks = positiveInteger(params.get('ticks') ?? '60', 'ticks');
     const updateRatio = boundedRatio(params.get('updateRatio') ?? '0.01');
-    const identity = Object.freeze({
-      position: Object.freeze([0, 0, 0]),
-      rotationXyzw: Object.freeze([0, 0, 0, 1]),
-      scale: Object.freeze([1, 1, 1]),
-    });
+    const identity = IDENTITY_MATRIX;
     const profile = Object.freeze({
       drawMode: 'requested',
       maximumPixelRatio: 1,
@@ -120,10 +121,7 @@
         activeCameraLocalName: 'camera',
         nodes: [{
           localName: 'camera', parentLocalName: null,
-          transform: {
-            position: [0, 0, Math.max(50, Math.sqrt(bindingCount) * 1.2)],
-            rotationXyzw: [0, 0, 0, 1], scale: [1, 1, 1],
-          },
+          transform: composeMatrix4([0, 0, Math.max(50, Math.sqrt(bindingCount) * 1.2)]),
           components: [{
             key: 'camera', type: 'render.camera@1',
             properties: { projection: 'perspective', fovYDegrees: 55, near: 0.1, far: 100_000 },
@@ -250,7 +248,7 @@
       };
       const correct = Object.values(checks).every(Boolean);
       publish({
-        schema: 'scene-engine-browser-display-scale@1',
+        schema: 'scene-engine-browser-display-scale@2',
         status: correct ? 'READY' : 'NOT READY',
         parameters: { bindingCount, ticks, updateRatio, updatesPerTick },
         environment: { userAgent: navigator.userAgent, gpu },
@@ -280,7 +278,7 @@
         }
       }
       publish({
-        schema: 'scene-engine-browser-display-scale@1',
+        schema: 'scene-engine-browser-display-scale@2',
         status: 'NOT READY',
         error: String(error?.stack ?? error),
         cleanup,
@@ -291,12 +289,12 @@
     function nodeName(index) { return `py/item-${String(index).padStart(6, '0')}`; }
     function transform(index, tick, columns) {
       const angle = ((tick + index) % 360) * Math.PI / 180;
-      return {
-        position: [(index % columns) - columns / 2 + (tick % 7) / 32,
+      return composeMatrix4(
+        [(index % columns) - columns / 2 + (tick % 7) / 32,
           Math.floor(index / columns) - columns / 2, 0],
-        rotationXyzw: [0, 0, Math.sin(angle / 2), Math.cos(angle / 2)],
-        scale: [1 + (tick % 3) * 0.05, 1 + (index % 5) * 0.02, 1],
-      };
+        [0, 0, Math.sin(angle / 2), Math.cos(angle / 2)],
+        [1 + (tick % 3) * 0.05, 1 + (index % 5) * 0.02, 1],
+      );
     }
     function positiveInteger(value, name) {
       const parsed = Number(value);
@@ -311,8 +309,7 @@
       return parsed;
     }
     function sameTransform(left, right) {
-      return ['position', 'rotationXyzw', 'scale'].every((field) => left[field].length === right[field].length
-        && left[field].every((value, index) => Math.abs(value - right[field][index]) <= 1e-12));
+      return matrix4AlmostEqual(left, right);
     }
     function percentile(sorted, ratio) {
       return sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * ratio) - 1))];

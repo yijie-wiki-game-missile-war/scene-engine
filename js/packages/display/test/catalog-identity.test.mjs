@@ -19,7 +19,7 @@ import {
   toDisplayCatalogIdentityRecord,
 } from '../src/index.js';
 
-const fixtureDirectory = new URL('../../../../fixtures/display-catalog-v1/', import.meta.url);
+const fixtureDirectory = new URL('../../../../fixtures/display-catalog-v2/', import.meta.url);
 const manifest = JSON.parse(fs.readFileSync(new URL('manifest.json', fixtureDirectory), 'utf8'));
 const expectedRecord = JSON.parse(fs.readFileSync(new URL('identity.json', fixtureDirectory), 'utf8'));
 const expected = Object.freeze({
@@ -39,6 +39,9 @@ test('catalog identity matches the checked-in Display build artifact', () => {
   assert.deepEqual(computeDisplayCatalogIdentity(manifest), expected);
   assert.deepEqual(toDisplayCatalogIdentityRecord(expected), expectedRecord);
   assert.equal(Object.isFrozen(defineDisplayCatalogManifest(manifest)), true);
+  assert.throws(() => defineDisplayCatalogManifest({
+    ...manifest, schema: 'scene-engine-display-catalog-manifest@1',
+  }), { code: 'display-catalog-manifest-schema-invalid' });
 });
 
 test('checked-in Display catalog definitions compile through the public registries', () => {

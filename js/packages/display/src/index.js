@@ -5,6 +5,7 @@ export {
   createDisplayRuntime,
 } from './runtime/display-runtime.js';
 export { TICKS_PER_SECOND } from './constants.js';
+export { DisplayTransform } from './math/display-transform.js';
 export {
   DISPLAY_CATALOG_MANIFEST_SCHEMA,
   buildDisplayCatalogManifest,

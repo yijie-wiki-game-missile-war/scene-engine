@@ -21,10 +21,11 @@ Python 测试由 `uv run python -m pytest -q` 按 `pyproject.toml` 的 `tests/` 
 | 测试项目 | 覆盖范围 |
 | --- | --- |
 | [`test_runtime.py`](../../tests/test_runtime.py) | 固定 60 Hz、tick 与 input 事务、commit/command cursor、会话幂等与隔离、checkpoint 缓存和全局保留、recorder 接入、fatal 边界、验证顺序与单次编码。 |
-| [`test_wire_v2.py`](../../tests/test_wire_v2.py) | Wire v2 packet 与 attachment 布局、golden bytes、非法 corpus、大小与深度限制、安全整数、Display cursor 对齐、旧版本和旧布局拒绝。 |
-| [`test_display.py`](../../tests/test_display.py) | Python Display checkpoint、目录身份、parent-first baseline、单目标命令、严格序列、空 command seal、不可变编码、封闭字段和完整 state replacement。 |
+| [`test_wire_v3.py`](../../tests/test_wire_v3.py) | Wire v3 packet、raw binary32 matrix Display attachment 布局、golden bytes、非法 corpus、大小与深度限制、安全整数、Display cursor 对齐、旧版本和旧布局拒绝。 |
+| [`test_display.py`](../../tests/test_display.py) | Python Display checkpoint、目录身份、parent-first baseline、受信任 mutation target 热路径、decoded-record 名称校验、单目标命令、严格序列、空 command seal、不可变编码、封闭字段、完整 state replacement、任意 64-byte Matrix4 位模式原样持有，以及 Matrix4 便利构造、self/parent 操作和点/向量转换。 |
+| [`test_display_binary.py`](../../tests/test_display_binary.py) | SDCP/SDCS v2 binary32 4x4 matrix 原样直传、受信任 outbound target 与 binary decode 名称校验、全部 opcode、跨 header cursor/tick seal、层级索引、state JSON、negative-zero/非有限/反射/奇异位模式保留与结构失败关闭。 |
 | [`test_json_tree_v1.py`](../../tests/test_json_tree_v1.py) | JSON Tree set/unset/append、写入前完整验证、canonical path 顺序、数值与危险键限制、容量边界和数组原始索引语义。 |
-| [`test_recording_v2.py`](../../tests/test_recording_v2.py) | packet-log 精确 packet bytes、command cursor 索引、INCOMPLETE/seal 生命周期、stream progression、周期 checkpoint anchor 和损坏记录拒绝。 |
+| [`test_recording_v3.py`](../../tests/test_recording_v3.py) | packet-log 精确 packet bytes、command cursor 索引、INCOMPLETE/seal 生命周期、stream progression、周期 checkpoint anchor 和损坏记录拒绝。 |
 | [`test_catalog_identity.py`](../../tests/test_catalog_identity.py) | Python 加载 JavaScript 构建的 Display catalog identity，严格校验封闭字段和小写 SHA-256。 |
 | [`test_import_surface.py`](../../tests/test_import_surface.py) | Python 根包公开导出、版本和当前模块集合，防止旧模块或额外 API 回流。 |
 | [`test_python_js_communication_e2e.py`](../../tests/test_python_js_communication_e2e.py) | 32 roots checkpoint、多次 transform commit、exact Wire/ACK bytes、长度帧本地 Node 子进程、canonical JavaScript catalog identity、Client/Display cursor、最终 World 与 Transform digest；另以小规模 windowed CLI smoke 检查 in-flight/pending 峰值和最终归零。 |
@@ -35,8 +36,9 @@ Python 测试由 `uv run python -m pytest -q` 按 `pyproject.toml` 的 `tests/` 
 
 | 测试项目 | 覆盖范围 |
 | --- | --- |
-| [`client.test.mjs`](../../js/packages/client/test/client.test.mjs) | 精确公共导出、Python Wire fixtures、WorldState、checkpoint/session 原子替换、commit gate、ACK、observer、显式 DisplayView、input、JSON patch 和失败关闭。 |
-| [`client-display-failure.test.mjs`](../../js/packages/client/test/client-display-failure.test.mjs) | Client 与真实 DisplayRuntime 组合后的同步屏障、异步清理拒绝观察、部分显示提交失败、terminal 状态和无 ACK 保证。 |
+| [`client.test.mjs`](../../js/packages/client/test/client.test.mjs) | 精确公共导出与版本、Python Wire fixtures 逐字节同源、shear Matrix4 所有权、WorldState、checkpoint/session 原子替换、commit gate、ACK、observer、显式 DisplayView、input、JSON patch 和失败关闭。 |
+| [`display-binary.test.mjs`](../../js/packages/client/test/display-binary.test.mjs) | 与 Python 一致的 SDCP/SDCS v2 matrix binary codec、全部 opcode、float32 Matrix4 直解码、owned buffer 及损坏 header、层级、矩阵、长度和 trailing bytes 拒绝。 |
+| [`client-display-failure.test.mjs`](../../js/packages/client/test/client-display-failure.test.mjs) | Canonical Wire fixture 与 canonical Display catalog 的真实安装/提交、Client 与真实 DisplayRuntime 的同步屏障、异步清理拒绝观察、部分命令或 world 溢出提交失败、terminal 状态和无 ACK 保证。 |
 | [`packet-log.test.mjs`](../../js/packages/client/test/packet-log.test.mjs) | packet-log 字段与 cursor 校验、通过唯一 Authority 路径 Replay、seek 新建 session、损坏记录和旧 manifest 拒绝。 |
 
 ## JavaScript Display
@@ -46,12 +48,13 @@ Python 测试由 `uv run python -m pytest -q` 按 `pyproject.toml` 的 `tests/` 
 | 测试项目 | 覆盖范围 |
 | --- | --- |
 | [`public.test.mjs`](../../js/packages/display/test/public.test.mjs) | Display 根包精确公开导出和内部 Authority mutation 类型隔离。 |
-| [`node-core.test.mjs`](../../js/packages/display/test/node-core.test.mjs) | Node 名称语法、Transform 规范化与组合、NodeIndex、NodeGraph、最大深度、Billboard 和 LookAt。 |
+| [`display-transform.test.mjs`](../../js/packages/display/test/display-transform.test.mjs) | 公共不可变 Matrix4 便利 API、float32 canonicalization、self/parent 乘法次序、shear 保留、点/向量及完整 affine inverse。 |
+| [`node-core.test.mjs`](../../js/packages/display/test/node-core.test.mjs) | Node 名称语法、float32 Matrix4 规范化、真实 NodeGraph `parentWorld*local`、shear、派生 world 溢出拒绝、NodeIndex、dirty-root 合并、最大深度、Billboard 和 LookAt。 |
 | [`node-graph-forest-audit.test.mjs`](../../js/packages/display/test/node-graph-forest-audit.test.mjs) | forest detach/restore 的封闭性、兄弟顺序、身份、dirty 状态和失败前零写入。 |
 | [`definitions.test.mjs`](../../js/packages/display/test/definitions.test.mjs) | Scene、Prefab、Resource 与 built-in Component 的封闭定义、注册、引用、嵌套依赖、深度/规模边界和 exact `prefabId`。 |
 | [`catalog-identity.test.mjs`](../../js/packages/display/test/catalog-identity.test.mjs) | canonical manifest、构建 artifact、SHA-256、注册顺序独立性、hash domain 隔离和 authority-state schema coverage。 |
 | [`component.test.mjs`](../../js/packages/display/test/component.test.mjs) | Component 同步生命周期、只读能力、scheduler 快照、final 方法、transform driver 唯一性和资源校验后的原子属性替换。 |
-| [`runtime.test.mjs`](../../js/packages/display/test/runtime.test.mjs) | Authority commit gate、Scene 安装、完整候选验证、Prefab replacement、RenderSystem binding、summary/currentView、health、backend rebuild 和 dispose。 |
+| [`runtime.test.mjs`](../../js/packages/display/test/runtime.test.mjs) | Authority commit gate 与 Transform 原子性、world 溢出时 seal 前拒绝且 cursor 不前进、Scene 安装、完整候选验证、Prefab replacement、RenderSystem binding、Sprite anchor 失效、summary/currentView、health、backend rebuild 和批量 scene dispose。 |
 | [`nested-prefab.test.mjs`](../../js/packages/display/test/nested-prefab.test.mjs) | 固定与动态嵌套 Prefab 展开、0..N diff、same-key/id 身份保留、失败零变更、递归释放和静态 Scene 初始化。 |
 | [`nested-prefab-runtime-audit.test.mjs`](../../js/packages/display/test/nested-prefab-runtime-audit.test.mjs) | 深度边界、路径冲突、事务最终候选可见性、attach 失败、NodeIndex 注册失败、复杂 rollback 和兄弟顺序恢复。 |
 | [`nested-prefab-scale.test.mjs`](../../js/packages/display/test/nested-prefab-scale.test.mjs) | 640 个动态子实例下基于 ledger identity 的 reconcile，以及大候选 staging/adoption 失败后的完整回滚。 |
@@ -65,13 +68,13 @@ Python 测试由 `uv run python -m pytest -q` 按 `pyproject.toml` 的 `tests/` 
 | 测试项目 | 覆盖范围 |
 | --- | --- |
 | [`public.test.mjs`](../../js/packages/renderer-three/test/public.test.mjs) | renderer-three 精确公开 API、扁平 RenderBackendPort 和 Three 对象隔离。 |
-| [`backend.test.mjs`](../../js/packages/renderer-three/test/backend.test.mjs) | 扁平 binding、world matrix、pick/project、相机与灯光、panel compensation、资源替换、sprite batching、surface 和 particle 视觉采样。 |
-| [`resource-lifecycle.test.mjs`](../../js/packages/renderer-three/test/resource-lifecycle.test.mjs) | pending load 去重与取消、资源依赖回收、mesh/texture/model 处理、health envelope、GLTF 部分失败、destroy/recreate 和 backend replacement 释放。 |
-| [`batch-representation.test.mjs`](../../js/packages/renderer-three/test/batch-representation.test.mjs) | ordinary object 与 InstancedMesh 唯一表示、可见性、矩阵更新、batch 重建、资源替换、pick、capture 和 diagnostics 计数。 |
+| [`backend.test.mjs`](../../js/packages/renderer-three/test/backend.test.mjs) | 扁平 binding、首次更新前的完整 identity world matrix、world matrix、pick/project、相机与灯光、panel compensation、资源替换、sprite batching、surface 和 particle 视觉采样。 |
+| [`resource-lifecycle.test.mjs`](../../js/packages/renderer-three/test/resource-lifecycle.test.mjs) | pending load 去重与共享 AbortSignal 扇出取消、资源依赖回收、mesh/texture/model 处理、health envelope、GLTF 部分失败、destroy/recreate 和 backend replacement 释放。 |
+| [`batch-representation.test.mjs`](../../js/packages/renderer-three/test/batch-representation.test.mjs) | ordinary object 与 InstancedMesh 唯一表示、scene traversal 排除、dirty matrix update range、保守 batch bounds、microtask Node root 与多 batch-group 批量回收、可见性、batch 重建、资源替换、pick、capture 和 diagnostics 计数。 |
 | [`animation-port.test.mjs`](../../js/packages/renderer-three/test/animation-port.test.mjs) | 旧 renderer animation 字段拒绝、Animation Resource 不加载、animated sprite 退出静态 batch、frame 更新不 rebatch 和 eligibility transition。 |
 | [`display-integration.test.mjs`](../../js/packages/renderer-three/test/display-integration.test.mjs) | Display RenderSystem 驱动精确 Three backend port，并从声明式 binding 重建。 |
 | [`acceptance.test.mjs`](../../js/packages/renderer-three/test/acceptance.test.mjs) | 500 个真实 Three bindings 的 batching、frame sampling、backend rebuild、dispose 和最终零 resource lease。 |
-| [`display-runtime-foundation.test.mjs`](../../js/packages/renderer-three/test/display-runtime-foundation.test.mjs) | 从 DisplayRuntime 到真实 Three backend 的整体基础测试：mesh/sprite/model/surface/particle、固定与动态嵌套 Prefab、Authority 增删/reparent、位置/旋转/缩放、visibility、完整 state、Display-local sprite animation、backend rebuild 和零所有权释放。 |
+| [`display-runtime-foundation.test.mjs`](../../js/packages/renderer-three/test/display-runtime-foundation.test.mjs) | 从 DisplayRuntime 到真实 Three backend 的整体基础测试：mesh/sprite/model/surface/particle、固定与动态嵌套 Prefab、Authority 增删/reparent、Matrix4、visibility、完整 state、Display-local sprite animation、backend rebuild 和零所有权释放。 |
 | [`display-runtime-scale.test.mjs`](../../js/packages/renderer-three/test/display-runtime-scale.test.mjs) | 调用 scale runner 的 12-binding deterministic smoke，检查结构、cursor、计时报告形状、backend rebuild、健康和完整 dispose；不执行大规模时间门槛。 |
 
 ## 显示引擎功能与性能
@@ -132,14 +135,17 @@ catalog builder 分别是
 [`python_js_communication_peer.mjs`](../../scripts/support/python_js_communication_peer.mjs) 和
 [`communication_catalog.mjs`](../../scripts/support/communication_catalog.mjs)：
 
+Benchmark World 直接持有每个 root 的 `DisplayTransform`；step 只为本次实际更新的 root 生成一次 64-byte matrix，
+checkpoint/commit 与最终 digest 都复用同一个 matrix owner，不把 position → Matrix4 重构时间混入 publication build。
+
 ```bash
 uv run python scripts/benchmark_python_js_communication.py --roots 10000 --commits 200 --update-ratio 0.01 --profile roundtrip
 uv run python scripts/benchmark_python_js_communication.py --roots 10000 --commits 200 --update-ratio 0.01 --profile windowed
 ```
 
-报告包含 Python tick-to-ACK 与 length-frame-to-ACK 的 p50/p95/p99/max、bytes/s、commands/s、commits/s、pending/in-flight
-峰值与最终归零，以及 catalog、packet bytes、cursor、World 和 Display Transform 的正确性检查。时间字段先观测，不设
-跨机器硬阈值。
+报告包含 Python tick-to-transport、tick-to-ACK 与 length-frame-to-ACK 的 p50/p95/p99/max、bytes/s、commands/s、
+commits/s、pending/in-flight 峰值与最终归零，以及 catalog、packet bytes、cursor、World 和 Display Transform 的正确性
+检查。时间字段先观测，不设跨机器硬阈值。
 `roundtrip` profile 逐包发送并读取 ACK；`windowed` profile 用于观察饱和窗口吞吐和排队，因此其延迟也包含生产端及
 ACK 读取队列等待，不能解释为孤立的 Wire/Client 处理时间。
 
@@ -157,6 +163,7 @@ renderer-three 的公开 `.d.ts` 可以直接组合，并验证 Authority 与 Sc
 
 ## Fixtures 与测试支持代码
 
-`fixtures/`、各 package 的 `fixtures/`、`support.mjs` 和 `helpers.mjs` 为上述测试提供 canonical 输入或测试环境，
-不单独构成测试项目。只有被全量命令实际消费的 fixture 才构成自动化覆盖；例如当前
+`scripts/generate_fixtures.py` 是跨语言 Wire/Display/packet-log fixture 的唯一生成源；Client package 的
+`generate-fixtures.mjs` 只委托给该入口。`fixtures/`、各 package 的 `fixtures/`、`support.mjs` 和 `helpers.mjs` 为上述
+测试提供 canonical 输入或测试环境，不单独构成测试项目。只有被全量命令实际消费的 fixture 才构成自动化覆盖；例如当前
 `fixtures/transform-v1/rule-matrix.canonical-vectors.json` 尚未被 Python 或 JavaScript 测试引用。

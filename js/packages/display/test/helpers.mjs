@@ -11,11 +11,33 @@ import {
 } from '../src/index.js';
 import { createFakeRenderBackend } from '../src/testing/fake-render-backend.js';
 
-export const IDENTITY = Object.freeze({
-  position: Object.freeze([0, 0, 0]),
-  rotationXyzw: Object.freeze([0, 0, 0, 1]),
-  scale: Object.freeze([1, 1, 1]),
-});
+export function matrixTransform({
+  position = [0, 0, 0],
+  rotationXyzw = [0, 0, 0, 1],
+  scale = [1, 1, 1],
+} = {}) {
+  let [x, y, z, w] = rotationXyzw;
+  const quaternionLength = Math.hypot(x, y, z, w);
+  x /= quaternionLength; y /= quaternionLength; z /= quaternionLength; w /= quaternionLength;
+  const [sx, sy, sz] = scale;
+  const x2 = x + x; const y2 = y + y; const z2 = z + z;
+  const xx = x * x2; const xy = x * y2; const xz = x * z2;
+  const yy = y * y2; const yz = y * z2; const zz = z * z2;
+  const wx = w * x2; const wy = w * y2; const wz = w * z2;
+  return Object.freeze([
+    (1 - (yy + zz)) * sx, (xy + wz) * sx, (xz - wy) * sx, 0,
+    (xy - wz) * sy, (1 - (xx + zz)) * sy, (yz + wx) * sy, 0,
+    (xz + wy) * sz, (yz - wx) * sz, (1 - (xx + yy)) * sz, 0,
+    position[0], position[1], position[2], 1,
+  ].map((value) => {
+    const result = Math.fround(value);
+    return Object.is(result, -0) ? 0 : result;
+  }));
+}
+
+export const IDENTITY = matrixTransform();
+
+export function matrixPosition(matrix) { return matrix.slice(12, 15); }
 
 export const RENDERER_PROFILE = Object.freeze({
   drawMode: 'requested',

@@ -11,7 +11,8 @@ import {
   definePrefab,
 } from '../src/index.js';
 import { createFakeRenderBackend } from '../src/testing/fake-render-backend.js';
-import { IDENTITY, commitAuthority, createHarness, emptyPrefab } from './helpers.mjs';
+import { IDENTITY, commitAuthority, createHarness, emptyPrefab,
+  matrixPosition, matrixTransform } from './helpers.mjs';
 
 function createCommand(name, prefabId = 'target.test.item', parentName = null, transformMode = 'live') {
   return { name, parentName, prefabId, transformMode, transform: IDENTITY, visible: true, state: {} };
@@ -47,9 +48,69 @@ test('Authority create uses one Node graph and initial mode rejects later transf
   assert.equal(runtime.currentView().getNode('prefab/py/initial/body').parentName, 'py/initial');
   assert.equal(runtime.currentView().getAuthorityOwner('prefab/py/initial/body'), 'py/initial');
   expectAuthorityFailure(runtime, () => runtime.authority.setNodeTransform({
-    name: 'py/initial', transform: { ...IDENTITY, position: [1, 0, 0] },
+    name: 'py/initial', transform: matrixTransform({ position: [1, 0, 0] }),
   }), 'display-authority-transform-initial');
-  assert.deepEqual(runtime.currentView().getNode('py/initial').localTransform.position, [0, 0, 0]);
+  assert.deepEqual(matrixPosition(runtime.currentView().getNode('py/initial').localTransform), [0, 0, 0]);
+});
+
+test('Authority transform preserves validation order before mutation', async (t) => {
+  const { runtime } = await createHarness(); t.after(() => runtime.dispose());
+  commitAuthority(runtime, () => {
+    runtime.authority.createNode(createCommand('py/live'));
+    runtime.authority.createNode(createCommand('py/initial', 'target.test.item', null, 'initial'));
+  }, { sourceTickDelta: 1, commandCount: 2 });
+
+  expectAuthorityFailure(runtime, () => runtime.authority.setNodeTransform({
+    name: 'py/initial', transform: matrixTransform({ scale: [1, 0, 1] }),
+  }), 'display-authority-transform-initial');
+  assert.deepEqual(runtime.currentView().getNode('py/initial').localTransform, IDENTITY);
+});
+
+test('invalid live Authority transform leaves the Node and revision unchanged', async (t) => {
+  const { runtime } = await createHarness(); t.after(() => runtime.dispose());
+  commitAuthority(runtime, () => runtime.authority.createNode(createCommand('py/live')), {
+    sourceTickDelta: 1,
+  });
+  const before = runtime.summary();
+
+  expectAuthorityFailure(runtime, () => runtime.authority.setNodeTransform({
+    name: 'py/live', transform: {
+      position: [0, 0, 0], rotationXyzw: [0, 0, 0, 1], scale: [1, 1, 1],
+    },
+  }), 'display-transform-invalid');
+  assert.deepEqual(runtime.currentView().getNode('py/live').localTransform, IDENTITY);
+  assert.equal(runtime.summary().revision, before.revision);
+});
+
+test('derived world overflow fails seal before the ACK cursor advances', async (t) => {
+  const { runtime } = await createHarness(); t.after(() => runtime.dispose());
+  const localScale = matrixTransform({ scale: [1000, 1000, 1000] });
+  commitAuthority(runtime, () => {
+    let parentName = null;
+    for (let index = 0; index < 101; index += 1) {
+      const name = `py/deep-${index}`;
+      runtime.authority.createNode({
+        ...createCommand(name, 'target.test.item', parentName),
+        transform: localScale,
+      });
+      parentName = name;
+    }
+  }, { sourceTickDelta: 1, commandCount: 101 });
+
+  const acknowledged = runtime.summary().cursor;
+  const cursor = nextCursor(runtime);
+  runtime.commitGate.begin(cursor);
+  runtime.authority.setNodeTransform({
+    name: 'py/deep-0',
+    transform: matrixTransform({ scale: [1e10, 1e10, 1e10] }),
+  });
+  let error = null;
+  try { runtime.commitGate.seal(cursor); } catch (caught) { error = caught; }
+  assert.equal(error?.code, 'display-transform-world-nonfinite');
+  assert.deepEqual(runtime.summary().cursor, acknowledged);
+  runtime.commitGate.fail(error);
+  assert.deepEqual(runtime.summary().cursor, acknowledged);
+  assert.equal(runtime.summary().health, 'projection-invalid');
 });
 
 test('activated Authority rejects every mutation outside the active commit gate', async (t) => {
@@ -957,15 +1018,15 @@ test('fixed panels send the same Node world matrix to the backend before and aft
   const { runtime, frames, fakeBackends } = await createHarness({
     prefabEntries: [prefab], resources: [{ id: 'texture/card', kind: 'texture', url: './card.png' }],
     bootstrapAuthority(authority) {
-      authority.createNode({ ...createCommand('py/card'), transform: {
+      authority.createNode({ ...createCommand('py/card'), transform: matrixTransform({
         position: [4, 2, -3], rotationXyzw: [0, Math.SQRT1_2, 0, Math.SQRT1_2], scale: [3, 1, 1],
-      } });
+      }) });
     },
   });
   t.after(() => runtime.dispose());
   runtime.start(); await runtime.whenReady(); frames.step();
   const name = 'prefab/py/card/body';
-  const expected = Array.from(runtime.currentView().getWorldTransform(name).matrix);
+  const expected = Array.from(runtime.currentView().getWorldTransform(name));
   for (const [offset, axis] of [[4, [0, 1, 0]], [8, [0, 0, 1]]]) {
     const values = expected.slice(offset, offset + 3); const length = Math.hypot(...values);
     values.forEach((value, index) => assert.ok(Math.abs(value / length - axis[index]) < 1e-12));
@@ -988,10 +1049,10 @@ test('sprite projection uses its fixed ancestor footpoint across authority moves
   const prefab = definePrefab({
     schema: PREFAB_DEFINITION_SCHEMA, id: 'target.test.item', gameplayType: 'test.item',
     root: { components: [], children: [
-      { localName: 'body', transform: { ...IDENTITY, position: [1, 0, 0] },
+      { localName: 'body', transform: matrixTransform({ position: [1, 0, 0] }),
         components: [{ key: 'facing', type: 'behavior.billboard@2',
           properties: { mode: 'continuous', axisMode: 'y-axis' } }],
-        children: [{ localName: 'card', transform: { ...IDENTITY, position: [0.6, 1.2, 0] },
+        children: [{ localName: 'card', transform: matrixTransform({ position: [0.6, 1.2, 0] }),
           components: [sprite], children: [] }] },
       { localName: 'ground', components: [sprite], children: [] },
     ] },
@@ -999,9 +1060,9 @@ test('sprite projection uses its fixed ancestor footpoint across authority moves
   const { runtime, frames, fakeBackends } = await createHarness({
     prefabEntries: [prefab], resources: [{ id: 'texture/card', kind: 'texture', url: './card.png' }],
     bootstrapAuthority(authority) {
-      authority.createNode({ ...createCommand('py/card'), transform: {
+      authority.createNode({ ...createCommand('py/card'), transform: matrixTransform({
         position: [4, 2, -3], rotationXyzw: [0, Math.SQRT1_2, 0, Math.SQRT1_2], scale: [2, 2, 2],
-      } });
+      }) });
     },
   });
   t.after(() => runtime.dispose());
@@ -1012,21 +1073,144 @@ test('sprite projection uses its fixed ancestor footpoint across authority moves
     const card = bindings.get(JSON.stringify(['prefab/py/card/body/card', 'sprite']));
     const foot = view.getWorldTransform('prefab/py/card/body');
     const center = view.getWorldTransform('prefab/py/card/body/card');
-    assert.deepEqual(card.patch.panelAnchorWorld, Array.from(foot.position));
-    assert.notDeepEqual(card.patch.panelAnchorWorld, Array.from(center.position));
-    assert.deepEqual(Array.from(card.patch.worldMatrix), Array.from(center.matrix));
+    assert.deepEqual(card.patch.panelAnchorWorld, matrixPosition(foot));
+    assert.notDeepEqual(card.patch.panelAnchorWorld, matrixPosition(center));
+    assert.deepEqual(Array.from(card.patch.worldMatrix), Array.from(center));
     assert.equal(bindings.get(JSON.stringify(['prefab/py/card/ground', 'sprite'])).patch.panelAnchorWorld, null);
     return card.patch.panelAnchorWorld;
   };
   const initial = assertProjection();
   commitAuthority(runtime, () => runtime.authority.setNodeTransform({
-    name: 'py/card', transform: { ...IDENTITY, position: [9, 2, -3] },
+    name: 'py/card', transform: matrixTransform({ position: [9, 2, -3] }),
   }), { sourceTickDelta: 1 });
   frames.step();
   const moved = assertProjection();
   assert.notDeepEqual(initial, moved);
   await runtime.rebuildRenderBackend(); await runtime.whenReady(); frames.step();
   assert.deepEqual(assertProjection(), moved);
+});
+
+test('sprite panel anchors invalidate only from their nearest Billboard source', async (t) => {
+  const spriteProperties = { textureResourceId: 'texture/card', width: 2, height: 3 };
+  const prefab = definePrefab({
+    schema: PREFAB_DEFINITION_SCHEMA,
+    id: 'target.test.item',
+    gameplayType: 'test.item',
+    root: { components: [], children: [{
+      localName: 'outer',
+      transform: matrixTransform({ position: [5, 0, 0] }),
+      components: [
+        { key: 'outer-facing', type: 'behavior.billboard@2', properties: {
+          mode: 'initialize', axisMode: 'full', facing: 'fixed',
+        } },
+        { key: 'outer-sprite', type: 'render.sprite@3', properties: spriteProperties },
+      ],
+      children: [{
+        localName: 'inner',
+        transform: matrixTransform({ position: [2, 0, 0] }),
+        components: [
+          { key: 'inner-facing', type: 'behavior.billboard@2', properties: {
+            mode: 'initialize', axisMode: 'full', facing: 'fixed',
+          } },
+          { key: 'inner-sprite', type: 'render.sprite@3', properties: spriteProperties },
+        ],
+        children: [],
+      }],
+    }] },
+  });
+  const { runtime, frames, fakeBackends, componentRegistry, resourceRegistry } = await createHarness({
+    prefabEntries: [prefab],
+    resources: [{ id: 'texture/card', kind: 'texture', url: './card.png' }],
+    bootstrapAuthority(authority) {
+      authority.createNode(createCommand('py/panel'));
+    },
+  });
+  t.after(() => runtime.dispose());
+  runtime.start(); await runtime.whenReady(); frames.step();
+
+  const fake = fakeBackends[0];
+  const outerName = 'prefab/py/panel/outer';
+  const innerName = 'prefab/py/panel/outer/inner';
+  const outer = runtime._nodeIndex.require(outerName);
+  const inner = runtime._nodeIndex.require(innerName);
+  const binding = (nodeName, componentKey) => fake.bindings.get(
+    JSON.stringify([nodeName, componentKey]),
+  );
+  const outerBinding = () => binding(outerName, 'outer-sprite');
+  const innerBinding = () => binding(innerName, 'inner-sprite');
+  assert.deepEqual(outerBinding().patch.panelAnchorWorld, [5, 0, 0]);
+  assert.deepEqual(innerBinding().patch.panelAnchorWorld, [7, 0, 0]);
+
+  // A clean requested frame must not rediscover anchors by scanning every Sprite.
+  const originalGetComponent = outer.getComponent;
+  let cleanAnchorLookups = 0;
+  outer.getComponent = function (...arguments_) {
+    cleanAnchorLookups += 1;
+    return originalGetComponent.apply(this, arguments_);
+  };
+  commitAuthority(runtime, () => {}, { sourceTickDelta: 1, commandCount: 0 });
+  frames.step();
+  outer.getComponent = originalGetComponent;
+  assert.equal(cleanAnchorLookups, 0);
+
+  const applyAndRender = (operation) => {
+    const callIndex = fake.calls.length;
+    operation();
+    assert.equal(frames.pending, 1);
+    frames.step();
+    return fake.calls.slice(callIndex)
+      .filter(([kind]) => kind === 'update')
+      .map(([, nodeName, componentKey]) => [nodeName, componentKey]);
+  };
+  const outerFacing = outer.requireComponent('outer-facing');
+  const innerFacing = inner.requireComponent('inner-facing');
+
+  assert.deepEqual(applyAndRender(() => outerFacing.setEnabled(false)), [
+    [outerName, 'outer-sprite'],
+  ]);
+  assert.equal(outerBinding().patch.panelAnchorWorld, null);
+  assert.deepEqual(innerBinding().patch.panelAnchorWorld, [7, 0, 0]);
+
+  assert.deepEqual(applyAndRender(() => outerFacing.setEnabled(true)), [
+    [outerName, 'outer-sprite'],
+  ]);
+  assert.deepEqual(outerBinding().patch.panelAnchorWorld, [5, 0, 0]);
+
+  assert.deepEqual(applyAndRender(() => componentRegistry.patchComponentProperties({
+    component: outerFacing,
+    patch: { facing: 'camera', cameraName: 'scene/main/camera' },
+    resourceRegistry,
+  })), [[outerName, 'outer-sprite']]);
+  assert.equal(outerBinding().patch.panelAnchorWorld, null);
+  assert.deepEqual(innerBinding().patch.panelAnchorWorld, [7, 0, 0]);
+
+  assert.deepEqual(applyAndRender(() => componentRegistry.patchComponentProperties({
+    component: outerFacing,
+    patch: { facing: 'fixed', cameraName: null },
+    resourceRegistry,
+  })), [[outerName, 'outer-sprite']]);
+  assert.deepEqual(outerBinding().patch.panelAnchorWorld, [5, 0, 0]);
+
+  assert.deepEqual(applyAndRender(() => inner.removeComponent(innerFacing.key)), [
+    [innerName, 'inner-sprite'],
+  ]);
+  assert.deepEqual(innerBinding().patch.panelAnchorWorld, [5, 0, 0]);
+
+  const replacementFacing = componentRegistry.create(componentRegistry.compile({
+    key: 'inner-facing-replacement',
+    type: 'behavior.billboard@2',
+    properties: {
+      mode: 'initialize',
+      axisMode: 'full',
+      facing: 'camera',
+      cameraName: 'scene/main/camera',
+    },
+  }, resourceRegistry));
+  assert.deepEqual(applyAndRender(() => {
+    inner.addComponent(replacementFacing);
+    replacementFacing.attach(inner, runtime._componentContext);
+  }), [[innerName, 'inner-sprite']]);
+  assert.equal(innerBinding().patch.panelAnchorWorld, null);
 });
 
 test('rebuild cancels a never-settling old create before draining backend work', async (t) => {
@@ -1047,6 +1231,27 @@ test('rebuild cancels a never-settling old create before draining backend work',
   await runtime.rebuildRenderBackend();
   assert.equal(firstDisposals, 1);
   assert.equal(runtime.currentView().health, 'ready');
+});
+
+test('runtime disposal detaches the complete scene topology with one bulk forest operation', async () => {
+  const { runtime } = await createHarness();
+  const graph = runtime._nodeGraph;
+  const detachForest = graph.detachForest.bind(graph);
+  const detach = graph.detach.bind(graph);
+  let forestCalls = 0; let singleCalls = 0;
+  graph.detachForest = (...arguments_) => {
+    forestCalls += 1;
+    return detachForest(...arguments_);
+  };
+  graph.detach = (...arguments_) => {
+    singleCalls += 1;
+    return detach(...arguments_);
+  };
+
+  await runtime.dispose();
+
+  assert.equal(forestCalls, 1);
+  assert.equal(singleCalls, 1, 'only the parentless Scene root needs a single-node detach');
 });
 
 test('dispose is one completion barrier and health observers cannot interrupt cleanup', async () => {

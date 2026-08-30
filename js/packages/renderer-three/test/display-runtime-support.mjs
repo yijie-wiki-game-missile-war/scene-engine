@@ -18,12 +18,12 @@ import {
   disposeThreeResource,
   loadThreeResource,
 } from '../src/resources.js';
+import {
+  IDENTITY_MATRIX,
+  composeMatrix4,
+} from '../../../../scripts/support/matrix4.mjs';
 
-export const IDENTITY = Object.freeze({
-  position: Object.freeze([0, 0, 0]),
-  rotationXyzw: Object.freeze([0, 0, 0, 1]),
-  scale: Object.freeze([1, 1, 1]),
-});
+export const IDENTITY = IDENTITY_MATRIX;
 
 export const GEOMETRY_PREFAB_ID = 'foundation/geometry';
 export const NESTED_PREFAB_ID = 'foundation/nested';
@@ -161,11 +161,7 @@ export function transformAt(position, {
   rotationXyzw = [0, 0, 0, 1],
   scale = [1, 1, 1],
 } = {}) {
-  return Object.freeze({
-    position: Object.freeze([...position]),
-    rotationXyzw: Object.freeze([...rotationXyzw]),
-    scale: Object.freeze([...scale]),
-  });
+  return composeMatrix4(position, rotationXyzw, scale);
 }
 
 export function createAuthorityNode({

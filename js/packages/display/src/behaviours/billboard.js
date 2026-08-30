@@ -1,5 +1,6 @@
 import { BehaviourComponent } from '../component/behaviour-component.js';
 import { enumValue, exactKeys } from '../internal.js';
+import { composeMatrix4FromQuaternion, decomposeNonShearedMatrix4 } from '../math/matrix4.js';
 import { quaternionFromForward, quaternionFromForwardUp } from '../math/quaternion.js';
 import { localDirectionForWorldFacing } from '../math/transform.js';
 import { fail } from '../runtime/health.js';
@@ -35,6 +36,7 @@ export class BillboardComponent extends BehaviourComponent {
 
   _orient(display) {
     const node = this.node;
+    const local = decomposeNonShearedMatrix4(node.localTransform);
     const parentWorld = node.parentName === null
       ? null : display.nodes.require(node.parentName).getWorldTransform();
     // Fixed cards use the world's canonical +Z forward and +Y up. Resolve the
@@ -42,21 +44,19 @@ export class BillboardComponent extends BehaviourComponent {
     if (this.properties.facing !== 'camera') {
       const localForward = localDirectionForWorldFacing(parentWorld, [0, 0, 1], 'full');
       const localUp = localDirectionForWorldFacing(parentWorld, [0, 1, 0], 'full');
-      this.setDrivenLocalTransform({
-        position: node.localTransform.position,
-        rotationXyzw: quaternionFromForwardUp(localForward, localUp),
-        scale: node.localTransform.scale,
-      });
+      this.setDrivenLocalTransform(composeMatrix4FromQuaternion(
+        quaternionFromForwardUp(localForward, localUp), local.scale, local.position, [],
+      ));
       return;
     }
     const cameraName = this.properties.cameraName ?? display.scene.activeCameraName;
     if (cameraName === null) fail('display-active-camera-missing');
-    const cameraPosition = display.nodes.require(cameraName).getWorldTransform().position;
+    const cameraWorld = display.nodes.require(cameraName).getWorldTransform();
     const nodeWorld = node.getWorldTransform();
     const direction = [
-      cameraPosition[0] - nodeWorld.position[0],
-      cameraPosition[1] - nodeWorld.position[1],
-      cameraPosition[2] - nodeWorld.position[2],
+      cameraWorld[12] - nodeWorld[12],
+      cameraWorld[13] - nodeWorld[13],
+      cameraWorld[14] - nodeWorld[14],
     ];
     const localDirection = localDirectionForWorldFacing(
       parentWorld,
@@ -64,11 +64,9 @@ export class BillboardComponent extends BehaviourComponent {
       this.properties.axisMode,
     );
     const rotation = quaternionFromForward(localDirection, 'full');
-    this.setDrivenLocalTransform({
-      position: node.localTransform.position,
-      rotationXyzw: rotation,
-      scale: node.localTransform.scale,
-    });
+    this.setDrivenLocalTransform(composeMatrix4FromQuaternion(
+      rotation, local.scale, local.position, [],
+    ));
   }
 }
 

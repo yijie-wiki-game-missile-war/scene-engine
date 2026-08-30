@@ -1,6 +1,6 @@
-# Three RenderBackend 0.11.0
+# Three RenderBackend 0.12.0
 
-`@scene-engine/renderer-three@0.11.0` is the browser composition-root implementation of Display's flat RenderBackendPort. Its
+`@scene-engine/renderer-three@0.12.0` is the browser composition-root implementation of Display's flat RenderBackendPort. Its
 root exports only:
 
 ```text
@@ -39,9 +39,9 @@ The backend schema is `scene-engine-three-render-backend@3`. Each `updateBinding
 only `render.sprite@3` may have a non-null anchor. `batchable` is a strict boolean port flag set by Display: `false` while the
 Display AnimationSystem owns a transient override for the binding, `true` otherwise. It is not a public Sprite property.
 
-Display passes an Engine-computed world matrix, the derived panel anchor, logical visibility and already normalized closed component properties. Display
-must reject invalid business records before commit seal; the backend repeats defensive shape/resource checks to protect its own
-boundary and asset-loading failures.
+Display passes its NodeGraph-computed world matrix, the derived panel anchor, logical visibility and already normalized closed
+component properties. Display must reject invalid business records before commit seal; the backend repeats defensive
+shape/resource checks to protect its own boundary and asset-loading failures.
 
 ## Binding representation
 
@@ -53,8 +53,23 @@ batch instance drawable  = visible && batched
 ```
 
 An ordinary object and its `InstancedMesh` instance are alternatives, never two visual parts. Batch creation hides the ordinary
-object; a hidden instance uses a zero matrix; leaving or disposing the batch restores the ordinary object according to logical
-visibility. Ordinary picking excludes batched records, and instance hits map back to the same logical binding.
+object and removes that inactive representation, plus an empty per-Node root, from the active Three scene traversal; the
+logical binding and its resource leases remain owned. A hidden instance uses a zero matrix. Leaving or disposing the batch
+while the backend remains live restores the ordinary object according to logical visibility. Whole-backend disposal tears
+down both representations directly and never reattaches inactive ordinary objects. Ordinary picking excludes batched
+records, and instance hits map back to the same logical binding.
+
+When several bindings are destroyed in one JavaScript turn, their now-empty per-Node roots lose logical ownership
+immediately and are removed from the private Three scene by one queued microtask compaction; a batch rebuild or backend
+disposal also performs the same bulk cleanup. This keeps idle/no-camera churn bounded and burst teardown linear without
+leaving a drawable or pickable representation alive. Batch meshes are likewise detached from their shared parent in one
+linear pass before their individual GPU resources are disposed.
+
+Batch membership is rebuilt only when binding membership, eligibility, resources, or a batch fingerprint changes. A steady
+frame writes only dirty instance records and marks their matrix and panel-anchor attribute ranges for partial GPU upload;
+handles that declare procedural continuous drawing are the only handles sampled every frame. Mesh batch bounds expand
+conservatively when a dirty visible instance moves, so frustum culling and picking cannot use a stale smaller sphere. A later
+batch rebuild resets the bound and lets Three compute it exactly again.
 
 ### Fixed panel vertices
 
@@ -80,6 +95,10 @@ rebuild and asynchronous resource replacement restore the declarative anchor wit
 Resource loads honor AbortSignal and generation tokens. Removing a pending binding prevents late attachment; destroy/recreate
 for one identity is serialized. URL textures are decoded with one consistent vertical-orientation rule. Source model material
 semantics remain unless closed component properties explicitly override them.
+Bindings that share one lifecycle AbortSignal share one native abort listener; the backend fans cancellation out to their
+private controllers and removes the listener after the last binding leaves or once when the backend is disposed. Registration
+is therefore constant-time per binding while an actual shared cancellation remains linear in the number of bindings it must
+cancel.
 
 Material Resource properties are applied once when the resource is created. Mesh bindings clone that configured material;
 ordinary meshes and instance batches retain the same tint and opacity without multiplying the descriptor a second time.

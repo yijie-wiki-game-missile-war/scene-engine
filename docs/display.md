@@ -6,15 +6,16 @@ fallback runtime.
 ## Release tuple
 
 ```text
-scene-engine Python                 0.9.0
-@scene-engine/client               0.10.0
-@scene-engine/display              0.8.0
-@scene-engine/renderer-three       0.11.0
-wire                               scene-engine-wire@2
-display                            scene-engine-display-node@3
-prefab definition                  scene-engine-prefab-definition@3
-catalog manifest                   scene-engine-display-catalog-manifest@1
-packet log                         scene-engine-packet-log@2
+scene-engine Python                 0.13.0
+@scene-engine/client               0.12.0
+@scene-engine/display              0.11.0
+@scene-engine/renderer-three       0.12.0
+wire                               scene-engine-wire@3
+display                            scene-engine-display-node@5
+scene definition                   scene-engine-scene-definition@2
+prefab definition                  scene-engine-prefab-definition@4
+catalog manifest                   scene-engine-display-catalog-manifest@2
+packet log                         scene-engine-packet-log@3
 ```
 
 The package publishes `src/index.d.ts` and exports only the root API listed by `src/index.js`.
@@ -25,25 +26,95 @@ One `DisplayRuntime` owns:
 
 - one active Scene;
 - one NodeIndex and one NodeGraph;
-- one local TRS per Node;
+- one local 4x4 matrix per Node;
 - one ComponentScheduler;
 - one RenderSystem;
 - one AnimationSystem;
 - one private flat Prefab materialization ledger;
 - one application RAF.
 
-Every Node local Transform is:
+Every Node local Transform is exactly one 16-value column-major Matrix4:
 
 ```js
-{
-  position: [x, y, z],
-  rotationXyzw: [x, y, z, w],
-  scale: [x, y, z],
-}
+[
+  m00, m10, m20, 0,
+  m01, m11, m21, 0,
+  m02, m12, m22, 0,
+   tx,  ty,  tz, 1,
+]
 ```
 
-The boundary copies finite numbers, normalizes nonzero quaternions and rejects non-positive scale. A Component never owns a
-second Transform. Anything needing an independent pose is a child Node.
+Python's hot-path owner is `DisplayTransform(matrix_bytes=...)`: it retains an immutable object of exactly 64 bytes and neither
+repackages nor interprets its sixteen binary32 bit patterns. `DisplayTransform.from_matrix(...)` exists for numeric authoring;
+it performs one little-endian `<16f` pack but does not canonicalize negative zero or check finite, affine or determinant rules.
+
+The browser Client is the first semantic boundary. It reads the payload into an owned Float32Array, canonicalizes negative zero,
+requires finite affine entries (`m[3]=m[7]=m[11]=0`, `m[15]=1`) and requires the upper-left 3x3 determinant to be positive and
+nonzero. Shear is legal; reflections and singular matrices are not. Display repeats the check defensively and stores one
+private Float32Array local matrix. Public views return immutable copies, never the mutable owner.
+
+NodeGraph owns one Float64Array world matrix per Node. A root copies its local matrix; a child computes exactly
+`parentWorld * localMatrix`. There is no position/quaternion/scale cache, decomposition or TRS hierarchy path. The wider world
+accumulator avoids a new float32 rounding at every depth; the renderer still receives the resulting matrix directly. Every
+derived entry must remain finite; hierarchy overflow fails the synchronous commit seal before its cursor can be ACKed. float16
+is not accepted because its spacing is too coarse for unrestricted world coordinates.
+
+### Matrix convenience API
+
+Product and display-authoring code does not need to hand-write sixteen values. Python exposes pure methods on
+`DisplayTransform`; JavaScript exposes one frozen `DisplayTransform` facade from `@scene-engine/display`:
+
+| Operation | Python | JavaScript |
+| --- | --- | --- |
+| direct matrix ownership | `DisplayTransform(matrix_bytes=raw)` / `from_matrix(values)` | Client binary decode |
+| identity / TRS construction | `identity()` / `from_trs(...)` | `identity()` / `fromTRS(...)` |
+| full composition | `parent.composed(local)` | `compose(parent, local)` |
+| absolute parent-space origin | `with_translation(position)` | `withTranslation(matrix, position)` |
+| absolute basis-column lengths | `with_scale(scale)` | `withScale(matrix, scale)` |
+| relative translation | `translated_self/parent(delta)` | `translatedSelf/Parent(matrix, delta)` |
+| relative axis-angle rotation | `rotated_self/parent(axis, radians)` | `rotatedSelf/Parent(matrix, axis, radians)` |
+| relative positive scale | `scaled_self/parent(factors)` | `scaledSelf/Parent(matrix, factors)` |
+| point/vector conversion | `transform_*` / `inverse_transform_*` | `transform*` / `inverseTransform*` |
+
+```python
+pose = DisplayTransform.from_trs(position=(10, 0, 2), scale=(2, 2, 2))
+pose = pose.translated_self((0, 0, 4)).rotated_parent((0, 1, 0), math.pi / 2)
+command = DisplayCommand.set_transform("py/ship", pose)
+```
+
+```js
+let pose = DisplayTransform.fromTRS({ position: [10, 0, 2], scale: [2, 2, 2] });
+pose = DisplayTransform.rotatedParent(
+  DisplayTransform.translatedSelf(pose, [0, 0, 4]),
+  [0, 1, 0],
+  Math.PI / 2,
+);
+```
+
+Every convenience operation returns a new immutable binary32 Matrix4 and never changes the source, relaxes the Matrix4
+boundary to accept a TRS record, or stores TRS beside the matrix. Python deliberately leaves final matrix semantics to Client;
+the JavaScript facade returns canonical accepted matrices. `from_trs`/`fromTRS` accepts transient `position`, normalizes a
+nonzero `rotation_xyzw`/`rotationXyzw`, and accepts positive `scale` only to construct the resulting matrix.
+
+Let the local basis and origin be `B` and `t`. The suffix is mandatory because a local matrix by itself cannot perform a true
+world-space edit when it has an unknown parent:
+
+```text
+translated self:        t' = t + B * delta
+translated parent:      t' = t + delta
+rotated/scaled self:    B' = B * operation
+rotated/scaled parent:  B' = operation * B
+```
+
+Rotation and scale keep `t` fixed; they do not orbit around the parent origin. `withScale` sets the positive length of each
+basis column while preserving its direction, the angles between columns, authored shear and translation. There is no general
+matrix-to-quaternion/Euler decomposition, lossy world scale, or context-free world mutation API. Continuous target facing uses
+the existing `LookAtComponent`; it is not duplicated as a second transform owner.
+
+Point conversion uses homogeneous `w=1`, so it includes translation. Vector conversion uses `w=0`, so it excludes translation
+but includes rotation, scale and shear; it is intentionally not named `transformDirection`, whose Unity meaning ignores scale.
+Inverse conversion uses the complete affine inverse rather than an orthogonal-only shortcut. Returned vectors are immutable
+finite triples and are not quantized to float32.
 
 Canonical names are immutable lowercase paths under exactly:
 
@@ -52,7 +123,10 @@ sys/ scene/ py/ prefab/
 ```
 
 Names are at most 192 UTF-8 bytes; maximum tree depth is 128. Python supplies complete `py/` names and never addresses
-Prefab-local names. A nested materialization prefixes `prefab/` exactly once, followed by the outer owner and accumulated
+Prefab-local names. Checkpoint Nodes and structural parent names validate this syntax in Python. Post-checkpoint mutation
+constructors trust their product-owned target string to avoid repeating path and UTF-8 validation for every update; Client
+validates each decoded target before entering the Display commit gate. A nested materialization prefixes `prefab/` exactly
+once, followed by the outer owner and accumulated
 instance/local path, for example `prefab/py/island/1/tiles/tile-q0-r0/body`; it never constructs
 `prefab/prefab/...`.
 
@@ -120,7 +194,7 @@ the complete state contract consumed by its resolver. Multiple visual Prefabs ma
 replace operations carry an exact outer `prefabId`; lookup or implicit selection by gameplay type is forbidden on the
 production path.
 
-Schema `scene-engine-prefab-definition@3` adds definition-owned composition:
+Schema `scene-engine-prefab-definition@4` defines matrix-native definition-owned composition:
 
 ```js
 const islandPrefab = definePrefab({
@@ -344,10 +418,12 @@ constructed automatically for each commit observer.
 `behavior.billboard@2` owns panel orientation in the shared Display transform pipeline. Its closed properties are
 `mode: 'initialize' | 'continuous'`, `axisMode: 'full' | 'y-axis'`, optional `facing: 'fixed' | 'camera'`
 and optional `cameraName`. The default `facing: 'fixed'` solves local rotation through the inverse parent world 3x3 so world
-+Z forward (six o'clock) remains exact; camera position, elevation, yaw and roll do not participate. World +Y up is exact
-whenever one local TRS can represent it, including the common rotated, non-uniformly scaled parent yaw case. Under general
-inherited shear it uses the closest representable up direction. Position, local scale and inherited affine scaling remain
-owned by the normal Node graph.
++Z forward (six o'clock) remains exact; camera position, elevation, yaw and roll do not participate. World +Y up is exact when
+one orthogonal local basis can represent both requested axes, including rotated and non-uniformly scaled parent cases. Under
+general inherited shear, +Z remains exact and the quaternion basis uses the closest representable up direction. A driver
+preserves its local translation and column magnitudes while replacing its local basis. The driver's own local 3x3 must be a
+positive-scale, no-shear basis; otherwise it fails closed rather than silently discard authored shear. General Nodes and
+driver ancestors may still contain shear.
 
 Fixed orientation is established on attach. `continuous` reasserts it before rendering after parent/authority updates;
 `initialize` only sets it on attach. An application that explicitly needs camera-facing panels must declare `facing: 'camera'`;
@@ -369,6 +445,9 @@ The backend removes the off-axis perspective term relative to that anchor. The a
 pan does not pin a sprite to the screen. Camera pitch foreshortening and distance scaling are retained. Orthographic cameras
 need no compensation. Render and pick apply the same vertex formula to both ordinary and instanced sprites; world-point
 projection continues to project the supplied world point normally. See [RenderBackend](render-runtime.md#fixed-panel-vertices).
+RenderSystem recomputes this derived input when the Sprite/Node changes or when its nearest Billboard is attached, detached,
+enabled, disabled, or patched. A nearer Billboard blocks invalidation from an ancestor just as it blocks anchor lookup, so a
+clean frame does not rescan every Sprite in the scene.
 
 ### Frame order
 

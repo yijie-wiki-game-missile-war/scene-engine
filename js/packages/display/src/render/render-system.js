@@ -11,15 +11,10 @@ function fixedPanelAnchor(node) {
     const facing = ancestor.getComponent(BillboardComponent);
     if (facing !== null) {
       return facing.enabled && !facing.disposed && facing.properties.facing === 'fixed'
-        ? Object.freeze(Array.from(ancestor._worldTransform.position)) : null;
+        ? Object.freeze(Array.from(ancestor._worldTransform.slice(12, 15))) : null;
     }
   }
   return null;
-}
-
-function sameAnchor(left, right) {
-  return left === right || (left != null && right !== null
-    && left.every((value, index) => value === right[index]));
 }
 
 function identityKey(identity) {
@@ -40,6 +35,8 @@ export class RenderSystem {
     this._cancelBackendWait = null;
     this._entries = new Map();
     this._byNode = new Map();
+    this._dirtyEntries = new Set();
+    this._cameraEntriesByName = new Map();
     // Transient animation values (Display AnimationSystem only). Never written into
     // component properties; backends always receive base+override "effective" data.
     this._animationOverrides = new WeakMap();
@@ -89,6 +86,12 @@ export class RenderSystem {
       generation: this._generation,
     };
     this._entries.set(component, entry);
+    this._dirtyEntries.add(entry);
+    if (component instanceof CameraComponent) {
+      let cameras = this._cameraEntriesByName.get(node.name);
+      if (!cameras) { cameras = new Set(); this._cameraEntriesByName.set(node.name, cameras); }
+      cameras.add(entry);
+    }
     let entries = this._byNode.get(node);
     if (!entries) { entries = new Set(); this._byNode.set(node, entries); }
     entries.add(entry);
@@ -100,7 +103,13 @@ export class RenderSystem {
     const entry = this._entries.get(component);
     if (!entry) return;
     this._entries.delete(component);
+    this._dirtyEntries.delete(entry);
     const node = attachedComponentNode(component);
+    if (component instanceof CameraComponent) {
+      const cameras = this._cameraEntriesByName.get(entry.identity.nodeName);
+      cameras?.delete(entry);
+      if (cameras?.size === 0) this._cameraEntriesByName.delete(entry.identity.nodeName);
+    }
     const entries = this._byNode.get(node);
     entries?.delete(entry);
     if (entries?.size === 0) this._byNode.delete(node);
@@ -131,7 +140,7 @@ export class RenderSystem {
       return;
     }
     this._animationOverrides.set(component, next);
-    if (entry) entry.dirty = true;
+    if (entry) { entry.dirty = true; this._dirtyEntries.add(entry); }
     this._onNeedsDraw?.();
   }
 
@@ -139,7 +148,7 @@ export class RenderSystem {
     if (!this._animationOverrides.has(component)) return;
     this._animationOverrides.delete(component);
     const entry = this._entries.get(component);
-    if (entry) entry.dirty = true;
+    if (entry) { entry.dirty = true; this._dirtyEntries.add(entry); }
     this._onNeedsDraw?.();
   }
 
@@ -153,12 +162,35 @@ export class RenderSystem {
     const entry = this._entries.get(component);
     if (!entry) return;
     entry.dirty = true;
+    this._dirtyEntries.add(entry);
     this._onNeedsDraw?.();
   }
 
   markNodeDirty(node) {
-    for (const entry of this._byNode.get(node) ?? []) entry.dirty = true;
+    for (const entry of this._byNode.get(node) ?? []) {
+      entry.dirty = true;
+      this._dirtyEntries.add(entry);
+    }
     if (this._byNode.has(node)) this._onNeedsDraw?.();
+  }
+
+  markPanelAnchorSubtreeDirty(sourceNode) {
+    let changed = false;
+    const visit = (node, source = false) => {
+      // The nearest Billboard owns every descendant Sprite anchor. A nested
+      // Billboard therefore blocks invalidation from the changed ancestor, but
+      // the source itself must still invalidate its own Node and subtree.
+      if (!source && node.getComponent(BillboardComponent) !== null) return;
+      for (const entry of this._byNode.get(node) ?? []) {
+        if (!(entry.component instanceof SpriteRendererComponent)) continue;
+        entry.dirty = true;
+        this._dirtyEntries.add(entry);
+        changed = true;
+      }
+      for (const child of node._children) visit(child);
+    };
+    visit(sourceNode, true);
+    if (changed) this._onNeedsDraw?.();
   }
 
   setActiveCamera(nodeName) {
@@ -172,15 +204,14 @@ export class RenderSystem {
     const activeCameraBinding = this._findActiveCameraBinding();
     if (activeCameraBinding === null) return false;
     const dirtyBindings = [];
-    for (const entry of this._entries.values()) {
+    for (const entry of this._dirtyEntries) {
       if (entry.state !== 'ready') continue;
       const component = entry.component;
       const node = attachedComponentNode(component);
       const panelAnchorWorld = component instanceof SpriteRendererComponent ? fixedPanelAnchor(node) : null;
-      if (!entry.dirty && sameAnchor(entry.panelAnchorWorld, panelAnchorWorld)) continue;
       const patch = Object.freeze({
         identity: entry.identity,
-        worldMatrix: Object.freeze(Array.from(node._worldTransform.matrix)),
+        worldMatrix: Object.freeze(Array.from(node._worldTransform)),
         panelAnchorWorld,
         visible: node.visibleInHierarchy && component.enabled,
         properties: this.effectiveProperties(component),
@@ -193,6 +224,7 @@ export class RenderSystem {
         );
       });
       entry.dirty = false;
+      this._dirtyEntries.delete(entry);
       entry.panelAnchorWorld = panelAnchorWorld;
       dirtyBindings.push(Object.freeze({ identity: entry.identity, binding: entry.binding }));
     }
@@ -313,7 +345,8 @@ export class RenderSystem {
     this._pending.clear();
     this._identityBarriers.clear();
     this._backend = null;
-    this._entries.clear(); this._byNode.clear();
+    this._entries.clear(); this._byNode.clear(); this._dirtyEntries.clear();
+    this._cameraEntriesByName.clear();
     this._animationOverrides = new WeakMap();
     this._activeCameraName = null;
     this._requiresContinuousDraw = false;
@@ -378,7 +411,8 @@ export class RenderSystem {
         backend.destroyBinding(result);
         return;
       }
-      entry.binding = result; entry.state = 'ready'; entry.dirty = true; this._onNeedsDraw?.();
+      entry.binding = result; entry.state = 'ready'; entry.dirty = true;
+      this._dirtyEntries.add(entry); this._onNeedsDraw?.();
       return;
     }
     const job = Promise.resolve(result).then(async (binding) => {
@@ -394,7 +428,8 @@ export class RenderSystem {
           new DisplayRuntimeError('display-render-binding-create-failed'));
         return;
       }
-      entry.binding = binding; entry.state = 'ready'; entry.dirty = true; this._onNeedsDraw?.();
+      entry.binding = binding; entry.state = 'ready'; entry.dirty = true;
+      this._dirtyEntries.add(entry); this._onNeedsDraw?.();
     }, (error) => {
       if (entry.token === token && entry.state !== 'disposed') {
         entry.state = 'failed'; this._report('display-render-binding-create-failed', error);
@@ -453,9 +488,8 @@ export class RenderSystem {
 
   _findActiveCameraBinding() {
     if (this._activeCameraName === null) return null;
-    for (const entry of this._entries.values()) {
-      if (entry.identity.nodeName === this._activeCameraName
-          && entry.component instanceof CameraComponent && entry.state === 'ready') return entry.binding;
+    for (const entry of this._cameraEntriesByName.get(this._activeCameraName) ?? []) {
+      if (entry.state === 'ready') return entry.binding;
     }
     return null;
   }

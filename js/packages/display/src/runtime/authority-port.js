@@ -1,6 +1,5 @@
 import { AuthorityComponent } from '../component/authority-component.js';
 import { cloneAndFreeze, exactKeys } from '../internal.js';
-import { normalizeTransform } from '../math/transform.js';
 import { Node } from '../node/node.js';
 import { AUTHORITY_PREFIX, assertNodePrefix } from '../node/node-name.js';
 import { fail } from './health.js';
@@ -25,8 +24,10 @@ export class AuthorityPort {
     const parent = this._resolveParent(record.parentName);
     const definition = this._resolvePrefab(record.prefabId);
     const compiled = this._scene.registries.compiledPrefabCatalog.require(definition.id);
-    const transform = normalizeTransform(record.transform);
-    if (typeof record.visible !== 'boolean') fail('display-node-visibility-invalid');
+    // Constructing the detached root validates and owns the matrix exactly once,
+    // before resolver work or any mutation of the live scene.
+    const root = new Node({ name, sceneToken: this._scene.sceneToken,
+      transform: record.transform, visible: record.visible });
     const state = cloneAndFreeze(record.state, 'display-authority-state-invalid');
     // Resolver/schema validation occurs before the first live mutation.
     const validatedPatch = this._prefabInstantiator.resolveAndValidateState(
@@ -37,8 +38,6 @@ export class AuthorityPort {
       { ownerName: name },
     );
     this._scene.nodeGraph.validateSubtreePlacement(parent, validatedPatch.graphHeight);
-    const root = new Node({ name, sceneToken: this._scene.sceneToken,
-      transform, visible: record.visible });
     const authority = new AuthorityComponent({
       prefabId: definition.id,
       transformMode: record.transformMode,
@@ -76,8 +75,7 @@ export class AuthorityPort {
     const record = exactKeys(command, ['name', 'transform'], [], 'display-authority-command-invalid');
     const { node, authority } = this._requireAuthority(record.name);
     if (authority.transformMode !== 'live') fail('display-authority-transform-initial');
-    const transform = normalizeTransform(record.transform);
-    node.setLocalTransform(transform);
+    node.setLocalTransform(record.transform);
     this._onMutation?.();
   }
 

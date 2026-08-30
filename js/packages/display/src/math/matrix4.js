@@ -1,7 +1,14 @@
-export function composeMatrix4(transform, out = new Float64Array(16)) {
-  const [x, y, z, w] = transform.rotationXyzw;
-  const [sx, sy, sz] = transform.scale;
-  const [px, py, pz] = transform.position;
+import { fail } from '../runtime/health.js';
+
+export function composeMatrix4FromQuaternion(
+  rotationXyzw,
+  scale,
+  position,
+  out = new Float64Array(16),
+) {
+  const [x, y, z, w] = rotationXyzw;
+  const [sx, sy, sz] = scale;
+  const [px, py, pz] = position;
   const x2 = x + x; const y2 = y + y; const z2 = z + z;
   const xx = x * x2; const xy = x * y2; const xz = x * z2;
   const yy = y * y2; const yz = y * z2; const zz = z * z2;
@@ -39,6 +46,7 @@ export function multiplyMatrix4(left, right, out = new Float64Array(16)) {
       for (let index = 0; index < 4; index += 1) {
         value += left[index * 4 + row] * right[column * 4 + index];
       }
+      if (!Number.isFinite(value)) fail('display-transform-world-nonfinite');
       values[column * 4 + row] = value;
     }
   }
@@ -65,6 +73,34 @@ export function inverseTransformDirectionMatrix4(matrix, direction, out = [0, 0,
   out[0] = (inverse00 * x + inverse01 * y + inverse02 * z) * reciprocal;
   out[1] = (inverse10 * x + inverse11 * y + inverse12 * z) * reciprocal;
   out[2] = (inverse20 * x + inverse21 * y + inverse22 * z) * reciprocal;
+  if (!out.every(Number.isFinite)) fail('display-look-direction-invalid');
   return out;
 }
-import { fail } from '../runtime/health.js';
+
+export function matrix4Determinant3x3(matrix) {
+  return matrix[0] * (matrix[5] * matrix[10] - matrix[9] * matrix[6])
+    - matrix[4] * (matrix[1] * matrix[10] - matrix[9] * matrix[2])
+    + matrix[8] * (matrix[1] * matrix[6] - matrix[5] * matrix[2]);
+}
+
+export function decomposeNonShearedMatrix4(matrix,
+  code = 'display-transform-driver-shear') {
+  const scale = [
+    Math.hypot(matrix[0], matrix[1], matrix[2]),
+    Math.hypot(matrix[4], matrix[5], matrix[6]),
+    Math.hypot(matrix[8], matrix[9], matrix[10]),
+  ];
+  if (scale.some((value) => !Number.isFinite(value) || value === 0)) fail(code);
+  const x = [matrix[0] / scale[0], matrix[1] / scale[0], matrix[2] / scale[0]];
+  const y = [matrix[4] / scale[1], matrix[5] / scale[1], matrix[6] / scale[1]];
+  const z = [matrix[8] / scale[2], matrix[9] / scale[2], matrix[10] / scale[2]];
+  const dot = (left, right) => left[0] * right[0] + left[1] * right[1]
+    + left[2] * right[2];
+  const tolerance = 2e-5;
+  if (Math.abs(dot(x, y)) > tolerance || Math.abs(dot(x, z)) > tolerance
+      || Math.abs(dot(y, z)) > tolerance) fail(code);
+  return Object.freeze({
+    position: Object.freeze([matrix[12], matrix[13], matrix[14]]),
+    scale: Object.freeze(scale),
+  });
+}

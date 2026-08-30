@@ -10,8 +10,10 @@ import {
   COMMUNICATION_SCENE_ID,
   buildCommunicationCatalog,
 } from './communication_catalog.mjs';
+import { matrix4Bytes } from './matrix4.mjs';
 
 const MAXIMUM_FRAME_BYTES = 64 * 1024 * 1024;
+const TRANSFORM_DIGEST_ENCODING = 'node-name-nul-le-f32-matrix16-nul';
 
 class PassiveFrameAdapter {
   constructor() {
@@ -97,11 +99,7 @@ function canonicalTransformDigest(view) {
   for (const node of roots) {
     hash.update(node.name);
     hash.update('\0');
-    hash.update(node.localTransform.position.join(','));
-    hash.update('\0');
-    hash.update(node.localTransform.rotationXyzw.join(','));
-    hash.update('\0');
-    hash.update(node.localTransform.scale.join(','));
+    hash.update(matrix4Bytes(node.localTransform));
     hash.update('\0');
   }
   return { rootCount: roots.length, sha256: hash.digest('hex') };
@@ -146,7 +144,8 @@ async function finish() {
     && cleanup.fakeBackendBindings === 0
     && cleanup.fakeBackendDisposed === true;
   const report = {
-    schema: 'scene-engine-python-js-communication-peer@1',
+    schema: 'scene-engine-python-js-communication-peer@2',
+    transformDigestEncoding: TRANSFORM_DIGEST_ENCODING,
     enginePacketCount,
     engineBytes,
     engineFramedSha256: engineHash.digest('hex'),

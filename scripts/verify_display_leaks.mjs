@@ -23,13 +23,10 @@ import {
   loadThreeResource,
 } from '../js/packages/renderer-three/src/resources.js';
 import { TestRenderer } from '../js/packages/renderer-three/test/support.mjs';
+import { IDENTITY_MATRIX } from './support/matrix4.mjs';
 
 assert.deepEqual(process.argv.slice(2), [], 'verify_display_leaks accepts no arguments');
-const IDENTITY = Object.freeze({
-  position: Object.freeze([0, 0, 0]),
-  rotationXyzw: Object.freeze([0, 0, 0, 1]),
-  scale: Object.freeze([1, 1, 1]),
-});
+const IDENTITY = IDENTITY_MATRIX;
 const PROFILE = Object.freeze({
   drawMode: 'requested',
   maximumPixelRatio: 1,

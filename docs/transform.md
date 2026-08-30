@@ -1,7 +1,8 @@
 # Transform encoding
 
 `scene-engine-transform@1` freezes the shared fixed-point matrix vectors used to verify product rule-space transform helpers.
-It is separate from the Display Node's normalized floating-point local TRS.
+It is separate from the Display Node's column-major float32 Matrix4: rule space uses scaled decimal integers, while Python
+stores and transports the Display matrix's exact opaque IEEE-754 binary32 bits and Client validates their matrix semantics.
 
 A rule matrix contains exactly sixteen canonical base-10 integer strings in column-major order and acts on column vectors.
 Scale is `1_000_000`; indices 3, 7, and 11 are zero, index 15 is `1000000`, and translation is at 12–14. Each magnitude is at
@@ -15,4 +16,6 @@ nonrepresentable operations reject the whole product transaction.
 
 The sole vectors are [rule-matrix.canonical-vectors.json](../fixtures/transform-v1/rule-matrix.canonical-vectors.json). They
 cover identity, translation, scale, rotation, shear, ties-to-even, parent-only behavior, exact reparent, and malformed values.
-Tests and products must read this location; there is no external fixture dependency.
+Products that implement rule-space helpers should consume this location; there is no external fixture dependency. This
+repository does not own a product rule-space matrix implementation, so its Python and JavaScript test suites do not execute
+these vectors. The Display Matrix4 contract and its cross-language fixtures are covered independently.

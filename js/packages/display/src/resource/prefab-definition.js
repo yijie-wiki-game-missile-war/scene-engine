@@ -14,7 +14,7 @@ import { Resource } from './resource.js';
 import { prepareComponentPropertiesPatch } from '../component/component-registry.js';
 import { compilePrefabCatalog } from './prefab-compiler.js';
 
-export const PREFAB_DEFINITION_SCHEMA = 'scene-engine-prefab-definition@3';
+export const PREFAB_DEFINITION_SCHEMA = 'scene-engine-prefab-definition@4';
 const EMPTY_PATCH = Object.freeze({ nodes: Object.freeze({}), components: Object.freeze({}) });
 const ENCODER = new TextEncoder();
 const PREFAB_ID = /^[a-z0-9][a-z0-9._@-]*(?:\/[a-z0-9][a-z0-9._@-]*)*$/u;
@@ -126,7 +126,9 @@ export class PrefabDefinition extends Resource {
       } else if (Object.hasOwn(record, 'localName')) {
         fail('display-prefab-root-invalid');
       }
-      const transform = normalizeTransform(record.transform ?? IDENTITY_TRANSFORM);
+      const transform = normalizeTransform(
+        Object.hasOwn(record, 'transform') ? record.transform : IDENTITY_TRANSFORM,
+      );
       if (isRoot && !isIdentityTransform(transform)) fail('display-prefab-root-transform-invalid');
       const components = record.components.map((component) => componentRegistry.compile(component, resourceRegistry));
       if (!isRoot) {
@@ -172,7 +174,9 @@ export class PrefabDefinition extends Resource {
         key: takeKey(record.key),
         parentLocalPath: instanceParent(record.parentLocalPath, ownNodePaths),
         prefabId: assertPrefabId(record.prefabId),
-        transform: normalizeTransform(record.transform ?? IDENTITY_TRANSFORM),
+        transform: normalizeTransform(
+          Object.hasOwn(record, 'transform') ? record.transform : IDENTITY_TRANSFORM,
+        ),
         visible,
         state: prefabState(record.state ?? {}),
       });
@@ -304,7 +308,9 @@ export class PrefabDefinition extends Resource {
           prefabId: selected.prefabId,
           definition: selected.definition,
           compiledPrefab: selected.compiledPrefab,
-          transform: normalizeTransform(value.transform ?? IDENTITY_TRANSFORM),
+          transform: normalizeTransform(
+            Object.hasOwn(value, 'transform') ? value.transform : IDENTITY_TRANSFORM,
+          ),
           visible,
           state: prefabState(value.state ?? {}),
         }));

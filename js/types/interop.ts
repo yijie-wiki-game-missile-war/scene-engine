@@ -7,6 +7,7 @@ import {
   type SceneEngineClientOptions,
 } from '@scene-engine/client';
 import {
+  DisplayTransform,
   PREFAB_DEFINITION_SCHEMA,
   createComponentRegistry,
   createDisplayRuntime,
@@ -14,6 +15,7 @@ import {
   createResourceRegistry,
   createSceneRegistry,
   definePrefab,
+  type DisplayTransform as DisplayTransformValue,
   type DisplayRuntimeOptions,
   type DisplayView,
   type PrefabStatePatch,
@@ -29,6 +31,19 @@ import {
 
 declare const hostElement: unknown;
 declare const canvas: unknown;
+
+const authoredTransform: DisplayTransformValue = DisplayTransform.fromTRS({
+  position: [1, 2, 3],
+  rotationXyzw: [0, 0, 0, 1],
+  scale: [2, 2, 2],
+});
+const movedTransform: DisplayTransformValue =
+  DisplayTransform.translatedSelf(authoredTransform, [0, 0, 1]);
+const transformedPoint: Vec3 = DisplayTransform.transformPoint(movedTransform, [0, 0, 0]);
+const localPoint: Vec3 = DisplayTransform.inverseTransformPoint(movedTransform, transformedPoint);
+declare const worldMatrix64: Float64Array;
+const worldPointFromF64: Vec3 = DisplayTransform.transformPoint(worldMatrix64, [0, 0, 0]);
+void [authoredTransform, movedTransform, transformedPoint, localPoint, worldPointFromF64];
 
 const sceneRegistry = createSceneRegistry();
 const prefabRegistry = createPrefabRegistry();
@@ -71,23 +86,18 @@ const clientView: DisplayView | null = client.currentDisplayView();
 const capturedView: DisplayView | null = client.capture().displayView;
 void capturedView;
 
-const transformOutput = {
-  position: new Float64Array(3),
-  rotationXyzw: new Float64Array(4),
-  scale: new Float64Array(3),
-  matrix: new Float64Array(16),
-};
+const transformOutput = new Float64Array(16);
 if (clientView !== null) {
   const node = clientView.getNode('py/unit-1');
   if (node !== null) {
-    const x: number = node.getWorldTransform().position[0];
+    const x: number = node.getWorldTransform()[12];
     const snapshot: WorldTransform = node.getWorldTransform(null);
     const copied: typeof transformOutput = node.getWorldTransform(transformOutput);
     void [x, snapshot, copied];
   }
   const world = clientView.getWorldTransform('py/unit-1');
   if (world !== false) {
-    const matrixEntry: number = world.matrix[0];
+    const matrixEntry: number = world[0];
     void matrixEntry;
   }
   const copied: false | typeof transformOutput =
@@ -95,7 +105,7 @@ if (clientView !== null) {
   const owner: string | null = clientView.getAuthorityOwner('py/unit-1');
   void [copied, owner, clientView.getComponentState('py/unit-1', 'model'), clientView.snapshot()];
 
-  // @ts-expect-error Output transforms require writable TRS buffers.
+  // @ts-expect-error Output transforms require a writable 16-value numeric buffer.
   clientView.getWorldTransform('py/unit-1', {});
 }
 

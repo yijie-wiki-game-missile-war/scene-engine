@@ -6,18 +6,14 @@ import {
   PREFAB_DEFINITION_SCHEMA,
   definePrefab,
 } from '../src/index.js';
-import { IDENTITY, commitAuthority, createHarness } from './helpers.mjs';
+import { IDENTITY, commitAuthority, createHarness, matrixPosition, matrixTransform } from './helpers.mjs';
 
 class NestedProbeComponent extends Component {
   static typeId = 'test.nested-probe@1';
 }
 
 function transformAt(x, y = 0, z = 0) {
-  return {
-    position: [x, y, z],
-    rotationXyzw: [0, 0, 0, 1],
-    scale: [1, 1, 1],
-  };
+  return matrixTransform({ position: [x, y, z] });
 }
 
 function configureProbe(registry) {
@@ -223,7 +219,7 @@ test('three fixed Prefab levels expand into ordinary Nodes in the one live graph
   assert.equal(view.getNode(names.branch).parentName, names.middle);
   assert.equal(view.getNode(names.leaf).parentName, names.branch);
   assert.equal(view.getNode(names.body).parentName, names.leaf);
-  assert.deepEqual(view.getWorldTransform(names.body).position, [25, 0, 0]);
+  assert.deepEqual(matrixPosition(view.getWorldTransform(names.body)), [25, 0, 0]);
   assert.equal(view.getComponentState(names.body, 'probe').properties.value, 7);
 
   for (const name of Object.values(names)) {
@@ -252,7 +248,7 @@ test('three fixed Prefab levels expand into ordinary Nodes in the one live graph
   assert.strictEqual(runtime._nodeIndex.require(names.middle), middleIdentity);
   assert.strictEqual(runtime._nodeIndex.require(names.leaf), leafIdentity);
   assert.strictEqual(runtime._nodeIndex.require(names.body).requireComponent('probe'), probeIdentity);
-  assert.deepEqual(runtime.currentView().getNode(names.middle).localTransform.position, [8, 0, 0]);
+  assert.deepEqual(matrixPosition(runtime.currentView().getNode(names.middle).localTransform), [8, 0, 0]);
   assert.equal(runtime.currentView().getNode(names.middle).visibleSelf, false);
   assert.equal(runtime.currentView().getNode(names.body).visibleInHierarchy, false);
   assert.equal(runtime.currentView().getComponentState(names.body, 'probe').properties.value, 19);
@@ -261,7 +257,7 @@ test('three fixed Prefab levels expand into ordinary Nodes in the one live graph
   commitAuthority(runtime, () => runtime.authority.setNodeState({ name: names.owner, state: {} }),
     { sourceTickDelta: 1 });
   assert.strictEqual(runtime._nodeIndex.require(names.middle), middleIdentity);
-  assert.deepEqual(runtime.currentView().getNode(names.middle).localTransform.position, [2, 0, 0]);
+  assert.deepEqual(matrixPosition(runtime.currentView().getNode(names.middle).localTransform), [2, 0, 0]);
   assert.equal(runtime.currentView().getNode(names.middle).visibleSelf, true);
   assert.equal(runtime.currentView().getComponentState(names.body, 'probe').properties.value, 7);
 });
@@ -325,9 +321,9 @@ test('dynamic Prefab slots reconcile 0..N instances and retain only the same key
     assert.strictEqual(runtime._nodeIndex.require(alpha), alphaRootIdentity);
     assert.strictEqual(runtime._nodeIndex.require(alphaBody), alphaBodyIdentity);
     assert.strictEqual(runtime._nodeIndex.require(alphaBody).requireComponent('probe'), alphaProbeIdentity);
-    assert.deepEqual(runtime.currentView().getNode(alpha).localTransform.position, [7, 0, 0]);
+    assert.deepEqual(matrixPosition(runtime.currentView().getNode(alpha).localTransform), [7, 0, 0]);
     assert.equal(runtime.currentView().getNode(alpha).visibleSelf, false);
-    assert.deepEqual(runtime.currentView().getNode(alphaBody).localTransform.position, [4, 0, 0]);
+    assert.deepEqual(matrixPosition(runtime.currentView().getNode(alphaBody).localTransform), [4, 0, 0]);
     assert.equal(runtime.currentView().getComponentState(alphaBody, 'probe').properties.value, 9);
     assert.equal(runtime.currentView().getComponentState(`${bravo}/body`, 'probe').properties.variant,
       'slot-leaf-b');

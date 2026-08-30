@@ -6,7 +6,7 @@ import { AnimationPlayerComponent } from '../animation/animation-player.js';
 import { CameraComponent } from '../render/components.js';
 import { Resource } from './resource.js';
 
-export const SCENE_DEFINITION_SCHEMA = 'scene-engine-scene-definition@1';
+export const SCENE_DEFINITION_SCHEMA = 'scene-engine-scene-definition@2';
 
 function normalizeRendererProfile(value) {
   const record = exactKeys(value, ['drawMode', 'maximumPixelRatio', 'clearRgba', 'antialias',
@@ -97,7 +97,9 @@ export class SceneDefinition extends Resource {
       return Object.freeze({
         localName,
         parentLocalName,
-        transform: normalizeTransform(record.transform ?? IDENTITY_TRANSFORM),
+        transform: normalizeTransform(
+          Object.hasOwn(record, 'transform') ? record.transform : IDENTITY_TRANSFORM,
+        ),
         visible,
         label: record.label ?? null,
         components: Object.freeze(components),
@@ -120,7 +122,9 @@ export class SceneDefinition extends Resource {
         definition,
         compiledPrefab: compiledPrefabCatalog?.require(definition.id)
           ?? definition.compile({ componentRegistry, resourceRegistry, prefabRegistry }),
-        transform: normalizeTransform(record.transform ?? IDENTITY_TRANSFORM),
+        transform: normalizeTransform(
+          Object.hasOwn(record, 'transform') ? record.transform : IDENTITY_TRANSFORM,
+        ),
         visible,
         state: cloneAndFreeze(record.state ?? {}, 'display-prefab-state-invalid'),
       });

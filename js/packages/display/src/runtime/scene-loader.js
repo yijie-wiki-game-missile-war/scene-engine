@@ -91,18 +91,45 @@ export class SceneLoader {
     const errors = [];
     try {
       if (this._scene.rootNode) {
-        for (const node of this._scene.nodeGraph.childBeforeParent(this._scene.rootNode)) {
+        const root = this._scene.rootNode;
+        const ordered = this._scene.nodeGraph.childBeforeParent(root);
+        for (const node of ordered) {
           for (const component of [...node._components.values()].reverse()) {
             errors.push(...component.dispose(reason));
             node._components.delete(component.key);
           }
         }
-        for (const node of this._scene.nodeGraph.childBeforeParent(this._scene.rootNode)) {
+        const forest = ordered.filter((node) => node !== root);
+        let bulkDetached = false;
+        try {
+          if (forest.length > 0) {
+            const topology = this._scene.nodeGraph.detachForest(forest);
+            this._scene.nodeGraph.commitDetachedForest(topology);
+          }
+          bulkDetached = true;
+        } catch (error) { errors.push(error); }
+        if (bulkDetached) {
+          for (const node of forest) {
+            try {
+              this._scene.nodeIndex.unregister(node);
+              node._markDisposed();
+            } catch (error) { errors.push(error); }
+          }
           try {
-            this._scene.nodeGraph.detach(node);
-            this._scene.nodeIndex.unregister(node);
-            node._markDisposed();
+            this._scene.nodeGraph.detach(root);
+            this._scene.nodeIndex.unregister(root);
+            root._markDisposed();
           } catch (error) { errors.push(error); }
+        } else {
+          // The bulk operation validates before its first write. Preserve the
+          // existing best-effort cleanup path if a corrupted graph rejects it.
+          for (const node of ordered) {
+            try {
+              this._scene.nodeGraph.detach(node);
+              this._scene.nodeIndex.unregister(node);
+              node._markDisposed();
+            } catch (error) { errors.push(error); }
+          }
         }
       }
       try { this._scene.renderSystem.setActiveCamera(null); } catch (error) { errors.push(error); }

@@ -25,6 +25,11 @@ import {
   disposeThreeResource,
   loadThreeResource,
 } from '../js/packages/renderer-three/src/resources.js';
+import {
+  IDENTITY_MATRIX,
+  composeMatrix4,
+  matrix4AlmostEqual,
+} from './support/matrix4.mjs';
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const PROFILE_NAMES = Object.freeze([
@@ -37,11 +42,7 @@ const PROFILE_NAMES = Object.freeze([
 const PROFILE_SET = new Set(PROFILE_NAMES);
 const MAXIMUM_BINDINGS = 50_000;
 const FRAME_MILLISECONDS = 1_000 / TICKS_PER_SECOND;
-const IDENTITY = Object.freeze({
-  position: Object.freeze([0, 0, 0]),
-  rotationXyzw: Object.freeze([0, 0, 0, 1]),
-  scale: Object.freeze([1, 1, 1]),
-});
+const IDENTITY = IDENTITY_MATRIX;
 const IDS = Object.freeze({
   animation: 'benchmark/animation/walk',
   material: 'benchmark/material/standard',
@@ -297,11 +298,7 @@ function sceneDefinition() {
     nodes: [{
       localName: 'camera',
       parentLocalName: null,
-      transform: {
-        position: [0, 100, 200],
-        rotationXyzw: [0, 0, 0, 1],
-        scale: [1, 1, 1],
-      },
+      transform: composeMatrix4([0, 100, 200]),
       components: [{
         key: 'camera',
         type: 'render.camera@1',
@@ -398,15 +395,12 @@ function transformFor(index, tick, bindings) {
   const width = Math.max(1, Math.ceil(Math.sqrt(bindings)));
   const angle = ((tick * 7 + index) % 360) * Math.PI / 180;
   const scale = 1 + ((tick + index) % 5) * 0.05;
-  return {
-    position: [
+  return composeMatrix4([
       (index % width) + (tick % 11) / 32,
       ((tick + index) % 7) / 16,
       Math.floor(index / width),
-    ],
-    rotationXyzw: [0, Math.sin(angle / 2), 0, Math.cos(angle / 2)],
-    scale: [scale, 1 + ((tick + index) % 3) * 0.025, scale],
-  };
+    ], [0, Math.sin(angle / 2), 0, Math.cos(angle / 2)],
+    [scale, 1 + ((tick + index) % 3) * 0.025, scale]);
 }
 
 function nestedEntry(index, tick, bindings) {
@@ -640,8 +634,7 @@ function applyTick(runtime, fixture, options, state) {
 }
 
 function sameTransform(left, right) {
-  return ['position', 'rotationXyzw', 'scale'].every((field) => left[field].length === right[field].length
-    && left[field].every((value, index) => Math.abs(value - right[field][index]) <= 1e-12));
+  return matrix4AlmostEqual(left, right);
 }
 
 function sampleFinalTransforms(runtime, fixture, options, state) {
@@ -876,7 +869,7 @@ async function runBenchmark(options) {
   const passed = Object.values(checks).every(Boolean);
   const cpuInfo = os.cpus();
   return {
-    schema: 'scene-engine-display-runtime-scale@1',
+    schema: 'scene-engine-display-runtime-scale@2',
     status: passed ? (options.quick ? 'QUICK PASS' : 'READY') : 'NOT READY',
     mode: options.quick ? 'quick' : 'formal',
     configuration: {

@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { SceneEngineClient } from '../src/index.js';
+import { encodeDisplayCheckpoint, encodeDisplayCommandStream } from '../src/display.js';
 import { DISPLAY_CODEC, encodePacket } from '../src/wire.js';
 
 const NODE_COUNT = 500;
@@ -17,11 +18,12 @@ const HASHES = Object.freeze({
 const options = parseOptions(process.argv.slice(2));
 
 function transform(x = 0) {
-  return {
-    position: [x, 0, 0],
-    rotationXyzw: [0, 0, 0, 1],
-    scale: [1, 1, 1],
-  };
+  return new Float32Array([
+    1, 0, 0, 0,
+    0, 1, 0, 0,
+    0, 0, 1, 0,
+    x, 0, 0, 1,
+  ]);
 }
 
 function createRecord(name, x = 0) {
@@ -38,7 +40,7 @@ function createRecord(name, x = 0) {
 
 function checkpointPacket(nodes) {
   return encodePacket('engine.checkpoint', {
-    schema: 'scene-engine-wire@2',
+    schema: 'scene-engine-wire@3',
     type: 'engine.checkpoint',
     stream_id: STREAM_ID,
     commit_seq: 0,
@@ -55,28 +57,28 @@ function checkpointPacket(nodes) {
     },
     {
       kind: 'display_checkpoint',
-      encoding: 'json',
-      value: {
-        schema: 'scene-engine-display-checkpoint@3',
+      encoding: 'raw',
+      value: encodeDisplayCheckpoint({
+        schema: 'scene-engine-display-checkpoint@5',
         scene_name: 'benchmark',
         ...HASHES,
         last_command_seq: 0,
         nodes,
-      },
+      }),
     },
   ]);
 }
 
 function commitPacket({ commitSeq, baseCommandSeq, commands }) {
   const records = commands.map((command, index) => ({
-    schema: 'scene-engine-node-command@3',
+    schema: 'scene-engine-node-command@5',
     command_seq: baseCommandSeq + index + 1,
     source_tick: commitSeq,
     ...command,
   }));
   const lastCommandSeq = baseCommandSeq + records.length;
   return encodePacket('engine.commit', {
-    schema: 'scene-engine-wire@2',
+    schema: 'scene-engine-wire@3',
     type: 'engine.commit',
     stream_id: STREAM_ID,
     commit_seq: commitSeq,
@@ -101,13 +103,13 @@ function commitPacket({ commitSeq, baseCommandSeq, commands }) {
     },
     {
       kind: 'display_command_stream',
-      encoding: 'json',
-      value: {
-        schema: 'scene-engine-display-command-stream@3',
+      encoding: 'raw',
+      value: encodeDisplayCommandStream({
+        schema: 'scene-engine-display-command-stream@5',
         base_command_seq: baseCommandSeq,
         last_command_seq: lastCommandSeq,
         commands: records,
-      },
+      }, { sourceTick: commitSeq }),
     },
   ]);
 }
@@ -153,6 +155,11 @@ function createBenchmarkSessionFactory(state) {
     };
     return {
       runtime: {
+        catalogIdentity: () => Object.freeze({
+          sceneCatalogHash: HASHES.scene_catalog_hash,
+          prefabCatalogHash: HASHES.prefab_catalog_hash,
+          stateSchemaHash: HASHES.state_schema_hash,
+        }),
         installScene() {},
         activate(cursor) { state.cursor = cursor; },
         start() {},

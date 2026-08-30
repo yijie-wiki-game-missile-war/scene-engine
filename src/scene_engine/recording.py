@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
+from .display_binary import decode_display_command_stream_binary
 from .errors import RecordingError
 from .wire import (
     DEFAULT_ENGINE_LIMITS,
@@ -21,7 +22,7 @@ from .wire import (
 )
 
 
-PACKET_LOG_SCHEMA = "scene-engine-packet-log@2"
+PACKET_LOG_SCHEMA = "scene-engine-packet-log@3"
 PACKET_LOG_MANIFEST = "manifest.json"
 PACKET_LOG_PACKETS = "packets.bin"
 PACKET_LOG_INDEX = "index.json"
@@ -171,8 +172,7 @@ class PacketLogWriter:
                 or tick < self._last_tick
                 or tick > self._last_tick + 1
                 or command_sequence < self._last_command_seq
-                or packet.attachments[1].value["base_command_seq"]
-                != self._last_command_seq
+                or _display_command_base(packet) != self._last_command_seq
             ):
                 raise RecordingError("packet log commit progression is invalid")
             elif not _cause_matches_tick(packet.header["cause"], tick - self._last_tick):
@@ -454,8 +454,7 @@ def _validate_packet_progression(previous, packet) -> None:
         current["commit_seq"] != before["commit_seq"] + 1
         or current["world_revision"] != before["world_revision"] + 1
         or current["last_command_seq"] < before["last_command_seq"]
-        or packet.attachments[1].value["base_command_seq"]
-        != before["last_command_seq"]
+        or _display_command_base(packet) != before["last_command_seq"]
     ):
         raise RecordingError("packet log commit progression has a gap")
     delta = current["source_tick"] - before["source_tick"]
@@ -469,6 +468,15 @@ def _cause_matches_tick(cause: str, delta: int) -> bool:
     if cause == "input":
         return delta == 0
     return delta in (0, 1)
+
+
+def _display_command_base(packet: Any) -> int:
+    stream = decode_display_command_stream_binary(
+        packet.attachments[1].bytes,
+        expected_source_tick=packet.header["source_tick"],
+        expected_last_command_seq=packet.header["last_command_seq"],
+    )
+    return stream["base_command_seq"]
 
 
 def _index_integer(value: Any, field: str) -> int:

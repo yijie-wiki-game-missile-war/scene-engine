@@ -1,6 +1,7 @@
 import {
   parseDisplayCheckpoint,
   parseDisplayCommandStream,
+  takeOwnedDisplayMatrix,
 } from './display.js';
 import { applyJsonPatch, prepareJsonSnapshot } from './json-tree.js';
 import { readPacketLog } from './packet-log.js';
@@ -109,7 +110,7 @@ export class SceneEngineClient {
     );
     const checkpoint = parseDisplayCheckpoint(
       attachment(packet, 'display_checkpoint').value,
-      { header },
+      { header, maximumJsonDepth: this.#limits.maximumJsonDepth },
     );
     const commit = commitView('checkpoint', header);
     const cursor = displayCursor(commit);
@@ -140,7 +141,7 @@ export class SceneEngineClient {
         'display-install-scene-async',
       );
       for (const node of checkpoint.nodes) {
-        callAuthority(candidate.authorityPort, 'createNode', node);
+        callAuthority(candidate.authorityPort, 'createNode', authorityNodePayload(node));
       }
       callSynchronous(
         candidate.runtime.activate,
@@ -184,6 +185,7 @@ export class SceneEngineClient {
       {
         header,
         baseCommandSeq: this.#lastCommandSeq,
+        maximumJsonDepth: this.#limits.maximumJsonDepth,
       },
     );
     const world = applyJsonPatch(
@@ -398,17 +400,12 @@ function callAuthority(authorityPort, method, record) {
 function authorityPayload(command) {
   switch (command.kind) {
     case 'node-create':
+      return authorityNodePayload(command);
+    case 'node-set-transform':
       return Object.freeze({
         name: command.name,
-        parentName: command.parentName,
-        prefabId: command.prefabId,
-        transformMode: command.transformMode,
-        transform: command.transform,
-        visible: command.visible,
-        state: command.state,
+        transform: takeOwnedDisplayMatrix(command.transform),
       });
-    case 'node-set-transform':
-      return Object.freeze({ name: command.name, transform: command.transform });
     case 'node-set-parent':
       return Object.freeze({ name: command.name, parentName: command.parentName });
     case 'node-set-visible':
@@ -426,6 +423,18 @@ function authorityPayload(command) {
     default:
       fail('display-command-kind-invalid');
   }
+}
+
+function authorityNodePayload(node) {
+  return Object.freeze({
+    name: node.name,
+    parentName: node.parentName,
+    prefabId: node.prefabId,
+    transformMode: node.transformMode,
+    transform: takeOwnedDisplayMatrix(node.transform),
+    visible: node.visible,
+    state: node.state,
+  });
 }
 
 function callSynchronous(method, receiver, args, asyncCode) {

@@ -11,6 +11,8 @@ import { RenderSystem } from '../render/render-system.js';
 import { RenderComponent } from '../render/render-component.js';
 import { AnimationPlayerComponent } from '../animation/animation-player.js';
 import { AnimationSystem } from '../animation/animation-system.js';
+import { BillboardComponent } from '../behaviours/billboard.js';
+import { attachedComponentNode } from '../component/component.js';
 import { compilePrefabCatalog } from '../resource/prefab-compiler.js';
 import { AuthorityPort } from './authority-port.js';
 import { DisplayView } from './display-view.js';
@@ -19,7 +21,7 @@ import { PrefabInstantiator } from './prefab-instantiator.js';
 import { Scene } from './scene.js';
 import { SceneLoader } from './scene-loader.js';
 
-export const DISPLAY_RUNTIME_SCHEMA = 'scene-engine-display-node@3';
+export const DISPLAY_RUNTIME_SCHEMA = 'scene-engine-display-node@5';
 export const DISPLAY_SUMMARY_SCHEMA = 'scene-engine-display-summary@1';
 const ZERO_CURSOR = Object.freeze({ commitSeq: 0, sourceTick: 0, lastCommandSeq: 0 });
 const DISPLAY_OPTION_KEYS = Object.freeze({
@@ -468,7 +470,10 @@ export class DisplayRuntime {
   _componentAttached(component) {
     if (component instanceof AnimationPlayerComponent) this._animationSystem.register(component);
     else if (component instanceof RenderComponent) this._renderSystem.register(component);
-    else this._scheduler.register(component);
+    else {
+      this._scheduler.register(component);
+      this._panelAnchorSourceChanged(component);
+    }
   }
   _componentSuspending(component) {
     return component instanceof AnimationPlayerComponent
@@ -477,7 +482,10 @@ export class DisplayRuntime {
   _componentEnabledChanged(component) {
     if (component instanceof AnimationPlayerComponent) this._animationSystem.setEnabled(component);
     else if (component instanceof RenderComponent) this._renderSystem.setEnabled(component);
-    else this._scheduler.setEnabled(component, component.enabled);
+    else {
+      this._scheduler.setEnabled(component, component.enabled);
+      this._panelAnchorSourceChanged(component);
+    }
     this.requestDraw();
   }
   _componentPropertiesChanged(component) {
@@ -485,13 +493,22 @@ export class DisplayRuntime {
     else if (component instanceof RenderComponent) {
       this._animationSystem.targetPropertiesChanged(component);
       this._renderSystem.markComponentDirty(component);
-    }
+    } else this._panelAnchorSourceChanged(component);
     this.requestDraw();
   }
   _componentDetaching(component) {
     if (component instanceof AnimationPlayerComponent) this._animationSystem.unregister(component);
     else if (component instanceof RenderComponent) this._renderSystem.unregister(component);
-    else this._scheduler.unregister(component);
+    else {
+      this._scheduler.unregister(component);
+      this._panelAnchorSourceChanged(component);
+    }
+  }
+
+  _panelAnchorSourceChanged(component) {
+    if (!(component instanceof BillboardComponent)) return;
+    const node = attachedComponentNode(component);
+    if (node !== null) this._renderSystem.markPanelAnchorSubtreeDirty(node);
   }
 
   _mutated() { this._revision += 1; this.requestDraw(); }

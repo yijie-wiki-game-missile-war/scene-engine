@@ -43,11 +43,17 @@ PREFAB_ID = "communication/root"
 WORLD_CODEC = "communication-world@1"
 CLIENT_ID = "python-js-communication"
 FRAME_HEADER = struct.Struct("<I")
+MATRIX4_F32 = struct.Struct("<16f")
+FLOAT32 = struct.Struct("<f")
+TRANSLATION_X_OFFSET = 12 * FLOAT32.size
 MAXIMUM_FRAME_BYTES = 64 * 1024 * 1024
 DEFAULT_TIMEOUT_SECONDS = 30.0
 PROFILE_ROUNDTRIP = "roundtrip"
 PROFILE_WINDOWED = "windowed"
 PROFILES = (PROFILE_ROUNDTRIP, PROFILE_WINDOWED)
+REPORT_SCHEMA = "scene-engine-python-js-communication@2"
+PEER_REPORT_SCHEMA = "scene-engine-python-js-communication-peer@2"
+TRANSFORM_DIGEST_ENCODING = "node-name-nul-le-f32-matrix16-nul"
 
 
 @dataclass
@@ -58,7 +64,10 @@ class CommunicationWorld:
     total_updates: int = 0
 
     def __post_init__(self) -> None:
-        self.positions = [initial_position(index) for index in range(self.roots)]
+        self.transforms = [
+            display_transform(initial_position(index)) for index in range(self.roots)
+        ]
+        self.position_checksum = 0
 
 
 class CommunicationProgram:
@@ -89,7 +98,15 @@ class CommunicationProgram:
             for ordinal in range(self.updates_per_commit)
         )
         for index in indices:
-            world.positions[index] = updated_position(index, context.commit.source_tick)
+            old_x = int(
+                FLOAT32.unpack_from(
+                    world.transforms[index].matrix_bytes,
+                    TRANSLATION_X_OFFSET,
+                )[0]
+            )
+            position = updated_position(index, context.commit.source_tick)
+            world.transforms[index] = display_transform(position)
+            world.position_checksum += int(position[0]) - old_x
         world.total_updates += len(indices)
         return MutationResult.changed(indices)
 
@@ -110,7 +127,7 @@ class CommunicationProgram:
                     parent_name=None,
                     prefab_id=PREFAB_ID,
                     transform_mode="live",
-                    transform=display_transform(world.positions[index]),
+                    transform=world.transforms[index],
                     visible=True,
                     state={"index": index},
                 )
@@ -130,7 +147,7 @@ class CommunicationProgram:
                     {
                         "op": "set",
                         "path": ["position_checksum"],
-                        "value": position_checksum(world.positions),
+                        "value": world.position_checksum,
                     },
                     {"op": "set", "path": ["tick"], "value": world.source_tick},
                     {
@@ -147,7 +164,7 @@ class CommunicationProgram:
             },
             tuple(
                 DisplayCommand.set_transform(
-                    root_name(index), display_transform(world.positions[index])
+                    root_name(index), world.transforms[index]
                 )
                 for index in indices
             ),
@@ -345,6 +362,7 @@ def run_benchmark(
         stream_id="python-js-communication-stream",
     )
     commit_started_ns: dict[int, int] = {}
+    python_tick_to_transport_ns = [0] * commits
     commit_e2e_ns = [0] * commits
     wire_round_trip_ns = [0] * commits
     ack_lengths: list[int] = []
@@ -387,8 +405,8 @@ def run_benchmark(
             target = min(commits, produced + burst_size)
             while produced < target:
                 commit_seq = produced + 1
-                commit_started_ns[commit_seq] = time.perf_counter_ns()
                 clock.advance(1 / TICKS_PER_SECOND)
+                commit_started_ns[commit_seq] = time.perf_counter_ns()
                 result = runtime.pump()
                 if result.ticks_committed != 1 or result.commit_seq != commit_seq:
                     raise RuntimeError(f"runtime did not publish commit {commit_seq}")
@@ -405,6 +423,9 @@ def run_benchmark(
                     ack_hash=ack_hash,
                 )
                 ack_lengths.append(len(ack))
+                python_tick_to_transport_ns[commit_seq - 1] = (
+                    transport.sent_at_ns[commit_seq] - commit_started_ns[commit_seq]
+                )
                 commit_e2e_ns[commit_seq - 1] = ack_end - commit_started_ns[commit_seq]
                 wire_round_trip_ns[commit_seq - 1] = (
                     ack_end - transport.sent_at_ns[commit_seq]
@@ -424,7 +445,7 @@ def run_benchmark(
             and last_packet.header["commit_seq"] == commits
         )
         exact_ack_bytes = len(ack_lengths) == commits + 1
-        expected_digest = transform_digest(world.positions)
+        expected_digest = transform_digest(world.transforms)
         elapsed_seconds = max(
             (communication_finished - communication_started) / 1_000_000_000,
             1e-12,
@@ -433,6 +454,11 @@ def run_benchmark(
         ack_commit_bytes = sum(ack_lengths[1:])
         total_commands = commits * updates_per_commit
         correctness = {
+            "peerReportContract": (
+                peer_report["schema"] == PEER_REPORT_SCHEMA
+                and peer_report["transformDigestEncoding"]
+                == TRANSFORM_DIGEST_ENCODING
+            ),
             "canonicalCatalogAccepted": peer_report["sessionCount"] == 1,
             "exactAckBytes": exact_ack_bytes,
             "enginePacketEnvelope": engine_packet_envelope,
@@ -482,8 +508,9 @@ def run_benchmark(
         }
         passed = all(correctness.values())
         report = {
-            "schema": "scene-engine-python-js-communication@1",
+            "schema": REPORT_SCHEMA,
             "status": "PASS" if passed else "FAIL",
+            "transformDigestEncoding": TRANSFORM_DIGEST_ENCODING,
             "parameters": {
                 "roots": roots,
                 "commits": commits,
@@ -502,9 +529,16 @@ def run_benchmark(
                 "totalCommands": total_commands,
                 "engineBytes": engine_commit_bytes,
                 "ackBytes": ack_commit_bytes,
+                "pythonTickToTransport": timing_summary(
+                    python_tick_to_transport_ns
+                ),
                 "pythonTickToAck": timing_summary(commit_e2e_ns),
                 "lengthFrameToAck": timing_summary(wire_round_trip_ns),
                 "latencySemantics": {
+                    "pythonTickToTransport": (
+                        "runtime pump start through transport send entry; windowed "
+                        "profile includes Python flow-control queueing"
+                    ),
                     "pythonTickToAck": (
                         "runtime pump start through ACK read; includes flow-control queueing"
                     ),
@@ -559,6 +593,7 @@ def receive_ack(
     ack_hash: Any,
 ) -> tuple[bytes, int]:
     raw = peer.read_packet()
+    ack_received_ns = time.perf_counter_ns()
     decoded = read_engine_packet(raw)
     if decoded.kind is not PacketKind.ACK:
         raise RuntimeError("JavaScript peer returned a non-ACK packet")
@@ -579,7 +614,7 @@ def receive_ack(
         raise RuntimeError(f"JavaScript ACK bytes differ at commit {expected_commit_seq}")
     update_framed_hash(ack_hash, raw)
     runtime.receive_client_packet(CLIENT_ID, raw)
-    return raw, time.perf_counter_ns()
+    return raw, ack_received_ns
 
 
 def sample_flow(runtime: SceneEngineRuntime, peaks: dict[str, int]) -> None:
@@ -641,18 +676,29 @@ def updated_position(index: int, source_tick: int) -> tuple[float, float, float]
 
 def display_transform(position: tuple[float, float, float]) -> DisplayTransform:
     return DisplayTransform(
-        position=position,
-        rotation_xyzw=(0.0, 0.0, 0.0, 1.0),
-        scale=(1.0, 1.0, 1.0),
+        matrix_bytes=MATRIX4_F32.pack(
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            position[0],
+            position[1],
+            position[2],
+            1.0,
+        )
     )
 
 
 def root_name(index: int) -> str:
     return f"py/communication-{index:06d}"
-
-
-def position_checksum(positions: Iterable[tuple[float, float, float]]) -> int:
-    return sum(int(position[0]) for position in positions)
 
 
 def world_snapshot(world: CommunicationWorld) -> dict[str, int]:
@@ -661,19 +707,17 @@ def world_snapshot(world: CommunicationWorld) -> dict[str, int]:
         "world_revision": world.world_revision,
         "roots": world.roots,
         "total_updates": world.total_updates,
-        "position_checksum": position_checksum(world.positions),
+        "position_checksum": world.position_checksum,
     }
 
 
-def transform_digest(positions: list[tuple[float, float, float]]) -> str:
+def transform_digest(transforms: list[DisplayTransform]) -> str:
     digest = hashlib.sha256()
-    for index, position in enumerate(positions):
+    for index, transform in enumerate(transforms):
         digest.update(root_name(index).encode("utf-8"))
         digest.update(b"\0")
-        digest.update(",".join(format(value, "g") for value in position).encode("ascii"))
+        digest.update(transform.matrix_bytes)
         digest.update(b"\0")
-        digest.update(b"0,0,0,1\0")
-        digest.update(b"1,1,1\0")
     return digest.hexdigest()
 
 
@@ -711,8 +755,9 @@ def main(argv: list[str] | None = None) -> int:
         )
     except Exception as error:
         report = {
-            "schema": "scene-engine-python-js-communication@1",
+            "schema": REPORT_SCHEMA,
             "status": "ERROR",
+            "transformDigestEncoding": TRANSFORM_DIGEST_ENCODING,
             "error": {"type": type(error).__name__, "message": str(error)},
         }
     process_output = json.dumps(report, indent=2, sort_keys=True)

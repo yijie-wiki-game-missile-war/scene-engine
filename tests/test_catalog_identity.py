@@ -8,7 +8,7 @@ import pytest
 from scene_engine import ConfigurationError, DisplayCatalogIdentity
 
 
-FIXTURE = Path(__file__).resolve().parents[1] / "fixtures/display-catalog-v1/identity.json"
+FIXTURE = Path(__file__).resolve().parents[1] / "fixtures/display-catalog-v2/identity.json"
 
 
 def test_python_loads_the_display_build_identity_artifact() -> None:

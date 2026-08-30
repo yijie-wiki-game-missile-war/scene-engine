@@ -28,7 +28,7 @@ test('Display runtime scale CLI reports deterministic structure and complete dis
   assert.equal(completed.stderr, '');
   assert.equal(completed.stdout.trim().split('\n').length, 1);
   const report = JSON.parse(completed.stdout);
-  assert.equal(report.schema, 'scene-engine-display-runtime-scale@1');
+  assert.equal(report.schema, 'scene-engine-display-runtime-scale@2');
   assert.equal(report.status, 'QUICK PASS');
   assert.deepEqual(report.configuration, {
     profile: 'static-mesh',

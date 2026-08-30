@@ -1,9 +1,9 @@
 const MAGIC = 'SENG';
-const VERSION = 2;
+const VERSION = 3;
 const FIXED_HEADER_BYTES = 16;
 const ATTACHMENT_HEADER_BYTES = 8;
-const WIRE_SCHEMA = 'scene-engine-wire@2';
-export const DISPLAY_CODEC = 'scene-engine-display-node@3';
+const WIRE_SCHEMA = 'scene-engine-wire@3';
+export const DISPLAY_CODEC = 'scene-engine-display-node@5';
 const MAX_SAFE = Number.MAX_SAFE_INTEGER;
 
 const PACKET_KIND = Object.freeze({
@@ -276,9 +276,9 @@ function validateAttachmentLayout(kind, attachments, limits) {
   const actual = attachments.map((item) => `${item.kind}:${item.encoding}`).join(',');
   let valid = false;
   if (kind === 'engine.checkpoint') {
-    valid = actual === 'world_snapshot:json,display_checkpoint:json';
+    valid = actual === 'world_snapshot:json,display_checkpoint:raw';
   } else if (kind === 'engine.commit') {
-    valid = actual === 'world_patch:json,display_command_stream:json';
+    valid = actual === 'world_patch:json,display_command_stream:raw';
     if (valid) {
       const changes = attachments[0].value?.changes;
       if (Array.isArray(changes) && changes.length > limits.maximumWorldPatchChanges) {

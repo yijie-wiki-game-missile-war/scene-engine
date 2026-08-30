@@ -19,6 +19,8 @@ const DYNAMIC_BRAVO = `prefab/${ROOT}/units/bravo`;
 
 function geometryNode(root, localName) { return `prefab/${root}/${localName}`; }
 
+function translation(matrix) { return Array.from(matrix.slice(12, 15)); }
+
 function assertTupleAlmostEqual(actual, expected, epsilon = 1e-12) {
   assert.equal(actual.length, expected.length);
   for (let index = 0; index < actual.length; index += 1) {
@@ -77,7 +79,7 @@ test('DisplayRuntime drives geometry, nested Prefabs, authority activity, animat
       const initialView = runtime.currentView();
       assert.equal(initialView.getNode(FIXED).parentName, `prefab/${ROOT}/mount`);
       assert.equal(initialView.getNode(DYNAMIC_ALPHA).parentName, `prefab/${ROOT}/mount`);
-      assert.deepEqual(initialView.getWorldTransform(`${FIXED}/mesh-node`).position, [11, 0, 0]);
+      assert.deepEqual(translation(initialView.getWorldTransform(`${FIXED}/mesh-node`)), [11, 0, 0]);
       assert.equal(initialView.getComponentState(`${DYNAMIC_ALPHA}/mesh-node`, 'mesh')
         .properties.renderOrder, 2);
       assert.equal(initialView.getComponentState(`${FIXED}/particle-node`, 'particle')
@@ -120,10 +122,8 @@ test('DisplayRuntime drives geometry, nested Prefabs, authority activity, animat
       });
       commitAuthority(runtime, () => runtime.authority.setNodeTransform({ name: MOVER, transform: moved }));
       let view = runtime.currentView();
-      assert.deepEqual(view.getNode(MOVER).localTransform.position, moved.position);
-      assertTupleAlmostEqual(view.getNode(MOVER).localTransform.rotationXyzw, moved.rotationXyzw);
-      assert.deepEqual(view.getNode(MOVER).localTransform.scale, moved.scale);
-      assert.deepEqual(view.getWorldTransform(MOVER).position, [2, 3, 4]);
+      assertTupleAlmostEqual(view.getNode(MOVER).localTransform, moved);
+      assert.deepEqual(translation(view.getWorldTransform(MOVER)), [2, 3, 4]);
 
       commitAuthority(runtime, () => runtime.authority.setNodeParent({
         name: MOVER,
@@ -131,7 +131,7 @@ test('DisplayRuntime drives geometry, nested Prefabs, authority activity, animat
       }));
       view = runtime.currentView();
       assert.equal(view.getNode(MOVER).parentName, ROOT);
-      assert.deepEqual(view.getWorldTransform(MOVER).position, [12, 3, 4]);
+      assert.deepEqual(translation(view.getWorldTransform(MOVER)), [12, 3, 4]);
 
       commitAuthority(runtime, () => runtime.authority.setNodeVisible({ name: MOVER, visible: false }));
       frames.step(0);
@@ -156,9 +156,7 @@ test('DisplayRuntime drives geometry, nested Prefabs, authority activity, animat
       }));
       view = runtime.currentView();
       const meshTransform = view.getNode(geometryNode(MOVER, 'mesh-node')).localTransform;
-      assert.deepEqual(meshTransform.position, childTransform.position);
-      assertTupleAlmostEqual(meshTransform.rotationXyzw, childTransform.rotationXyzw);
-      assert.deepEqual(meshTransform.scale, childTransform.scale);
+      assertTupleAlmostEqual(meshTransform, childTransform);
       assert.equal(view.getComponentState(geometryNode(MOVER, 'mesh-node'), 'mesh')
         .properties.renderOrder, 9);
       assert.equal(view.getComponentState(geometryNode(MOVER, 'sprite-node'), 'sprite')
@@ -188,7 +186,10 @@ test('DisplayRuntime drives geometry, nested Prefabs, authority activity, animat
       assert.equal(view.getNode(DYNAMIC_ALPHA), null,
         'complete nested state removes a dynamic instance omitted from the desired set');
       assert.notEqual(view.getNode(DYNAMIC_BRAVO), null);
-      assert.deepEqual(view.getNode(FIXED).localTransform.scale, [1.5, 1.5, 1.5]);
+      assert.deepEqual(
+        [0, 5, 10].map((index) => view.getNode(FIXED).localTransform[index]),
+        [1.5, 1.5, 1.5],
+      );
       assert.equal(view.getNode(`${FIXED}/mesh-node`).visibleInHierarchy, false);
       assert.equal(view.getComponentState(`${FIXED}/mesh-node`, 'mesh').properties.renderOrder, 7);
       assert.equal(view.getComponentState(`${DYNAMIC_BRAVO}/sprite-node`, 'sprite')

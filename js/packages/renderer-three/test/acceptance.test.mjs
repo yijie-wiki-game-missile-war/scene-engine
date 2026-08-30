@@ -76,7 +76,10 @@ test('500 flat real-Three bindings batch, sample, rebuild cleanly, and leak zero
     assert.equal(record.handle.object.visible, false,
       'a batched logical binding has no simultaneously drawable ordinary object');
   }
-  const batchVersions = first.backend._batches.map((batch) => batch.object.instanceMatrix.version);
+  const batchVersions = new Map(first.backend._batches.map((batch) => [
+    batch.records[0].componentType,
+    batch.object.instanceMatrix.version,
+  ]));
   for (let index = 0; index < 50; index += 1) {
     const row = rows[index];
     first.backend.updateBinding(row.binding, patch(row.nodeName, row.key, row.properties,
@@ -85,8 +88,13 @@ test('500 flat real-Three bindings batch, sample, rebuild cleanly, and leak zero
       'transform updates must not reveal batched ordinary objects');
   }
   first.backend.prepareFrame(frame(camera, 61, 1.016));
-  assert.deepEqual(first.backend._batches.map((batch, index) =>
-    batch.object.instanceMatrix.version > batchVersions[index]), [true, true]);
+  assert.deepEqual(Object.fromEntries(first.backend._batches.map((batch) => [
+    batch.records[0].componentType,
+    batch.object.instanceMatrix.version > batchVersions.get(batch.records[0].componentType),
+  ])), {
+    'render.mesh@1': true,
+    'render.sprite@3': false,
+  });
   for (const row of rows.slice(0, 450)) {
     assert.equal(first.backend._records.get(row.binding).handle.object.visible, false);
   }

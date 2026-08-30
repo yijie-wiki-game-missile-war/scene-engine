@@ -13,7 +13,7 @@ Scene Engine 的测试验证当前产品定义、架构所有权和技术合同�
 ### 1. 显示引擎功能与性能
 
 这一类从 `DisplayRuntime` 进入，经唯一 NodeGraph、Component/Animation 系统和 RenderSystem 到 Three backend，覆盖
-简单几何体、固定与动态嵌套 Prefab、Node 增删与 reparent、位置/旋转/缩放、visibility、完整 state replacement、
+简单几何体、固定与动态嵌套 Prefab、Node 增删与 reparent、Matrix4 层级直乘与 shear、visibility、完整 state replacement、
 Display-local sprite animation，以及 mesh、sprite、model、surface、particle 渲染路径。
 
 默认门禁只执行小规模、离线、确定性的 foundation 与 scale smoke。真实 Three backend 的 Node 测试使用确定性

@@ -8,7 +8,7 @@ import {
   readEnginePacket,
 } from './wire.js';
 
-const LOG_SCHEMA = 'scene-engine-packet-log@2';
+const LOG_SCHEMA = 'scene-engine-packet-log@3';
 const PREFIX_BYTES = 8;
 const MANIFEST_FIELDS = Object.freeze([
   'schema', 'wire_schema', 'complete', 'packet_count', 'checkpoint_count',
@@ -110,11 +110,13 @@ function rebuildRecords(bytes, limits) {
     if (packet.kind === 'engine.checkpoint') {
       parseDisplayCheckpoint(attachment(packet, 'display_checkpoint').value, {
         header,
+        maximumJsonDepth: limits.maximumJsonDepth,
       });
     } else {
       parseDisplayCommandStream(attachment(packet, 'display_command_stream').value, {
         header,
         baseCommandSeq: previous.header.last_command_seq,
+        maximumJsonDepth: limits.maximumJsonDepth,
       });
     }
     const entry = Object.freeze({

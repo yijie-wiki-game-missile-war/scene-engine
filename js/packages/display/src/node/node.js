@@ -1,5 +1,6 @@
 import { cloneAndFreeze, nonemptyString } from '../internal.js';
-import { createMutableWorldTransform, normalizeTransform, snapshotWorldTransform } from '../math/transform.js';
+import { createLocalTransform, createMutableWorldTransform, IDENTITY_TRANSFORM,
+  snapshotWorldTransform } from '../math/transform.js';
 import { fail } from '../runtime/health.js';
 import { assertNodeName } from './node-name.js';
 
@@ -12,7 +13,9 @@ export class Node {
     this._sceneToken = sceneToken;
     this._parent = null;
     this._children = [];
-    this._localTransform = normalizeTransform(transform);
+    this._localTransform = createLocalTransform(
+      transform === undefined ? IDENTITY_TRANSFORM : transform,
+    );
     this._worldTransform = createMutableWorldTransform();
     this._visibleSelf = visible;
     if (typeof visible !== 'boolean') fail('display-node-visibility-invalid');
@@ -28,7 +31,7 @@ export class Node {
   get label() { return this._label; }
   get parent() { return this._parent; }
   get children() { return Object.freeze([...this._children]); }
-  get localTransform() { return this._localTransform; }
+  get localTransform() { return Object.freeze(Array.from(this._localTransform)); }
   get worldTransform() { return snapshotWorldTransform(this._worldTransform); }
   get visibleSelf() { return this._visibleSelf; }
   get visibleInHierarchy() { return this._visibleInHierarchy; }
@@ -37,8 +40,7 @@ export class Node {
 
   setLocalTransform(next) {
     this._assertMutable();
-    const normalized = normalizeTransform(next);
-    this._localTransform = normalized;
+    this._localTransform = createLocalTransform(next);
     this._graph?.markTransformDirty(this);
   }
 
