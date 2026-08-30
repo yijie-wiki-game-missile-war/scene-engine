@@ -41,16 +41,16 @@ test('500 flat real-Three bindings batch, sample, rebuild cleanly, and leak zero
       const properties = { textureResourceId: 'texture/atlas', width: 1, height: 1,
         material: { tintRgba: 0xffff_ffff, opacity: 1, emissive: 0,
           alphaMode: 'mask', alphaCutoff: 0.5 }, alpha: 1, frame: 0,
-        flipbook: null, renderOrder: 1, pickable: true };
+        renderOrder: 1, pickable: true };
       return { nodeName, key: 'sprite', properties, binding: await first.backend.createBinding(
-        descriptor(nodeName, 'sprite', 'render.sprite@1', properties, first.registry)) };
+        descriptor(nodeName, 'sprite', 'render.sprite@3', properties, first.registry)) };
     }
     const properties = { particleResourceId: 'particle/ambient', intensity: 1,
       parameters: { durationTicks: 120, capacity: 16, seed: index, rate: 10, size: 0.1,
         velocity: [0, 1, 0], spread: [0.2, 0.2, 0.2], gravity: [0, -1, 0],
-        blendMode: 'normal' }, animation: { startTick: 0, clock: 'visual' }, renderOrder: 2 };
+        blendMode: 'normal' }, renderOrder: 2 };
     return { nodeName, key: 'particle', properties, binding: await first.backend.createBinding(
-      descriptor(nodeName, 'particle', 'render.particle@1', properties, first.registry)) };
+      descriptor(nodeName, 'particle', 'render.particle@2', properties, first.registry)) };
   }));
   first.backend.updateBinding(camera, patch('scene/camera', 'camera', CAMERA_PROPERTIES,
     new THREE.Matrix4().makeTranslation(0, 0, 30)));

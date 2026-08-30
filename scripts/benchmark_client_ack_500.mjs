@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 
 import { spawnSync } from 'node:child_process';
-import { writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 
 import { SceneEngineClient, readEnginePacket } from '../js/packages/client/src/index.js';
@@ -23,10 +22,6 @@ import {
 import { createFakeRenderBackend } from '../js/packages/display/src/testing/fake-render-backend.js';
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
-const DEFAULT_FORMAL_OUTPUT = fileURLToPath(new URL(
-  '../docs/evidence/display-node-cutover/js-client-ack-500-formal.json',
-  import.meta.url,
-));
 const AUTHORITY_ROOTS = 500;
 const PREFAB_CHILDREN_PER_ROOT = 2;
 const EXPECTED_NODE_COUNT = 1_503;
@@ -268,7 +263,7 @@ function commitPacket(commitSeq) {
   }]);
 }
 
-function createDisplaySessionFactory(evidence) {
+function createDisplaySessionFactory(probeState) {
   return (metadata) => {
     if (metadata.sceneName !== 'benchmark'
         || metadata.sceneCatalogHash !== CATALOG_IDENTITY.sceneCatalogHash
@@ -296,22 +291,22 @@ function createDisplaySessionFactory(evidence) {
     const runtimeCurrentView = runtime.currentView.bind(runtime);
     const runtimeWhenReady = runtime.whenReady.bind(runtime);
     runtime.summary = () => {
-      evidence.summaryCalls += 1;
+      probeState.summaryCalls += 1;
       const value = runtimeSummary();
-      evidence.lastSummary = value;
+      probeState.lastSummary = value;
       return value;
     };
     runtime.currentView = () => {
-      evidence.displayViewMaterializations += 1;
+      probeState.displayViewMaterializations += 1;
       return runtimeCurrentView();
     };
     runtime.whenReady = (...args) => {
-      evidence.whenReadyCalls += 1;
+      probeState.whenReadyCalls += 1;
       return runtimeWhenReady(...args);
     };
-    evidence.runtime = runtime;
-    evidence.frames = frames;
-    evidence.fakeBackends = fakeBackends;
+    probeState.runtime = runtime;
+    probeState.frames = frames;
+    probeState.fakeBackends = fakeBackends;
     return {
       runtime,
       authorityPort: runtime.authority,
@@ -420,7 +415,7 @@ function parseOptions(args) {
 function round(value) { return Math.round(value * 1_000_000) / 1_000_000; }
 
 async function runBenchmark(options) {
-  const evidence = {
+  const probeState = {
     summaryCalls: 0,
     displayViewMaterializations: 0,
     whenReadyCalls: 0,
@@ -430,7 +425,7 @@ async function runBenchmark(options) {
     fakeBackends: null,
   };
   const client = new SceneEngineClient({
-    createDisplaySession: createDisplaySessionFactory(evidence),
+    createDisplaySession: createDisplaySessionFactory(probeState),
   });
   const checkpointBytes = checkpointPacket();
   const checkpointStarted = process.hrtime.bigint();
@@ -466,9 +461,9 @@ async function runBenchmark(options) {
   }
 
   const timing = timingSummary(samples);
-  const memoryEvidence = memorySummary(memory);
+  const memoryResult = memorySummary(memory);
   const finalAck = readEnginePacket(lastAckPacket);
-  const finalSummary = evidence.lastSummary;
+  const finalSummary = probeState.lastSummary;
   const expectedSummaryCalls = options.commitCount + 1;
   const structureMatches = AUTHORITY_ROOTS === 500
     && PREFAB_CHILDREN_PER_ROOT === 2
@@ -480,14 +475,14 @@ async function runBenchmark(options) {
       && finalAck.header.last_command_seq === options.commitCount,
     finalWorldCursor: client.currentCommit().commitSeq === options.commitCount
       && client.currentWorldState().tick === options.commitCount,
-    oneSynchronousSummaryPerApply: evidence.summaryCalls === expectedSummaryCalls,
-    zeroDisplayViewMaterializations: evidence.displayViewMaterializations === 0,
-    ackIndependentOfReadyAndDraw: evidence.whenReadyCalls === 0
-      && evidence.fakeBackends[0]?.draws === 0
-      && evidence.frames.pendingCount === 1,
+    oneSynchronousSummaryPerApply: probeState.summaryCalls === expectedSummaryCalls,
+    zeroDisplayViewMaterializations: probeState.displayViewMaterializations === 0,
+    ackIndependentOfReadyAndDraw: probeState.whenReadyCalls === 0
+      && probeState.fakeBackends[0]?.draws === 0
+      && probeState.frames.pendingCount === 1,
     p95Under8Ms: timing.p95Ms < P95_LIMIT_MS,
     p99UnderOneTick: timing.p99Ms < P99_LIMIT_MS,
-    noMonotonicRetainedGrowth: memoryEvidence.stable,
+    noMonotonicRetainedGrowth: memoryResult.stable,
   };
   const passed = Object.values(gates).every((value) => value === true || value === null);
   const report = {
@@ -521,23 +516,22 @@ async function runBenchmark(options) {
       },
     },
     display: {
-      summaryCalls: evidence.summaryCalls,
+      summaryCalls: probeState.summaryCalls,
       expectedSummaryCalls,
-      displayViewMaterializations: evidence.displayViewMaterializations,
-      whenReadyCalls: evidence.whenReadyCalls,
+      displayViewMaterializations: probeState.displayViewMaterializations,
+      whenReadyCalls: probeState.whenReadyCalls,
       finalSummary,
-      pendingFrameCallbacks: evidence.frames.pendingCount,
-      fakeBackendDraws: evidence.fakeBackends[0]?.draws ?? null,
-      fakeBackendBindings: evidence.fakeBackends[0]?.bindings.size ?? null,
+      pendingFrameCallbacks: probeState.frames.pendingCount,
+      fakeBackendDraws: probeState.fakeBackends[0]?.draws ?? null,
+      fakeBackendBindings: probeState.fakeBackends[0]?.bindings.size ?? null,
     },
-    memory: memoryEvidence,
+    memory: memoryResult,
     gates,
   };
 
   client.dispose();
-  await evidence.runtime.dispose();
+  await probeState.runtime.dispose();
   const serialized = `${JSON.stringify(report, null, 2)}\n`;
-  if (!options.quick) await writeFile(DEFAULT_FORMAL_OUTPUT, serialized, 'utf8');
   console.log(serialized.trimEnd());
   if (!passed) process.exitCode = 1;
 }

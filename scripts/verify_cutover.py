@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Fail-closed verification for the Display repair and Showcase cutover."""
+"""Fail-closed verification for the Display animator cutover."""
 
 from __future__ import annotations
 
 import base64
+from email.parser import BytesHeaderParser
 import hashlib
 import json
 import re
 import stat
+import subprocess
 import sys
 import tarfile
 import zipfile
@@ -34,13 +36,34 @@ from scene_engine.wire import WIRE_SCHEMA, read_engine_packet  # noqa: E402
 VERSIONS = {
     "python": "0.9.0",
     "client": "0.10.0",
-    "display": "0.4.0",
-    "renderer": "0.9.3",
+    "display": "0.8.0",
+    "renderer": "0.11.0",
 }
 ARTIFACTS = (
     f"scene-engine-client-{VERSIONS['client']}.tgz",
     f"scene-engine-display-{VERSIONS['display']}.tgz",
     f"scene-engine-renderer-three-{VERSIONS['renderer']}.tgz",
+)
+PYTHON_WHEEL = f"scene_engine-{VERSIONS['python']}-py3-none-any.whl"
+BUNDLE_ARCHIVE = f"scene-engine-{VERSIONS['python']}-bundle.zip"
+SOURCE_ARCHIVE = f"scene-engine-{VERSIONS['python']}-source-with-docs.zip"
+SOURCE_ARCHIVE_DIRECTORIES = (
+    ".agents",
+    "docs",
+    "fixtures",
+    "js",
+    "scripts",
+    "src",
+    "tests",
+)
+SOURCE_ARCHIVE_FILES = (
+    ".gitignore",
+    "AGENTS.md",
+    "README.md",
+    "package-lock.json",
+    "package.json",
+    "pyproject.toml",
+    "uv.lock",
 )
 PACKAGE_ARTIFACTS = {
     "@scene-engine/client": (
@@ -70,6 +93,30 @@ STALE = (
     "Transform" + "Node",
     "Scene" + "Host",
     *REMOVED_ARTS_PACKAGES,
+)
+# Contracts removed by the display animator cutover. They may appear only in
+# tests that prove the old shapes are rejected.
+REMOVED_ANIMATION_CONTRACT = re.compile(
+    r"render\.model@1|render\.sprite@1|render\.sprite@2|render\.particle@1|"
+    r"properties\.animation\b|\bflipbook\b|\bclipId\b|animationSourceTick|"
+    r"clips:\s*\{"
+)
+REMOVED_ANIMATION_REJECTION_TESTS = frozenset({
+    "js/packages/display/test/animation.test.mjs",
+    "js/packages/display/test/definitions.test.mjs",
+    "js/packages/renderer-three/test/animation-port.test.mjs",
+    "js/packages/renderer-three/test/resource-lifecycle.test.mjs",
+})
+REMOVED_PLAYER_ORIGIN = re.compile(
+    r"\b_animation_by_name\b|\b_rebase_animation\b|"
+    r"\banimation(?:SourceTick|_origin|Origin|_start_tick|StartTick)\b|"
+    r"\banimation\b[\s\S]{0,240}\bstart_tick\b|"
+    r"\banimation\.(?:start_tick|startTick)\b|"
+    r"\banimation\[['\"](?:start_tick|startTick)['\"]\]"
+)
+REMOVED_CURRENT_SMALL_PERSON_SURFACE = re.compile(
+    r"render\.sprite@2|sourceTick/startTick|simulation-clock flipbook|"
+    r"DisplayRuntime` 0\.6|renderer-three 0\.10\.1"
 )
 
 
@@ -130,6 +177,68 @@ def package_tarball_files(path: Path) -> dict[str, bytes]:
         raise AssertionError(f"invalid npm artifact: {path}: {error}") from error
     require(files, f"npm artifact contains no package files: {path}")
     return files
+
+
+def zip_archive_files(path: Path) -> dict[str, bytes]:
+    """Read a closed zip archive without extracting it to the filesystem."""
+
+    require(path.is_file(), f"zip artifact missing: {path}")
+    files: dict[str, bytes] = {}
+    try:
+        with zipfile.ZipFile(path) as archive:
+            for member in archive.infolist():
+                member_path = PurePosixPath(member.filename)
+                require(
+                    not member_path.is_absolute() and ".." not in member_path.parts,
+                    f"zip artifact contains unsafe entry: {path}: {member.filename}",
+                )
+                member_mode = member.external_attr >> 16
+                require(
+                    stat.S_IFMT(member_mode) != stat.S_IFLNK,
+                    f"zip artifact contains a symlink: {path}: {member.filename}",
+                )
+                require(
+                    not member.is_dir(),
+                    f"zip artifact contains an unexpected directory entry: {path}: {member.filename}",
+                )
+                relative = member_path.as_posix()
+                require(relative not in files, f"zip artifact contains duplicate entry: {path}: {relative}")
+                files[relative] = archive.read(member)
+    except zipfile.BadZipFile as error:
+        raise AssertionError(f"invalid zip artifact: {path}: {error}") from error
+    require(files, f"zip artifact contains no files: {path}")
+    return files
+
+
+def release_source_archive_files() -> dict[str, bytes]:
+    """Return the exact source-with-docs release payload under its archive prefix."""
+
+    paths: set[Path] = set()
+    for relative in SOURCE_ARCHIVE_FILES:
+        candidate = ROOT / relative
+        require(candidate.is_file(), f"release source file missing: {candidate}")
+        require(not candidate.is_symlink(), f"release source contains a symlink: {candidate}")
+        paths.add(candidate)
+    for relative in SOURCE_ARCHIVE_DIRECTORIES:
+        directory = ROOT / relative
+        require(directory.is_dir(), f"release source directory missing: {directory}")
+        require(not directory.is_symlink(), f"release source contains a symlink: {directory}")
+        for candidate in directory.rglob("*"):
+            nested = candidate.relative_to(ROOT)
+            require(not candidate.is_symlink(), f"release source contains a symlink: {candidate}")
+            if (
+                candidate.name == ".DS_Store"
+                or candidate.suffix in {".pyc", ".pyo"}
+                or any(part in {"__pycache__", "node_modules", ".venv"} for part in nested.parts)
+                or any(part.endswith(".egg-info") for part in nested.parts)
+            ):
+                continue
+            if candidate.is_file():
+                paths.add(candidate)
+    return {
+        f"scene-engine/{path.relative_to(ROOT).as_posix()}": path.read_bytes()
+        for path in sorted(paths)
+    }
 
 
 def source_package_files(package_root: Path) -> dict[str, bytes]:
@@ -254,6 +363,69 @@ def python_wheel_package_files(wheel: Path, *, package_name: str) -> dict[str, b
         raise AssertionError(f"invalid Python wheel: {wheel}: {error}") from error
     require(files, f"Python wheel contains no {package_name} package files: {wheel}")
     return files
+
+
+def python_wheel_metadata(wheel: Path) -> bytes:
+    """Read the wheel's one canonical METADATA record."""
+
+    require(wheel.is_file(), f"Python wheel missing: {wheel}")
+    expected_name = f"scene_engine-{VERSIONS['python']}.dist-info/METADATA"
+    expected_dist_info = PurePosixPath(expected_name).parts[0]
+    try:
+        with zipfile.ZipFile(wheel) as archive:
+            dist_info_roots = sorted({
+                PurePosixPath(member.filename).parts[0]
+                for member in archive.infolist()
+                if PurePosixPath(member.filename).parts
+                and PurePosixPath(member.filename).parts[0].endswith(".dist-info")
+            })
+            require(
+                dist_info_roots == [expected_dist_info],
+                f"Python wheel dist-info identity mismatch: {wheel}: {dist_info_roots}",
+            )
+            metadata_names = [
+                member.filename
+                for member in archive.infolist()
+                if not member.is_dir()
+                and len(PurePosixPath(member.filename).parts) == 2
+                and PurePosixPath(member.filename).parts[0].endswith(".dist-info")
+                and PurePosixPath(member.filename).name == "METADATA"
+            ]
+            require(
+                metadata_names == [expected_name],
+                f"Python wheel METADATA identity mismatch: {wheel}: {metadata_names}",
+            )
+            return archive.read(expected_name)
+    except zipfile.BadZipFile as error:
+        raise AssertionError(f"invalid Python wheel: {wheel}: {error}") from error
+
+
+def verify_python_wheel_metadata(wheel: Path) -> None:
+    metadata = python_wheel_metadata(wheel)
+    headers, separator, description = metadata.partition(b"\n\n")
+    require(separator == b"\n\n", f"Python wheel METADATA body missing: {wheel}")
+    parsed = BytesHeaderParser().parsebytes(headers + b"\n\n")
+    expected_headers = {
+        "Metadata-Version": "2.4",
+        "Name": "scene-engine",
+        "Version": VERSIONS["python"],
+        "Summary": "Server-authoritative fixed-step runtime and deterministic Display projection publication",
+        "Requires-Python": ">=3.10",
+        "Description-Content-Type": "text/markdown",
+    }
+    require(
+        sorted(parsed.keys()) == sorted(expected_headers),
+        f"Python wheel METADATA header set is not exact: {wheel}: {sorted(parsed.keys())}",
+    )
+    for name, expected in expected_headers.items():
+        require(
+            parsed.get_all(name, []) == [expected],
+            f"Python wheel {name} metadata mismatch: {wheel}",
+        )
+    require(
+        description == (ROOT / "README.md").read_bytes(),
+        f"Python wheel README metadata differs from current source: {wheel}",
+    )
 
 
 def verify_python_wheel_source(wheel: Path, source_root: Path) -> None:
@@ -386,6 +558,19 @@ def verify_fixtures() -> None:
         "Display catalog manifest fixture mismatch",
     )
     DisplayCatalogIdentity.from_record(catalog_identity)
+    semantic = subprocess.run(
+        ["node", str(ROOT / "scripts/verify_display_catalog_fixture.mjs")],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    require(
+        semantic.returncode == 0,
+        "Display catalog fixture does not compile through the public registries:\n"
+        + semantic.stdout
+        + semantic.stderr,
+    )
 
 
 def verify_artifacts() -> None:
@@ -400,12 +585,41 @@ def verify_artifacts() -> None:
             archive_files,
             context=f"npm artifact differs from Engine source: {package_name}",
         )
+    wheels = sorted(path.name for path in dist.glob("scene_engine-*.whl"))
+    require(wheels == [PYTHON_WHEEL], "Scene Engine dist wheel set is not exact")
+    dist_wheel = dist / PYTHON_WHEEL
+    verify_python_wheel_source(dist_wheel, ROOT / "src/scene_engine")
+    verify_python_wheel_metadata(dist_wheel)
+
     arts_vendor = WORKSPACE / "arts/vendor"
+    vendor_tarballs = sorted(path.name for path in arts_vendor.glob("scene-engine-*.tgz"))
+    require(vendor_tarballs == sorted(ARTIFACTS), "Arts vendor artifact set is not exact")
     for name in ARTIFACTS:
         engine = dist / name
         arts = arts_vendor / name
         require(arts.exists(), f"Arts vendor artifact missing: {name}")
         require(engine.read_bytes() == arts.read_bytes(), f"Arts artifact differs: {name}")
+
+    archives = sorted(path.name for path in dist.glob("*.zip"))
+    require(
+        archives == sorted([BUNDLE_ARCHIVE, SOURCE_ARCHIVE]),
+        "Scene Engine dist zip artifact set is not exact",
+    )
+    bundle_files = zip_archive_files(dist / BUNDLE_ARCHIVE)
+    expected_bundle = {
+        name: (dist / name).read_bytes()
+        for name in (*ARTIFACTS, PYTHON_WHEEL)
+    }
+    require_same_package_files(
+        expected_bundle,
+        bundle_files,
+        context="Scene Engine bundle differs from canonical dist artifacts",
+    )
+    require_same_package_files(
+        release_source_archive_files(),
+        zip_archive_files(dist / SOURCE_ARCHIVE),
+        context="Scene Engine source-with-docs archive differs from current source",
+    )
 
 
 def verify_python_game() -> None:
@@ -419,6 +633,11 @@ def verify_python_game() -> None:
     require("scene.py" not in wheel_files, "wheel contains removed module")
     require("display.py" in wheel_files, "wheel lacks Display module")
     verify_python_wheel_source(wheels[0], ROOT / "src/scene_engine")
+    verify_python_wheel_metadata(wheels[0])
+    require(
+        wheels[0].read_bytes() == (ROOT / "dist" / PYTHON_WHEEL).read_bytes(),
+        "Python game vendor wheel differs from Scene Engine dist wheel",
+    )
     lock = (root / "requirements.lock").read_text(encoding="utf-8")
     require(sha256(wheels[0]) in lock, "game wheel hash is not locked")
 
@@ -476,6 +695,127 @@ def verify_current_text() -> None:
     require("createThreeRenderBackend" in renderer_source, "Three backend factory export missing")
 
 
+def verify_removed_animation_contract() -> None:
+    """Old animation fields may survive only in rejection tests."""
+    scanned = [
+        *sorted((ROOT / "js/packages/display").glob("src/**/*.js")),
+        *sorted((ROOT / "js/packages/display/src").glob("*.d.ts")),
+        *sorted((ROOT / "js/packages/renderer-three").glob("src/**/*.js")),
+        *sorted((ROOT / "js/packages/renderer-three/src").glob("*.d.ts")),
+        *sorted((ROOT / "js/packages/display").glob("test/*.mjs")),
+        *sorted((ROOT / "js/packages/renderer-three").glob("test/*.mjs")),
+        ROOT / "scripts/verify_display_leaks.mjs",
+        ROOT / "README.md",
+        ROOT / "AGENTS.md",
+        ROOT / ".agents/skills/scene-engine/SKILL.md",
+        *sorted((ROOT / "docs").glob("*.md")),
+    ]
+    for path in scanned:
+        source = path.read_text(encoding="utf-8")
+        for match in REMOVED_ANIMATION_CONTRACT.finditer(source):
+            relative = path.relative_to(ROOT).as_posix()
+            require(
+                relative in REMOVED_ANIMATION_REJECTION_TESTS,
+                f"removed animation contract in {relative}: {match.group(0)!r}",
+            )
+
+
+def verify_consumer_animation_boundary() -> None:
+    """Product state may carry semantics, but never a Display player origin."""
+
+    require(
+        REMOVED_PLAYER_ORIGIN.search(
+            "animation: {\n  state: 'idle',\n  start_tick: 0,\n}"
+        ) is not None,
+        "player-origin verifier must catch multiline authority state",
+    )
+    require(
+        REMOVED_PLAYER_ORIGIN.search(
+            "firingFeedback: { start_tick: 0 }"
+        ) is None,
+        "player-origin verifier must preserve simulation-authoritative effect timing",
+    )
+
+    python_game = WORKSPACE / "python-game"
+    arts = WORKSPACE / "arts"
+    current_consumer_docs = {
+        arts / "code/building/company-address/README.md",
+        arts / "code/character/small-person/README.md",
+        arts / "resources/character/small-person/README.md",
+        arts / "resources/character/small-person/current-resources.md",
+        arts / "resources/character/small-person/CURRENT_STATUS.md",
+    }
+    scanned = [
+        *sorted((python_game / "adapters").glob("**/*.py")),
+        python_game / "scripts/small_person_visual_acceptance.py",
+        python_game / "README.md",
+        python_game / "docs/small-person-visual-acceptance.md",
+        *sorted((arts / "code").glob("**/*.js")),
+        *sorted((arts / "web3d/src").glob("**/*.js")),
+        arts / "scripts/export-small-person-visual-fixtures.mjs",
+        arts / "web3d/README.md",
+        arts / "docs/showcase.md",
+        arts / "docs/art-execution-rules/current/07-small-people/atomic-scenes.md",
+        arts / "docs/art-execution-rules/current/07-small-people/rendering.md",
+        *sorted(current_consumer_docs),
+    ]
+    for path in scanned:
+        require(path.is_file(), f"consumer contract source missing: {path.relative_to(WORKSPACE)}")
+        source = path.read_text(encoding="utf-8")
+        match = REMOVED_PLAYER_ORIGIN.search(source)
+        origin = "" if match is None else match.group(0)
+        require(
+            match is None,
+            f"Display player origin leaked into {path.relative_to(WORKSPACE)}: "
+            f"{origin!r}",
+        )
+        if path in current_consumer_docs:
+            stale = REMOVED_CURRENT_SMALL_PERSON_SURFACE.search(source)
+            stale_token = "" if stale is None else stale.group(0)
+            require(
+                stale is None,
+                f"stale consumer animator surface in {path.relative_to(WORKSPACE)}: "
+                f"{stale_token!r}",
+            )
+
+    schema_source = (arts / "web3d/src/catalog/authorityStateSchemas.js").read_text(
+        encoding="utf-8"
+    )
+    for gameplay_type in (
+        "character.small-person",
+        "effect.battle-effect",
+        "flight.aircraft",
+        "flight.projectile",
+    ):
+        require(
+            f"missile-war-authority-state/{gameplay_type}@2" in schema_source,
+            f"current authority-state schema identity missing: {gameplay_type}@2",
+        )
+
+
+def run_display_leak_test() -> None:
+    test = subprocess.run(
+        [
+            "node",
+            "--expose-gc",
+            str(ROOT / "scripts/verify_display_leaks.mjs"),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    require(
+        test.returncode == 0,
+        "Display leak test failed:\n" + test.stdout + test.stderr,
+    )
+    try:
+        summary = json.loads(test.stdout)
+    except json.JSONDecodeError as error:
+        raise AssertionError("Display leak test emitted an invalid summary") from error
+    require(summary.get("status") == "READY", "Display leak test is not READY")
+
+
 def main() -> int:
     verify_versions()
     verify_source_shape()
@@ -484,7 +824,10 @@ def main() -> int:
     verify_python_game()
     verify_consumers()
     verify_current_text()
-    print("Scene Engine Display repair and Showcase cutover verification passed.")
+    verify_removed_animation_contract()
+    verify_consumer_animation_boundary()
+    run_display_leak_test()
+    print("Scene Engine Display animator cutover verification passed.")
     return 0
 
 

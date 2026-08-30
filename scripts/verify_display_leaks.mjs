@@ -1,9 +1,6 @@
 #!/usr/bin/env node
 
 import assert from 'node:assert/strict';
-import { mkdir, writeFile } from 'node:fs/promises';
-import { dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
 
 import * as THREE from 'three';
 
@@ -15,6 +12,7 @@ import {
   createPrefabRegistry,
   createResourceRegistry,
   createSceneRegistry,
+  defineFrameAnimation,
   definePrefab,
   defineScene,
 } from '../js/packages/display/src/index.js';
@@ -26,10 +24,7 @@ import {
 } from '../js/packages/renderer-three/src/resources.js';
 import { TestRenderer } from '../js/packages/renderer-three/test/support.mjs';
 
-const SCRIPT_DIRECTORY = dirname(fileURLToPath(import.meta.url));
-const EVIDENCE_PATH = process.env.SCENE_ENGINE_DISPLAY_LEAK_OUTPUT
-  ? resolve(process.env.SCENE_ENGINE_DISPLAY_LEAK_OUTPUT)
-  : resolve(SCRIPT_DIRECTORY, '../docs/evidence/display-resource-leak-matrix.json');
+assert.deepEqual(process.argv.slice(2), [], 'verify_display_leaks accepts no arguments');
 const IDENTITY = Object.freeze({
   position: Object.freeze([0, 0, 0]),
   rotationXyzw: Object.freeze([0, 0, 0, 1]),
@@ -68,7 +63,6 @@ const SPRITE_PROPERTIES = Object.freeze({
   }),
   alpha: 1,
   frame: 0,
-  flipbook: null,
   renderOrder: 1,
   pickable: true,
 });
@@ -122,50 +116,23 @@ const disposalProbe = installDisposalProbe();
 
 async function main() {
   try {
-  const lifecycle = await verifyAuthorityAndRebuildLifecycle();
-  const faults = await verifyFaultInjectionMatrix();
-  const report = {
-    schema: 'scene-engine-display-resource-leak-matrix@1',
-    status: 'READY',
-    generatedAt: new Date().toISOString(),
-    command: 'node --expose-gc scripts/verify_display_leaks.mjs',
-    runtime: {
-      node: process.version,
-      displaySchema: 'scene-engine-display-node@3',
-      rendererBackend: '@scene-engine/renderer-three@0.9.3',
-      rendererInjection: 'real ThreeRenderBackend with a non-WebGL TestRenderer only',
-      resourceLifecycle: 'loadThreeResource + disposeThreeResource',
-    },
-    thresholds: {
-      authorityCreateRemoveCycles: 100,
-      renderBackendRebuilds: 20,
-      finalNodeCount: 0,
-      finalComponentCount: 0,
-      finalSchedulerCount: 0,
-      finalBindingCount: 0,
-      finalResourceLeaseCount: 0,
-      finalPendingCount: 0,
-      finalGeometryCount: 0,
-      finalMaterialCount: 0,
-      finalTextureCount: 0,
-    },
-    lifecycle,
-    faults,
-    disposalProbe: {
-      ...disposalProbe.snapshot(),
-      imageBitmapsClosed: closedImageBitmapCount,
-    },
-  };
-  await mkdir(dirname(EVIDENCE_PATH), { recursive: true });
-  await writeFile(EVIDENCE_PATH, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
-  process.stdout.write(`${JSON.stringify({
-    status: report.status,
-    evidence: EVIDENCE_PATH,
-    authorityCycles: lifecycle.authority.cycles,
-    rebuilds: lifecycle.rebuild.rebuilds,
-    faultCases: Object.keys(faults),
-    final: lifecycle.final,
-  }, null, 2)}\n`);
+    const lifecycle = await verifyAuthorityAndRebuildLifecycle();
+    const faults = await verifyFaultInjectionMatrix();
+    const animation = await verifyAnimationPlayerLifecycle();
+    process.stdout.write(`${JSON.stringify({
+      status: 'READY',
+      summary: {
+        authorityCreateRemoveCycles: lifecycle.authority.cycles,
+        renderBackendRebuilds: lifecycle.rebuild.rebuilds,
+        animationPlayerCycles: animation.cycles,
+        faultCases: Object.keys(faults),
+        finalRuntimeCounts: lifecycle.final,
+        disposalCounts: {
+          ...disposalProbe.snapshot(),
+          imageBitmapsClosed: closedImageBitmapCount,
+        },
+      },
+    }, null, 2)}\n`);
   } finally {
     disposalProbe.restore();
     if (originalImageBitmap === undefined) delete globalThis.createImageBitmap;
@@ -193,7 +160,7 @@ async function verifyAuthorityAndRebuildLifecycle() {
         visible: true,
         components: [
           { key: 'mesh', type: 'render.mesh@1', properties: MESH_PROPERTIES },
-          { key: 'sprite', type: 'render.sprite@1', properties: SPRITE_PROPERTIES },
+          { key: 'sprite', type: 'render.sprite@3', properties: SPRITE_PROPERTIES },
         ],
         children: [],
       }],
@@ -215,7 +182,7 @@ async function verifyAuthorityAndRebuildLifecycle() {
         localName: 'baseline-visual', parentLocalName: null, transform: IDENTITY,
         components: [
           { key: 'mesh', type: 'render.mesh@1', properties: MESH_PROPERTIES },
-          { key: 'sprite', type: 'render.sprite@1', properties: SPRITE_PROPERTIES },
+          { key: 'sprite', type: 'render.sprite@3', properties: SPRITE_PROPERTIES },
         ],
       },
     ],
@@ -385,6 +352,107 @@ async function verifyFaultInjectionMatrix() {
   };
 }
 
+async function verifyAnimationPlayerLifecycle() {
+  const frames = new FrameAdapter();
+  const backends = [];
+  const atlas = {
+    id: 'texture/anim-atlas', kind: 'texture-atlas',
+    textureResourceId: 'texture/pixel', columns: 2, rows: 2,
+  };
+  const walk = defineFrameAnimation({
+    id: 'anim.leak.walk',
+    target: { node: 'visual', component: 'sprite' },
+    frames: [0, 1, 2, 1],
+    fps: 10,
+    loop: true,
+  });
+  const animatedSprite = {
+    textureResourceId: 'texture/anim-atlas', width: 1, height: 1,
+    material: SPRITE_PROPERTIES.material, alpha: 1, frame: 0, renderOrder: 0, pickable: false,
+  };
+  const prefab = definePrefab({
+    schema: PREFAB_DEFINITION_SCHEMA,
+    id: 'leak-matrix.animated', gameplayType: 'leak-matrix.animated',
+    root: {
+      components: [{ key: 'animator', type: 'animation.player@1',
+        properties: { animationId: 'anim.leak.walk' } }],
+      children: [{
+        localName: 'visual', transform: IDENTITY, visible: true,
+        components: [{ key: 'sprite', type: 'render.sprite@3', properties: animatedSprite }],
+        children: [],
+      }],
+    },
+  });
+  const scene = defineScene({
+    schema: SCENE_DEFINITION_SCHEMA, id: 'main', sceneProfile: 'leak-matrix-animation',
+    rendererProfile: PROFILE, activeCameraLocalName: 'camera',
+    nodes: [{
+      localName: 'camera', parentLocalName: null, transform: IDENTITY,
+      components: [{ key: 'camera', type: 'render.camera@1', properties: CAMERA_PROPERTIES }],
+    }],
+    prefabInstances: [],
+  });
+  const runtime = createDisplayRuntime({
+    hostElement: host(), canvas: { getContext: () => ({}) },
+    sceneRegistry: createSceneRegistry([scene]),
+    prefabRegistry: createPrefabRegistry([prefab]),
+    resourceRegistry: createResourceRegistry([...RESOURCES, atlas, walk]),
+    componentRegistry: createComponentRegistry(),
+    authorityStateSchemas: [{
+      gameplayType: 'leak-matrix.animated', schemaId: 'leak-matrix.animated.state@1', revision: 1,
+    }],
+    createRenderBackend(options) {
+      const row = directBackendFromOptions(options);
+      backends.push(row);
+      return row.backend;
+    },
+    frameAdapter: frames,
+  });
+  runtime.installScene({ sceneName: 'main' });
+  runtime.activate();
+  await runtime.whenReady();
+  runtime.start();
+
+  const cursor = { commitSeq: 0, sourceTick: 0, lastCommandSeq: 0 };
+  for (let cycle = 0; cycle < 25; cycle += 1) {
+    commitAuthority(runtime, cursor, () => runtime.authority.createNode({
+      name: 'py/anim-leak', parentName: null, prefabId: prefab.id,
+      transformMode: 'live', transform: IDENTITY, visible: true, state: {},
+    }));
+    await runtime.whenReady();
+    const sprite = runtime._nodeIndex.require('prefab/py/anim-leak/visual')
+      .requireComponent('sprite');
+    assert.equal(runtime._animationSystem._players.size, 1);
+    assert.equal(runtime._animationSystem._outputOwners.size, 1);
+    frames.step(16);
+    assert.equal(runtime._renderSystem._animationOverrides.has(sprite), true,
+      'the running animation must own a transient override');
+    frames.step(32);
+    commitAuthority(runtime, cursor,
+      () => runtime.authority.removeNode({ name: 'py/anim-leak' }));
+    await runtime.whenReady();
+    assert.equal(runtime._animationSystem._players.size, 0,
+      `cycle ${cycle + 1} kept a disposed animation player`);
+    assert.equal(runtime._animationSystem._outputOwners.size, 0,
+      `cycle ${cycle + 1} kept a released output ownership`);
+    assert.equal(runtime._renderSystem._animationOverrides.has(sprite), false,
+      `cycle ${cycle + 1} kept a transient animation override`);
+  }
+  const backend = backends[0].backend;
+  const settled = backendMetrics(backend);
+  assert.equal(settled.bindingCount, 1, 'only the camera binding remains');
+  frames.step(16);
+  await runtime.dispose();
+  const final = backendMetrics(backend);
+  assertBackendZero(final, 'animation lifecycle disposed backend');
+  return {
+    cycles: 25,
+    eachCycleClearedOwnershipAndOverrides: true,
+    settledBindingCount: settled.bindingCount,
+    final,
+  };
+}
+
 async function verifyGltfLoadFailure() {
   const beforeDispose = disposalProbe.snapshot();
   const health = [];
@@ -508,7 +576,7 @@ async function verifyPendingBindingDispose() {
     id: 'leak-matrix.pending', gameplayType: 'leak-matrix.pending',
     root: { components: [], children: [{
       localName: 'visual', transform: IDENTITY, visible: true,
-      components: [{ key: 'sprite', type: 'render.sprite@1', properties: SPRITE_PROPERTIES }],
+      components: [{ key: 'sprite', type: 'render.sprite@3', properties: SPRITE_PROPERTIES }],
       children: [],
     }] },
   });
@@ -612,7 +680,8 @@ function modelDescriptor(nodeName, componentKey, modelResourceId, registry) {
   return {
     nodeName,
     componentKey,
-    componentType: 'render.model@1',
+    componentType: 'render.model@2',
+    batchable: true,
     properties: {
       modelResourceId,
       materialOverrides: {},
@@ -620,7 +689,6 @@ function modelDescriptor(nodeName, componentKey, modelResourceId, registry) {
       receiveShadow: false,
       renderOrder: 0,
       pickable: false,
-      animation: null,
     },
     resourceRegistry: registry,
   };
@@ -783,6 +851,12 @@ class FrameAdapter {
   cancel(id) { this.callbacks.delete(id); }
   now() { return this.time; }
   get pending() { return this.callbacks.size; }
+  step(milliseconds = 16) {
+    this.time += milliseconds;
+    const callbacks = [...this.callbacks.values()];
+    this.callbacks.clear();
+    for (const callback of callbacks) callback(this.time);
+  }
 }
 
 function installDisposalProbe() {

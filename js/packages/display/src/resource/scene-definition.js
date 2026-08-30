@@ -2,6 +2,7 @@ import { cloneAndFreeze, exactKeys, nonemptyString, safeInteger } from '../inter
 import { IDENTITY_TRANSFORM, normalizeTransform } from '../math/transform.js';
 import { assertLocalPath } from '../node/node-name.js';
 import { fail } from '../runtime/health.js';
+import { AnimationPlayerComponent } from '../animation/animation-player.js';
 import { CameraComponent } from '../render/components.js';
 import { Resource } from './resource.js';
 
@@ -69,7 +70,7 @@ export class SceneDefinition extends Resource {
     Object.freeze(this);
   }
 
-  compile({ componentRegistry, resourceRegistry, prefabRegistry }) {
+  compile({ componentRegistry, resourceRegistry, prefabRegistry, compiledPrefabCatalog = null }) {
     resourceRegistry.validateReferences();
     const source = this.describe();
     const sceneProfile = nonemptyString(source.sceneProfile, 'display-scene-profile-invalid');
@@ -84,6 +85,12 @@ export class SceneDefinition extends Resource {
       const parentLocalName = record.parentLocalName === null ? null : assertLocalPath(record.parentLocalName);
       if (!Array.isArray(record.components)) fail('display-scene-node-definition-invalid');
       const components = record.components.map((component) => componentRegistry.compile(component, resourceRegistry));
+      for (const component of components) {
+        if (component.type === AnimationPlayerComponent.typeId) {
+          fail('display-animation-player-placement-invalid',
+            'Scene nodes cannot host animation players; define a static Prefab instance instead.');
+        }
+      }
       validateComponentSet(components, componentRegistry);
       const visible = Object.hasOwn(record, 'visible') ? record.visible : true;
       if (typeof visible !== 'boolean') fail('display-scene-node-definition-invalid');
@@ -111,7 +118,8 @@ export class SceneDefinition extends Resource {
         prefabId: definition.id,
         gameplayType: definition.gameplayType,
         definition,
-        compiledPrefab: definition.compile({ componentRegistry, resourceRegistry }),
+        compiledPrefab: compiledPrefabCatalog?.require(definition.id)
+          ?? definition.compile({ componentRegistry, resourceRegistry, prefabRegistry }),
         transform: normalizeTransform(record.transform ?? IDENTITY_TRANSFORM),
         visible,
         state: cloneAndFreeze(record.state ?? {}, 'display-prefab-state-invalid'),

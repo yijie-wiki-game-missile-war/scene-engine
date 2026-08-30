@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { BillboardComponent, LookAtComponent } from '../src/index.js';
+import { BillboardComponent, LookAtComponent, createComponentRegistry } from '../src/index.js';
 import { composeWorldTransform, createMutableWorldTransform, normalizeTransform } from '../src/math/transform.js';
 import { NodeGraph } from '../src/node/node-graph.js';
 import { NodeIndex } from '../src/node/node-index.js';
@@ -70,10 +70,10 @@ test('initialize and continuous Billboard and LookAt face targets through a scal
   });
   const components = [
     [billboardNode, new BillboardComponent({ key: 'billboard', properties: {
-      mode: 'continuous', axisMode: 'full', cameraName: camera.name,
+      mode: 'continuous', axisMode: 'full', facing: 'camera', cameraName: camera.name,
     } })],
     [initializedNode, new BillboardComponent({ key: 'billboard', properties: {
-      mode: 'initialize', axisMode: 'full', cameraName: camera.name,
+      mode: 'initialize', axisMode: 'full', facing: 'camera', cameraName: camera.name,
     } })],
     [lookAtNode, new LookAtComponent({ key: 'look-at', properties: {
       targetNodeName: camera.name, targetPosition: null, axisMode: 'full',
@@ -92,6 +92,41 @@ test('initialize and continuous Billboard and LookAt face targets through a scal
       / (Math.hypot(...forward) * Math.hypot(...desired));
     assert(dot > 1 - 1e-12);
   }
+});
+
+test('fixed Billboard keeps world +Z / +Y through rotated non-uniform parent TRS', () => {
+  const token = {}; const index = new NodeIndex(); const graph = new NodeGraph({ nodeIndex: index });
+  const registry = createComponentRegistry();
+  const parent = new Node({ name: 'scene/main/parent', sceneToken: token, transform: IDENTITY });
+  const card = new Node({ name: 'scene/main/card', sceneToken: token, transform: {
+    ...IDENTITY, position: [2, 3, 4], scale: [2, 4, 1],
+  } });
+  index.register(parent); index.register(card); graph.attach(parent); graph.attach(card, parent);
+  const context = createInternalComponentContext({
+    scene: { name: 'main', activeCameraName: null }, nodeIndex: index, nodeGraph: graph,
+  });
+  const component = registry.create(registry.compile({ key: 'facing', type: 'behavior.billboard@2',
+    properties: { mode: 'continuous', axisMode: 'y-axis' } }));
+  card.addComponent(component); component.attach(card, context);
+  const yaw = Math.PI / 4;
+  for (const [rotationXyzw, scale] of [
+    [[0, 0, 0, 1], [3, 2, 5]],
+    [[0, Math.sin(yaw / 2), 0, Math.cos(yaw / 2)], [3, 1, 1]],
+    [[0.2, 0.4, 0.1, 0.8], [3, 3, 3]],
+    [[0, 1, 0, 0], [2, 4, 3]],
+  ]) {
+    parent.setLocalTransform({ position: [-5, 2, 7], rotationXyzw, scale });
+    component.tick({ display: context.publicDisplay }); graph.flushWorldTransforms();
+    const matrix = card.worldTransform.matrix;
+    for (const [offset, expected] of [[4, [0, 1, 0]], [8, [0, 0, 1]]]) {
+      const axis = Array.from(matrix).slice(offset, offset + 3);
+      const length = Math.hypot(...axis);
+      axis.forEach((value, i) => assert(Math.abs(value / length - expected[i]) < 1e-12));
+    }
+    assert.deepEqual(card.localTransform.position, [2, 3, 4]);
+    assert.deepEqual(card.localTransform.scale, [2, 4, 1]);
+  }
+  component.dispose();
 });
 
 test('NodeIndex enforces duplicate and unregister identity without partial writes', () => {

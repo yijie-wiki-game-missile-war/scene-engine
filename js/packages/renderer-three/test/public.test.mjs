@@ -9,18 +9,18 @@ import { CAMERA_PROPERTIES, createHarness, descriptor } from './support.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-test('0.9 root is the exact ThreeRenderBackend public surface', async () => {
+test('0.11 root is the exact ThreeRenderBackend public surface', async () => {
   assert.deepEqual(Object.keys(api).sort(), [
     'THREE_RENDER_BACKEND_SCHEMA',
     'ThreeRenderBackendError',
     'createThreeRenderBackend',
   ]);
-  assert.equal(api.THREE_RENDER_BACKEND_SCHEMA, 'scene-engine-three-render-backend@1');
+  assert.equal(api.THREE_RENDER_BACKEND_SCHEMA, 'scene-engine-three-render-backend@3');
   const packageJson = JSON.parse(await fs.readFile(path.join(ROOT, 'package.json'), 'utf8'));
-  assert.equal(packageJson.version, '0.9.3');
+  assert.equal(packageJson.version, '0.11.0');
   assert.deepEqual((await fs.readdir(path.join(ROOT, 'src'))).sort(), [
     'backend.js', 'constants.js', 'errors.js', 'index.d.ts', 'index.js',
-    'resource-manager.js', 'resources.js', 'validation.js',
+    'panel-projection.js', 'resource-manager.js', 'resources.js', 'validation.js',
   ]);
 });
 

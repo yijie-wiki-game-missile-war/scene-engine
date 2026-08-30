@@ -8,7 +8,8 @@ const PROFILE_KEYS = Object.freeze(new Set([
   'drawMode', 'maximumPixelRatio', 'clearRgba', 'antialias', 'alpha', 'shadows', 'toneMapping',
 ]));
 const CREATE_KEYS = Object.freeze(new Set([
-  'nodeName', 'componentKey', 'componentType', 'properties', 'resourceRegistry', 'signal',
+  'nodeName', 'componentKey', 'componentType', 'properties', 'batchable', 'resourceRegistry',
+  'signal',
 ]));
 
 export function normalizeOptions(value) {
@@ -59,6 +60,7 @@ export function normalizeCreateDescriptor(value, expectedRegistry) {
   const nodeName = nonemptyString(record.nodeName, 'three-backend-node-name-invalid');
   const componentKey = nonemptyString(record.componentKey, 'three-backend-component-key-invalid');
   if (!COMPONENT_TYPES.has(record.componentType)) fail('three-backend-component-type-invalid');
+  if (typeof record.batchable !== 'boolean') fail('three-backend-batchable-invalid');
   if (record.resourceRegistry !== expectedRegistry || !isResourceRegistry(record.resourceRegistry)) {
     fail('three-backend-resource-registry-mismatch');
   }
@@ -70,15 +72,16 @@ export function normalizeCreateDescriptor(value, expectedRegistry) {
     componentKey,
     componentType: record.componentType,
     properties,
+    batchable: record.batchable,
     resourceRegistry: record.resourceRegistry,
     signal: record.signal ?? null,
   });
 }
 
 export function normalizeUpdatePatch(value, identity) {
-  const record = exactRecord(value, new Set(['identity', 'worldMatrix', 'visible', 'properties']),
-    'three-backend-binding-patch-invalid');
-  if (Object.keys(record).length !== 4) fail('three-backend-binding-patch-invalid');
+  const record = exactRecord(value, new Set(['identity', 'worldMatrix', 'panelAnchorWorld',
+    'visible', 'batchable', 'properties']), 'three-backend-binding-patch-invalid');
+  if (Object.keys(record).length !== 6) fail('three-backend-binding-patch-invalid');
   const nextIdentity = exactRecord(record.identity, new Set(['nodeName', 'componentKey']),
     'three-backend-binding-identity-invalid');
   if (Object.keys(nextIdentity).length !== 2 || nextIdentity.nodeName !== identity.nodeName
@@ -86,13 +89,17 @@ export function normalizeUpdatePatch(value, identity) {
     fail('three-backend-binding-identity-mismatch');
   }
   if (typeof record.visible !== 'boolean') fail('three-backend-binding-visibility-invalid');
+  if (typeof record.batchable !== 'boolean') fail('three-backend-batchable-invalid');
   const properties = clonePlainData(record.properties, 'three-backend-component-properties-invalid');
   if (!isPlainRecord(properties)) fail('three-backend-component-properties-invalid');
   return Object.freeze({
     identity,
     worldMatrix: Object.freeze(finiteTuple(record.worldMatrix, 16,
       'three-backend-world-matrix-invalid')),
+    panelAnchorWorld: record.panelAnchorWorld === null ? null
+      : Object.freeze(finiteTuple(record.panelAnchorWorld, 3, 'three-backend-panel-anchor-invalid')),
     visible: record.visible,
+    batchable: record.batchable,
     properties,
   });
 }

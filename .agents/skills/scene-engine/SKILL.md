@@ -22,9 +22,12 @@ Read the repository instructions and only the current documents relevant to the 
 - [wire v2](../../../docs/wire.md)
 - [JavaScript client](../../../docs/client.md)
 - [Display Node and Component](../../../docs/display.md)
+- [Display animator](../../../docs/display-animation.md)
 - [Three RenderBackend](../../../docs/render-runtime.md)
 - [recording and Replay](../../../docs/recording-replay.md)
 - [Transform encoding](../../../docs/transform.md)
+- [testing methods and standards](../../../docs/testing.md)
+- [test items](../../../docs/tests/README.md)
 
 Use the package entry points as the public API reference:
 
@@ -105,8 +108,9 @@ Rules:
   `build_commit` as `commit_context`; do not use the removed generic `detail` bag.
 - Input may return `changed`, `no_op`, or `rejected`; only `changed` creates a same-tick commit and increments revision.
 - Product code mutates the World only while the runtime has loaned it through one of these callbacks.
-- Use integer tick for gameplay and simulation animation. Never use wall time, RAF time, WebSocket arrival time, or frame count
-  to create rule facts.
+- Use integer tick for gameplay and real mathematical motion (trajectories, physics-like sequences). Never use wall time, RAF
+  time, WebSocket arrival time, or frame count to create rule facts. Python never publishes keyframes, animation progress or
+  animation clocks; semantic state such as `{"motion": "moving"}` is the only animation-related payload.
 - `ProductCheckpoint` is a complete World snapshot plus one Scene name, three catalog identities, and a parent-first baseline
   of complete `DisplayNode` records.
 - `ProductCommit` is a World JSON patch plus an ordered tuple of logical `DisplayCommand` values. It is not a rendered frame.
@@ -293,20 +297,20 @@ model, mesh, texture, texture-atlas, material, animation, surface, particle
 ```
 
 Use a `model` for an externally loaded model hierarchy, a `mesh` for mesh data or a mesh URL, and a `material` for the material
-family and closed properties. Scene Nodes do not contain raw Three objects, loaders, `Object3D`, geometry, texture, or material
-instances.
+family and closed properties. An `animation` is one Display visual timeline (schema `scene-engine-animation-resource@2`); it
+has no URL and is never loaded by the renderer. Scene Nodes do not contain raw Three objects, loaders, `Object3D`, geometry,
+texture, or material instances.
 
 Resource rules:
 
 - IDs are stable catalog identities.
 - URLs exist only in Resource descriptors, never in Python authority records or component state.
 - Add `revision` and a lowercase SHA-256 `hash` when the content identity must be frozen.
-- A model used with animation declares a closed `clipNames` list. Display checks `clipId` before mutation; the backend later
-  verifies that the loaded asset matches that catalog.
 - Component definitions refer to Resources by ID; ComponentRegistry validates allowed kinds before mutation.
 - Register only asset Resource descriptors in ResourceRegistry. SceneDefinition and PrefabDefinition belong only in their own
   registries.
-- Loading is asynchronous inside the renderer backend and is outside the commit/ACK barrier.
+- Loading is asynchronous inside the renderer backend and is outside the commit/ACK barrier. Animation Resources are pure
+  Display data with no renderer asset, lease or dispose.
 
 ### Prefab definitions
 
@@ -323,15 +327,22 @@ export const blueUnitPrefab = definePrefab({
   revision: 2,
   gameplayType: 'unit.basic',
   root: {
-    components: [],
+    components: [{
+      key: 'animator',
+      type: 'animation.player@1',
+      properties: { animationId: 'anim.unit.idle' },
+    }],
     children: [{
       localName: 'body',
       visible: true,
       components: [{
-        key: 'model',
-        type: 'render.model@1',
+        key: 'sprite',
+        type: 'render.sprite@3',
         properties: {
-          modelResourceId: 'model/unit-blue-basic',
+          textureResourceId: 'tex.unit-blue-basic',
+          width: 1,
+          height: 1,
+          frame: 0,
           pickable: true,
         },
       }],
@@ -342,57 +353,15 @@ export const blueUnitPrefab = definePrefab({
     return {
       nodes: {},
       components: {
-        'body/model': {
-          animation: state.animation === null ? null : {
-            clipId: state.animation,
-            startTick: state.animationSourceTick,
-            clock: 'simulation',
-            loop: true,
-          },
-        },
-      },
-    };
-  },
-});
-
-export const redUnitPrefab = definePrefab({
-  schema: PREFAB_DEFINITION_SCHEMA,
-  id: 'product/unit/red-basic',
-  revision: 1,
-  gameplayType: 'unit.basic',
-  root: {
-    components: [],
-    children: [{
-      localName: 'body',
-      visible: true,
-      components: [{
-        key: 'model',
-        type: 'render.model@1',
-        properties: {
-          modelResourceId: 'model/unit-red-basic',
-          pickable: true,
-        },
-      }],
-      children: [],
-    }],
-  },
-  resolveState(state) {
-    return {
-      nodes: {},
-      components: {
-        'body/model': {
-          animation: state.animation === null ? null : {
-            clipId: state.animation,
-            startTick: state.animationSourceTick,
-            clock: 'simulation',
-            loop: true,
-          },
-        },
+        'body/sprite': { frame: state.damaged ? 5 : 0 },
       },
     };
   },
 });
 ```
+
+The declarative `animationId` starts from frame 0 when the Prefab instance attaches. Python state stays semantic
+(`moving`, `damaged`, sequence counters); the display side maps it onto visual timelines.
 
 Prefab identity rules:
 
@@ -409,16 +378,31 @@ Prefab identity rules:
 
 Prefab structure rules:
 
+- The current schema is `scene-engine-prefab-definition@3`. Fixed children use
+  `prefabInstances: [{key, parentLocalPath, prefabId, transform?, visible?, state?}]`; dynamic children use
+  `prefabSlots: [{key, parentLocalPath, allowedPrefabIds, maximumInstances}]`.
 - The root Transform is identity. Give independently posed parts child Nodes.
 - Child names are Prefab-local paths only. Python never addresses them.
-- `resolveState(state, context)` is pure, synchronous, deterministic, and returns only `{nodes, components}` patches.
-- Authority state is a complete replacement. The resolver must handle the complete current state, not rely on hidden prior
-  calls.
-- A runtime Prefab instance is an ordinary Node subtree created by SceneLoader or AuthorityPort.
+- A fixed child always exists. Its resolver override is `{transform?, visible?, state?}`; an omitted override resets it to the
+  declaration baseline. Use a slot with `maximumInstances: 1` for an optional singleton.
+- A slot resolver output maps stable instance keys to `{prefabId, transform?, visible?, state?}`. It is the complete desired set,
+  not a delta: an omitted slot is empty. Enforce the slot allowlist and `maximumInstances` before live mutation.
+- `parentLocalPath` may mount only on the current definition's own root-tree Node, never inside another child Prefab.
+- `resolveState(state, context)` is pure, synchronous and deterministic. Its only closed outputs are `nodes`, `components`,
+  `prefabInstances` and `prefabSlots`.
+- Authority state is a complete replacement. The outer resolver receives the complete game-owned state; every child resolver
+  receives the complete child state derived for it. Neither may rely on hidden prior calls.
+- Nested definitions recursively materialize as ordinary Nodes and Components in the sole NodeIndex/NodeGraph. Keep only a
+  package-private flat provenance/diff ledger; do not expose runtime child-Prefab objects or create a second tree.
+- The same slot key, instance key and `prefabId` retain Node/Component identity. Add missing-new keys, remove absent keys and
+  replace a retained key when its `prefabId` changes.
+- Build canonical descendant names from the outer Scene/authority owner plus the accumulated instance/local path, with exactly
+  one `prefab/` prefix. Never build `prefab/prefab/...`.
 - Do not call `PrefabDefinition.instantiate()` or construct internal scope/Node objects. Runtime installation and AuthorityPort
   are the supported instance owners.
-- Do not add a per-instance update loop to a Prefab. Use a registered `BehaviourComponent` only for visual-only component
-  behavior that genuinely needs the sole Display RAF.
+- Dynamic structure may change only through synchronous complete-state resolution. Do not let a Behaviour, RAF callback,
+  Resource load or renderer add/remove/replace child instances. Use a registered `BehaviourComponent` only for visual-only
+  component behavior that genuinely needs the sole Display RAF.
 
 Authority creation and replacement use exact ids. Checkpoint bootstrap may create authority Nodes after Scene
 installation and before activation. After activation, every authority mutation must be inside one active commit gate:
@@ -454,6 +438,9 @@ try {
 
 Do not carry both `prefabId` and `gameplayType` in an authority command. The registered Definition determines gameplay type;
 duplicating it would create two fields that can disagree.
+
+The game controls only the outer Scene instance or `py/` authority root. Nested definition-owned children are not new Authority
+targets and receive no Python commands; `setNodeState` on the outer root drives the complete recursive desired materialization.
 
 ### Scene definitions
 
@@ -500,10 +487,7 @@ export const mainScene = defineScene({
     parentLocalName: null,
     prefabId: 'product/unit/blue-basic',
     visible: true,
-    state: {
-      animation: null,
-      animationSourceTick: 0,
-    },
+    state: {},
   }],
 });
 ```
@@ -524,11 +508,11 @@ Scene rules:
 Built-in RenderComponent types are:
 
 ```text
-render.model@1
+render.model@2
 render.mesh@1
-render.sprite@1
+render.sprite@3
 render.surface@1
-render.particle@1
+render.particle@2
 render.camera@1
 render.background@1
 render.ambient-light@1
@@ -537,7 +521,16 @@ render.point-light@1
 render.spot-light@1
 ```
 
-`BillboardComponent` and `LookAtComponent` are built-in visual Behaviours. For a product-specific component:
+The Display-local animator component is `animation.player@1` (each Prefab definition-instance root only, `allowMultiple` with
+distinct keys). Sprite frame sequences belong to the animator; the renderer-owned animation fields of the previous model,
+sprite and particle component versions are rejected fail-closed.
+
+`BillboardComponent` (`behavior.billboard@2`) defaults to fixed world +Z forward / +Y up in Display's shared
+transform pipeline. Camera-facing behavior requires explicit `facing: 'camera'`; version 1 is not registered.
+`render.sprite@3` derives `panelAnchorWorld` from its nearest enabled fixed billboard ancestor. The backend applies
+anchor-relative perspective compensation to vertices and picking, including instances; it never changes Node TRS,
+expands height for camera pitch, or pins the anchor to the screen. See `docs/render-runtime.md` for the exact formula.
+`LookAtComponent` remains a separate built-in visual Behaviour. For a product-specific component:
 
 1. Extend `Component` or `BehaviourComponent`; do not override final lifecycle/mutation methods.
 2. Give it one versioned static `typeId` and, for a Behaviour, one `tickPhase` of `update` or `before-render`. Bump the
@@ -553,8 +546,77 @@ render.spot-light@1
    NodeIndex, NodeGraph, AuthorityPort, CommitGate, scheduler, or RenderSystem.
 9. A transform-driving Behaviour may call `setDrivenLocalTransform(...)` only for its own non-authority Node. It cannot mutate a
    Python-owned `py/` authority root or any other Node.
-10. Built-in renderer component properties, including nested material, animation, flipbook, surface, particle, light, camera, and
-    background values, are completely normalized before Node mutation and commit-gate seal.
+10. Built-in renderer component properties, including nested material, surface, particle, light, camera, and background
+    values, are completely normalized before Node mutation and commit-gate seal.
+11. The animation operations `setAnimation`, `playAnimation` and `stopAnimation` are final base-class methods; they address an
+    `animation.player@1` on the caller's own Node and cannot be overridden.
+
+### Display animator
+
+The animator is a Display-only visual timeline. First version: `sprite.frame` channel, `step` interpolation, per-player local
+`visualSeconds` origin. One Animation Resource is one timeline; one `animation.player@1` is one local player.
+
+Resource (uniform frame replacement):
+
+```js
+import { defineFrameAnimation } from '@scene-engine/display';
+
+const walk = defineFrameAnimation({
+  id: 'anim.unit.walk',
+  target: { node: 'body', component: 'sprite' },
+  frames: [0, 1, 2, 1],
+  fps: 10,
+  loop: true,
+});
+```
+
+For unequal dwell times use `defineAnimation()` with explicit `{atMs, value}` keyframes. Both helpers and the ResourceRegistry
+share one normalizer; the schema is exactly `scene-engine-animation-resource@2`.
+
+Runtime control from a Behaviour on the same Node as the player:
+
+```js
+class UnitVisualBehaviour extends BehaviourComponent {
+  static typeId = 'visual.unit@1';
+  static tickPhase = 'update';
+
+  tick() {
+    if (this.properties.fireSequence !== this._lastFire) {
+      this._lastFire = this.properties.fireSequence;
+      this.playAnimation('animator', 'anim.unit.fire');
+      return;
+    }
+    this.setAnimation(
+      'animator',
+      this.properties.moving ? 'anim.unit.walk' : 'anim.unit.idle',
+    );
+  }
+}
+```
+
+| Intent | API |
+|---|---|
+| Sustained idle/walk, repeated calls keep the phase | `setAnimation(playerKey, id)` |
+| One-shot fire/hit/flash, same clip replays from zero | `playAnimation(playerKey, id)` |
+| Stop and restore base properties | `stopAnimation(playerKey)` |
+
+Rules:
+
+- Player placement is each Prefab definition-instance root only; its ordinary child nodes and plain Scene nodes are rejected at
+  compile time.
+- Track targets are local to that exact materialization Scope (`$root` or one own local path); never global `py/...` names and
+  never a path through a nested child Prefab.
+- Resolve animation roots by package-private Scope identity/provenance, not by a `prefab/` Node-name prefix. Same-key/id nested
+  retention preserves player phase; replacement/re-add starts a new player, and removal releases transient ownership.
+- The first-version target must be `render.sprite@3` with a `texture-atlas`; keyframe values stay below `columns * rows`.
+- Sampling never mutates `component.properties`; stop restores the newest base values.
+- Non-loop clips hold the final keyframe; returning to idle needs an explicit `setAnimation`.
+- Do not use `sourceTick` for animator sampling, and do not re-trigger one-shot clips from a boolean every tick — detect
+  sequence/edge changes instead.
+- Do not implement state machines, transitions, layers, blend trees, event tracks or arbitrary property paths; future channels
+  join this timeline as closed unions only.
+
+See [Display animator](../../../docs/display-animation.md).
 
 If an object needs an independent pose, create a child Node instead of adding position, rotation, matrix, or Transform fields to
 a Component.
@@ -589,8 +651,10 @@ or explicit acceptance work.
 
 ## Time, identity, and mutation rules
 
-- Rule time is `source_tick / TICKS_PER_SECOND`; the contract value is exactly 60. Display may derive visual sampling from
-  source tick or use an explicitly visual-only clock, but visual time never changes the World.
+- Rule time is `source_tick / TICKS_PER_SECOND`; the contract value is exactly 60. `sourceTick` marks the authoritative
+  simulation commit position and never advances an animation. The Display animator samples each player against its own local
+  `visualSeconds` origin; global procedural renderer effects may sample `visualSeconds` directly. Visual time never changes
+  the World.
 - Node names are immutable lowercase canonical paths under exactly `sys/`, `scene/`, `py/`, or `prefab/`.
 - Full `py/` authority name is the runtime instance identity. `PrefabDefinition.id` is the reusable definition identity;
   `gameplayType` is non-unique state-contract metadata. Never use one in place of another.
@@ -600,9 +664,11 @@ or explicit acceptance work.
 - Each Node owns exactly one local TRS. World Transform is derived by the sole NodeGraph.
 - Each authority operation has exactly one target and validates before mutation. Before activation this is only checkpoint
   bootstrap; after activation it is legal only while one commit gate is active.
-- `setNodeState` is complete replacement. `replaceNodePrefab` takes an exact `prefabId`, stages and validates a shadow scope,
-  then swaps it atomically for that target operation. Built-in render-state validation completes before mutation/seal, never
-  first in a later RAF.
+- `setNodeState` is complete replacement and synchronously resolves/validates the full nested desired candidate. Stage nested
+  additions/replacements before adoption; retained same-key/id records keep identity, and removed records dispose
+  child-before-parent only after success.
+- `replaceNodePrefab` takes an exact `prefabId`, stages and validates a shadow materialization, then swaps it atomically for that
+  target operation. Built-in render-state validation completes before mutation/seal, never first in a later RAF.
 - A full DisplayView is an explicit diagnostic/query snapshot, not a state owner and not a per-commit cache.
 
 ## Failure and disposal
@@ -613,8 +679,8 @@ or explicit acceptance work.
   checkpoint.
 - Component tick failure halts Display scheduling and marks the runtime unhealthy.
 - Renderer health failure is recoverable only through the explicit backend rebuild path when the event is marked recoverable.
-- Disposal must release session, RAF, Scene/Prefab scopes, Nodes, Components, resource leases, pending loads, backend bindings,
-  renderer resources, listeners, and recorder state owned by that layer.
+- Disposal must release session, RAF, Scene/Prefab materializations and their private ledger, Nodes, Components, resource
+  leases, pending loads, backend bindings, renderer resources, listeners, and recorder state owned by that layer.
 - Keep disposal idempotent. Await `DisplayRuntime.dispose()` and renderer readiness/disposal where the public API is async.
 
 ## Do not introduce
@@ -631,7 +697,12 @@ or explicit acceptance work.
 - full-tree `currentDisplayView()` generation inside the normal commit observer;
 - direct construction of internal Node, Scene, scope, NodeIndex, NodeGraph, AuthorityComponent, RenderSystem, or
   backend-binding classes;
+- a public runtime child-Prefab object, nested Prefab tree, child Authority command surface or Behaviour-driven structure path;
 - a Prefab Registry keyed by gameplay type, a uniqueness rule on gameplay type, or an implicit default Prefab selector;
+- animation clocks, keyframes, progress or player origins in Python, wire, checkpoint, Replay or Client commands;
+- renderer-owned playable timelines (model mixer playback, sprite frame timelines, particle clocks) or sampling animation
+  from `sourceTick`;
+- animation state machines, transitions, layers, blend trees, event tracks, or arbitrary keyframe property paths;
 - authority fields named `prefab_type`/`prefabType`; the formal contract uses `prefab_id`/`prefabId`;
 - calls to `SceneDefinition.instantiate()` or `PrefabDefinition.instantiate()`; use `runtime.installScene` and AuthorityPort;
 - authority mutation outside checkpoint bootstrap or an active commit gate;
@@ -639,21 +710,13 @@ or explicit acceptance work.
 - game-art production instructions, visual style guidance, Showcase catalog work, capture composition, or asset review in this
   Skill.
 
-## Validate the affected boundary
+## Test the change
 
-Run the smallest focused tests while editing, then the complete repository gates before handoff:
-
-```bash
-uv run python -m pytest -q
-npm ci
-npm test
-uv run python scripts/verify_cutover.py
-```
-
-Useful focused commands:
+Follow [testing methods and standards](../../../docs/testing.md) and the current
+[test item index](../../../docs/tests/README.md). Focused commands may shorten feedback while editing:
 
 ```bash
-# Display definitions, Node graph, runtime, lifecycle, and 500-node coverage
+# Display definitions/compiler, nested materialization/diff/rollback, animation Scope, lifecycle, and scale coverage
 npm test --workspace @scene-engine/display
 
 # Client packet, WorldState, ACK, session, and packet-log coverage
@@ -661,24 +724,14 @@ npm test --workspace @scene-engine/client
 
 # Three binding, loading, batching, pick, rebuild, and disposal coverage
 npm test --workspace @scene-engine/renderer-three
-
-# Performance evidence when the affected hot path changes
-uv run python scripts/benchmark_scene_500.py --quick
-node --expose-gc scripts/benchmark_client_ack_500.mjs --quick
-node --expose-gc scripts/benchmark_display_runtime_500.mjs --quick
 ```
 
 When changing a cross-language protocol or identity, update Python and JavaScript implementations, tests, canonical fixtures,
 package versions/locks, and binding documents in one change. Do not make one side accept both the old and new contract.
 
-Before handoff, verify:
+Completion has one standard: both complete test commands pass.
 
-- the change is owned by exactly one layer;
-- no second clock, graph, cursor, RAF, or decoder was added;
-- public examples use only package entry-point exports;
-- definitions and registries remain immutable and complete before runtime construction;
-- duplicate Prefab ids fail at registration while duplicate gameplay types are accepted;
-- Scene and authority paths resolve Prefabs in O(1) by exact `prefabId`;
-- ACK remains synchronous and independent of resource loading/draw;
-- failure recovery uses fresh checkpoint/session or explicit backend rebuild, not local repair;
-- focused tests, full gates, current docs, and benchmark/evidence claims agree.
+```bash
+uv run python -m pytest -q
+npm test
+```

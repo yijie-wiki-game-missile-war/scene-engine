@@ -45,8 +45,10 @@ export function createInternalComponentContext({
   scene,
   nodeIndex,
   nodeGraph,
+  animationSystem = null,
   publicDisplay = null,
   componentAttached = null,
+  componentSuspending = null,
   componentEnabledChanged = null,
   componentPropertiesChanged = null,
   componentDetaching = null,
@@ -61,7 +63,7 @@ export function createInternalComponentContext({
     }
     return view;
   };
-  return {
+  const context = {
     scene,
     nodeIndex,
     nodeGraph,
@@ -77,8 +79,16 @@ export function createInternalComponentContext({
       node.setLocalTransform(transform);
     },
     componentAttached,
+    componentSuspending,
     componentEnabledChanged,
     componentPropertiesChanged,
     componentDetaching,
   };
+  if (animationSystem !== null) {
+    // Live contexts apply immediately. Prefab candidate contexts provide a private
+    // queueing adapter and replay only after the complete staged bundle is adopted.
+    context.setAnimation = (requester, operation, playerKey, animationId) =>
+      animationSystem.applyCommand(requester, operation, playerKey, animationId);
+  }
+  return context;
 }

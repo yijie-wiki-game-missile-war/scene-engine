@@ -3,9 +3,11 @@ import test from 'node:test';
 
 import * as api from '@scene-engine/display';
 
-test('0.4 root is the exact Display public surface and excludes internal Authority mutation types', () => {
+test('0.8 root is the exact Display public surface and excludes internal Authority mutation types', () => {
   assert.deepEqual(Object.keys(api).sort(), [
+    'ANIMATION_RESOURCE_SCHEMA',
     'AmbientLightComponent',
+    'AnimationPlayerComponent',
     'BackgroundComponent',
     'BehaviourComponent',
     'BillboardComponent',
@@ -40,7 +42,9 @@ test('0.4 root is the exact Display public surface and excludes internal Authori
     'createPrefabRegistry',
     'createResourceRegistry',
     'createSceneRegistry',
+    'defineAnimation',
     'defineDisplayCatalogManifest',
+    'defineFrameAnimation',
     'definePrefab',
     'defineResources',
     'defineScene',
@@ -52,5 +56,6 @@ test('0.4 root is the exact Display public surface and excludes internal Authori
   for (const removed of [
     ['Local', 'Edit', 'Port'].join(''),
     ['create', 'Local', 'Edit', 'Port'].join(''),
+    'AnimationSystem',
   ]) assert.equal(removed in api, false, removed);
 });

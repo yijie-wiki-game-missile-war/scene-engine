@@ -24,12 +24,19 @@ export class AuthorityPort {
     if (this._scene.nodeIndex.has(name)) fail('display-node-name-duplicate');
     const parent = this._resolveParent(record.parentName);
     const definition = this._resolvePrefab(record.prefabId);
-    const compiled = definition.compile(this._scene.registries);
+    const compiled = this._scene.registries.compiledPrefabCatalog.require(definition.id);
     const transform = normalizeTransform(record.transform);
     if (typeof record.visible !== 'boolean') fail('display-node-visibility-invalid');
     const state = cloneAndFreeze(record.state, 'display-authority-state-invalid');
     // Resolver/schema validation occurs before the first live mutation.
-    const validatedPatch = this._prefabInstantiator.resolveAndValidateState(compiled, state);
+    const validatedPatch = this._prefabInstantiator.resolveAndValidateState(
+      compiled,
+      state,
+      null,
+      {},
+      { ownerName: name },
+    );
+    this._scene.nodeGraph.validateSubtreePlacement(parent, validatedPatch.graphHeight);
     const root = new Node({ name, sceneToken: this._scene.sceneToken,
       transform, visible: record.visible });
     const authority = new AuthorityComponent({
@@ -100,9 +107,7 @@ export class AuthorityPort {
     const state = cloneAndFreeze(record.state, 'display-authority-state-invalid');
     const scope = this._prefabInstantiator.getScope(node);
     if (!scope) fail('display-prefab-scope-missing');
-    const patch = this._prefabInstantiator.resolveAndValidateState(scope.compiled, state, scope);
-    this._prefabInstantiator.applyValidatedPatch(scope, patch);
-    scope.state = state;
+    this._prefabInstantiator.reconcileState(scope, state);
     authority._setState(state);
     this._onMutation?.();
   }
@@ -113,20 +118,29 @@ export class AuthorityPort {
       'display-authority-command-invalid');
     const { node, authority } = this._requireAuthority(record.name);
     const definition = this._resolvePrefab(record.prefabId);
-    const compiled = definition.compile(this._scene.registries);
+    const compiled = this._scene.registries.compiledPrefabCatalog.require(definition.id);
     const state = cloneAndFreeze(record.state, 'display-authority-state-invalid');
-    const validatedPatch = this._prefabInstantiator.resolveAndValidateState(compiled, state);
+    const validatedPatch = this._prefabInstantiator.resolveAndValidateState(
+      compiled,
+      state,
+      null,
+      {},
+      { ownerName: node.name },
+    );
     const replacementAuthority = new AuthorityComponent({
       prefabId: definition.id,
       transformMode: authority.transformMode,
       state,
     });
+    const authorityChildren = node._children.filter((child) => child.name.startsWith(AUTHORITY_PREFIX));
+    const originalChildren = [...node._children];
     const shadow = this._prefabInstantiator.createShadow({
       target: node,
       compiled,
       state,
       authorityComponent: replacementAuthority,
       validatedPatch,
+      preservedAuthorityChildNames: authorityChildren.map((child) => child.name),
     });
     const oldScope = this._prefabInstantiator.getScope(node);
     const oldParent = node.parent;
@@ -137,17 +151,39 @@ export class AuthorityPort {
         'shadow-placement-rejected'));
       throw error;
     }
-    const authorityChildren = node._children.filter((child) => child.name.startsWith(AUTHORITY_PREFIX));
+    let suspended = null;
+    try {
+      for (const child of authorityChildren) {
+        this._scene.nodeGraph.reparent(child, this._scene.authorityRootNode);
+      }
+      suspended = this._prefabInstantiator.suspendLiveScope(oldScope);
+      this._prefabInstantiator.adoptShadow(shadow, oldParent, this._componentContext);
+    } catch (error) {
+      if (suspended?.active) {
+        try { this._prefabInstantiator.restoreSuspendedScope(suspended); } catch {
+          /* preserve the adoption error */
+        }
+      }
+      for (const child of authorityChildren) {
+        if (child.parent === this._scene.authorityRootNode && node._graph === this._scene.nodeGraph) {
+          try { this._scene.nodeGraph.reparent(child, node); } catch { /* preserve adoption error */ }
+        }
+      }
+      if (node._graph === this._scene.nodeGraph) {
+        try { this._scene.nodeGraph.restoreChildOrder(node, originalChildren); } catch {
+          /* preserve the adoption error */
+        }
+      }
+      this._onCleanupErrors?.(this._prefabInstantiator.disposeShadow(shadow,
+        'shadow-adoption-rejected'));
+      throw error;
+    }
 
-    for (const child of authorityChildren) this._scene.nodeGraph.reparent(child, this._scene.authorityRootNode);
+    this._prefabInstantiator.finalizeSuspendedScope(suspended);
     this._onCleanupErrors?.(this._prefabInstantiator.disposeScope(oldScope, 'prefab-replaced'));
     this._onCleanupErrors?.(authority.dispose('prefab-replaced'));
     node._components.delete(authority.key);
-    this._scene.nodeGraph.detach(node);
-    this._scene.nodeIndex.unregister(node);
     node._markDisposed();
-
-    this._prefabInstantiator.adoptShadow(shadow, oldParent, this._componentContext);
     for (const child of authorityChildren) this._scene.nodeGraph.reparent(child, shadow.root);
     this._scene.nodeGraph.flushWorldTransforms();
     this._onMutation?.();

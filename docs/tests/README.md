@@ -1,0 +1,164 @@
+# 测试项目
+
+本页列出根级全量命令当前发现或调用的测试项目。测试数量随合同演进，不在文档中固定；新增、删除或重命名
+项目时更新本索引。测试方法、编写要求和唯一完成标准见[测试方法和标准](../testing.md)。
+
+## 整体与性能测试两大类
+
+| 类别 | 默认门禁中的小规模 smoke | 显式 runner |
+| --- | --- | --- |
+| 显示引擎功能与性能 | `display-runtime-foundation.test.mjs`；`display-runtime-scale.test.mjs` 调用 12-binding deterministic smoke。 | `benchmark_display_runtime_scale.mjs` 运行 10k/30k/50k bindings；`benchmark_display_browser.mjs` 在真实 Chrome/WebGL 中运行。 |
+| 通讯性能 | `test_python_js_communication_e2e.py` 运行 32-root Python↔JavaScript roundtrip，并以小规模 windowed CLI smoke 检查 pending/in-flight。 | `benchmark_python_js_communication.py` 参数化 roots、commits、update ratio 和 roundtrip/windowed profile。 |
+
+默认 `uv run python -m pytest -q` 与 `npm test` 只执行表中的小规模确定性 smoke，不自动运行 10k/30k/50k 或
+Chrome/WebGL runner。所有显式 runner 只向 stdout 输出 JSON，不创建或提交持久化性能报告、历史结果文件。时间数据当前用于
+观察，不设置跨机器硬阈值；结构、cursor、最终状态、健康与释放检查仍必须通过。
+
+## Python
+
+Python 测试由 `uv run python -m pytest -q` 按 `pyproject.toml` 的 `tests/` 路径发现。
+
+| 测试项目 | 覆盖范围 |
+| --- | --- |
+| [`test_runtime.py`](../../tests/test_runtime.py) | 固定 60 Hz、tick 与 input 事务、commit/command cursor、会话幂等与隔离、checkpoint 缓存和全局保留、recorder 接入、fatal 边界、验证顺序与单次编码。 |
+| [`test_wire_v2.py`](../../tests/test_wire_v2.py) | Wire v2 packet 与 attachment 布局、golden bytes、非法 corpus、大小与深度限制、安全整数、Display cursor 对齐、旧版本和旧布局拒绝。 |
+| [`test_display.py`](../../tests/test_display.py) | Python Display checkpoint、目录身份、parent-first baseline、单目标命令、严格序列、空 command seal、不可变编码、封闭字段和完整 state replacement。 |
+| [`test_json_tree_v1.py`](../../tests/test_json_tree_v1.py) | JSON Tree set/unset/append、写入前完整验证、canonical path 顺序、数值与危险键限制、容量边界和数组原始索引语义。 |
+| [`test_recording_v2.py`](../../tests/test_recording_v2.py) | packet-log 精确 packet bytes、command cursor 索引、INCOMPLETE/seal 生命周期、stream progression、周期 checkpoint anchor 和损坏记录拒绝。 |
+| [`test_catalog_identity.py`](../../tests/test_catalog_identity.py) | Python 加载 JavaScript 构建的 Display catalog identity，严格校验封闭字段和小写 SHA-256。 |
+| [`test_import_surface.py`](../../tests/test_import_surface.py) | Python 根包公开导出、版本和当前模块集合，防止旧模块或额外 API 回流。 |
+| [`test_display_benchmark.py`](../../tests/test_display_benchmark.py) | 500-node benchmark 工具的参数约束、quick/formal 模式、报告结构和阈值判定函数。它是工具行为测试，随 pytest 全量套件运行，不是独立 benchmark 门禁。 |
+| [`test_verify_cutover.py`](../../tests/test_verify_cutover.py) | package tarball、npm file install、wheel metadata/source 和 release archive 文件比较函数的拒绝与一致性行为。它是工具行为测试，随 pytest 全量套件运行，不是独立 release gate。 |
+| [`test_python_js_communication_e2e.py`](../../tests/test_python_js_communication_e2e.py) | 32 roots checkpoint、多次 transform commit、exact Wire/ACK bytes、长度帧本地 Node 子进程、canonical JavaScript catalog identity、Client/Display cursor、最终 World 与 Transform digest；另以小规模 windowed CLI smoke 检查 in-flight/pending 峰值和最终归零。 |
+
+## JavaScript Client
+
+`@scene-engine/client` 使用 Node test runner 执行 `test/*.test.mjs`。
+
+| 测试项目 | 覆盖范围 |
+| --- | --- |
+| [`client.test.mjs`](../../js/packages/client/test/client.test.mjs) | 精确公共导出、Python Wire fixtures、WorldState、checkpoint/session 原子替换、commit gate、ACK、observer、显式 DisplayView、input、JSON patch 和失败关闭。 |
+| [`client-display-failure.test.mjs`](../../js/packages/client/test/client-display-failure.test.mjs) | Client 与真实 DisplayRuntime 组合后的同步屏障、异步清理拒绝观察、部分显示提交失败、terminal 状态和无 ACK 保证。 |
+| [`packet-log.test.mjs`](../../js/packages/client/test/packet-log.test.mjs) | packet-log 字段与 cursor 校验、通过唯一 Authority 路径 Replay、seek 新建 session、损坏记录和旧 manifest 拒绝。 |
+
+## JavaScript Display
+
+`@scene-engine/display` 使用 Node test runner 执行 `test/*.test.mjs`。
+
+| 测试项目 | 覆盖范围 |
+| --- | --- |
+| [`public.test.mjs`](../../js/packages/display/test/public.test.mjs) | Display 根包精确公开导出和内部 Authority mutation 类型隔离。 |
+| [`node-core.test.mjs`](../../js/packages/display/test/node-core.test.mjs) | Node 名称语法、Transform 规范化与组合、NodeIndex、NodeGraph、最大深度、Billboard 和 LookAt。 |
+| [`node-graph-forest-audit.test.mjs`](../../js/packages/display/test/node-graph-forest-audit.test.mjs) | forest detach/restore 的封闭性、兄弟顺序、身份、dirty 状态和失败前零写入。 |
+| [`definitions.test.mjs`](../../js/packages/display/test/definitions.test.mjs) | Scene、Prefab、Resource 与 built-in Component 的封闭定义、注册、引用、嵌套依赖、深度/规模边界和 exact `prefabId`。 |
+| [`catalog-identity.test.mjs`](../../js/packages/display/test/catalog-identity.test.mjs) | canonical manifest、构建 artifact、SHA-256、注册顺序独立性、hash domain 隔离和 authority-state schema coverage。 |
+| [`component.test.mjs`](../../js/packages/display/test/component.test.mjs) | Component 同步生命周期、只读能力、scheduler 快照、final 方法、transform driver 唯一性和资源校验后的原子属性替换。 |
+| [`runtime.test.mjs`](../../js/packages/display/test/runtime.test.mjs) | Authority commit gate、Scene 安装、完整候选验证、Prefab replacement、RenderSystem binding、summary/currentView、health、backend rebuild 和 dispose。 |
+| [`nested-prefab.test.mjs`](../../js/packages/display/test/nested-prefab.test.mjs) | 固定与动态嵌套 Prefab 展开、0..N diff、same-key/id 身份保留、失败零变更、递归释放和静态 Scene 初始化。 |
+| [`nested-prefab-runtime-audit.test.mjs`](../../js/packages/display/test/nested-prefab-runtime-audit.test.mjs) | 深度边界、路径冲突、事务最终候选可见性、attach 失败、NodeIndex 注册失败、复杂 rollback 和兄弟顺序恢复。 |
+| [`nested-prefab-scale.test.mjs`](../../js/packages/display/test/nested-prefab-scale.test.mjs) | 640 个动态子实例下基于 ledger identity 的 reconcile，以及大候选 staging/adoption 失败后的完整回滚。 |
+| [`animation.test.mjs`](../../js/packages/display/test/animation.test.mjs) | Animation Resource、Prefab Scope、player 放置与目标、visual clock 采样、set/play/stop、override、batch ownership、替换/回滚、rebuild 和冲突。 |
+| [`display-500.test.mjs`](../../js/packages/display/test/display-500.test.mjs) | 500 个 authority roots 共享唯一 NodeIndex，并保持精确 canonical identity。 |
+
+## JavaScript Three Renderer
+
+`@scene-engine/renderer-three` 使用 Node test runner 执行 `test/*.test.mjs`。
+
+| 测试项目 | 覆盖范围 |
+| --- | --- |
+| [`public.test.mjs`](../../js/packages/renderer-three/test/public.test.mjs) | renderer-three 精确公开 API、扁平 RenderBackendPort 和 Three 对象隔离。 |
+| [`backend.test.mjs`](../../js/packages/renderer-three/test/backend.test.mjs) | 扁平 binding、world matrix、pick/project、相机与灯光、panel compensation、资源替换、sprite batching、surface 和 particle 视觉采样。 |
+| [`resource-lifecycle.test.mjs`](../../js/packages/renderer-three/test/resource-lifecycle.test.mjs) | pending load 去重与取消、资源依赖回收、mesh/texture/model 处理、health envelope、GLTF 部分失败、destroy/recreate 和 backend replacement 释放。 |
+| [`batch-representation.test.mjs`](../../js/packages/renderer-three/test/batch-representation.test.mjs) | ordinary object 与 InstancedMesh 唯一表示、可见性、矩阵更新、batch 重建、资源替换、pick、capture 和 diagnostics 计数。 |
+| [`animation-port.test.mjs`](../../js/packages/renderer-three/test/animation-port.test.mjs) | 旧 renderer animation 字段拒绝、Animation Resource 不加载、animated sprite 退出静态 batch、frame 更新不 rebatch 和 eligibility transition。 |
+| [`display-integration.test.mjs`](../../js/packages/renderer-three/test/display-integration.test.mjs) | Display RenderSystem 驱动精确 Three backend port，并从声明式 binding 重建。 |
+| [`acceptance.test.mjs`](../../js/packages/renderer-three/test/acceptance.test.mjs) | 500 个真实 Three bindings 的 batching、frame sampling、backend rebuild、dispose 和最终零 resource lease。 |
+| [`display-runtime-foundation.test.mjs`](../../js/packages/renderer-three/test/display-runtime-foundation.test.mjs) | 从 DisplayRuntime 到真实 Three backend 的整体基础测试：mesh/sprite/model/surface/particle、固定与动态嵌套 Prefab、Authority 增删/reparent、位置/旋转/缩放、visibility、完整 state、Display-local sprite animation、backend rebuild 和零所有权释放。 |
+| [`display-runtime-scale.test.mjs`](../../js/packages/renderer-three/test/display-runtime-scale.test.mjs) | 调用 scale runner 的 12-binding deterministic smoke，检查结构、cursor、计时报告形状、backend rebuild、健康和完整 dispose；不执行大规模时间门槛。 |
+
+## 显示引擎功能与性能
+
+### Foundation
+
+[`display-runtime-foundation.test.mjs`](../../js/packages/renderer-three/test/display-runtime-foundation.test.mjs) 使用
+[`display-runtime-support.mjs`](../../js/packages/renderer-three/test/display-runtime-support.mjs) 建立真实
+`DisplayRuntime → RenderSystem → ThreeRenderBackend` 路径。Node 环境只替换 WebGLRenderer 与资源入口为确定性测试实现；
+Three Scene、Object、Geometry、Material、Texture、binding、batching、资源租约和生命周期均走正式 backend。
+
+该测试随 `npm test` 运行，属于默认门禁的小规模功能 smoke。
+
+### Scale runner 与 smoke
+
+[`display-runtime-scale.test.mjs`](../../js/packages/renderer-three/test/display-runtime-scale.test.mjs) 是默认门禁中的
+小规模 runner smoke。显式规模运行使用
+[`benchmark_display_runtime_scale.mjs`](../../scripts/benchmark_display_runtime_scale.mjs)，支持 `static-mesh`、
+`static-sprite`、`mixed`、`nested` 和 `animated-sprite` profile，最多 50,000 bindings。例如：
+
+```bash
+node scripts/benchmark_display_runtime_scale.mjs --bindings=10000 --profile=static-mesh --ticks=120 --warmup=5 --update-ratio=0.01
+node scripts/benchmark_display_runtime_scale.mjs --bindings=30000 --profile=static-mesh --ticks=120 --warmup=5 --update-ratio=0.01
+node scripts/benchmark_display_runtime_scale.mjs --bindings=50000 --profile=static-mesh --ticks=120 --warmup=5 --update-ratio=0.01
+```
+
+runner 报告创建、commit、frame、rebuild、dispose 的 p50/p95/p99/maximum、内存、结构和所有权计数。时间字段先用于
+观察；`READY` 只表示该次结构、cursor、重建、健康和释放检查通过，不代表跨机器时间承诺。
+其中 `nested` profile 每 tick 发送一个完整 desired-set state command；`update-ratio` 表示其中实际改变的条目比例，
+报告会明确标出这种 reconcile 模式。该 runner 是内部 CPU harness，会读取 package-private diagnostics 核对资源归零，
+这些入口不构成产品 API。
+
+### Browser WebGL runner
+
+[`benchmark_display_browser.mjs`](../../scripts/benchmark_display_browser.mjs) 配合
+[`display_browser_benchmark.html`](../../scripts/support/display_browser_benchmark.html)，在本机 Chrome 的真实 WebGL
+上下文中执行 DisplayRuntime 和公开 `createThreeRenderBackend()`：
+
+```bash
+node scripts/benchmark_display_browser.mjs --bindings=10000 --ticks=120 --update-ratio=0.01
+```
+
+它报告浏览器/GPU 信息、启动、`commitAndCpuSubmit` 分位数、binding/resource 状态与 dispose。
+`commitAndCpuSubmit` 覆盖 commit、Display prepare 和 WebGL CPU 命令提交，不是 GPU fence/presentation 时间或 FPS；Three
+`renderer.info.memory` 是驱动侧观测计数，释放判定以 backend binding/resource/pending/disposed 所有权字段为准。该
+runner 依赖本机 Chrome/GPU，不进入默认门禁，也不设置跨机器时间硬阈值。
+
+## 通讯性能
+
+[`test_python_js_communication_e2e.py`](../../tests/test_python_js_communication_e2e.py) 是默认门禁中的 32-root
+correctness smoke。它连接真实 Python `EngineProgram → SceneEngineRuntime`、exact Wire bytes、4-byte little-endian
+长度帧 Node 子进程、`SceneEngineClient → DisplayRuntime` 与 exact ACK 回程。Display 使用无资源 fake backend 和不执行
+回调的 frame adapter，因此结果不含 RAF、draw 或 renderer 时间。
+
+显式通讯运行使用
+[`benchmark_python_js_communication.py`](../../scripts/benchmark_python_js_communication.py)。JavaScript peer 与 canonical
+catalog builder 分别是
+[`python_js_communication_peer.mjs`](../../scripts/support/python_js_communication_peer.mjs) 和
+[`communication_catalog.mjs`](../../scripts/support/communication_catalog.mjs)：
+
+```bash
+uv run python scripts/benchmark_python_js_communication.py --roots 10000 --commits 200 --update-ratio 0.01 --profile roundtrip
+uv run python scripts/benchmark_python_js_communication.py --roots 10000 --commits 200 --update-ratio 0.01 --profile windowed
+```
+
+报告包含 Python tick-to-ACK 与 length-frame-to-ACK 的 p50/p95/p99/max、bytes/s、commands/s、commits/s、pending/in-flight
+峰值与最终归零，以及 catalog、packet bytes、cursor、World 和 Display Transform 的正确性检查。时间字段先观测，不设
+跨机器硬阈值。
+`roundtrip` profile 逐包发送并读取 ACK；`windowed` profile 用于观察饱和窗口吞吐和排队，因此其延迟也包含生产端及
+ACK 读取队列等待，不能解释为孤立的 Wire/Client 处理时间。
+
+## 资源泄漏现场测试
+
+[`verify_display_leaks.mjs`](../../scripts/verify_display_leaks.mjs) 在一个进程内执行 authority create/remove 循环、
+RenderBackend 重建、异步 fault injection、动画 player 生命周期和完整 dispose，检查 Node、Component、scheduler、
+binding、resource lease、pending load 以及 Three geometry/material/texture 最终归零。根 `npm test` 统一调用该测试；
+它不是独立门禁，也不以持久化运行结果作为通过条件。
+
+## TypeScript 声明兼容
+
+[`interop.ts`](../../js/types/interop.ts) 由根 `npm test` 的严格 TypeScript 检查编译，验证 Client、Display 和
+renderer-three 的公开 `.d.ts` 可以直接组合，并验证 Authority 与 Scene 安装等同步屏障拒绝异步签名。
+
+## Fixtures 与测试支持代码
+
+`fixtures/`、各 package 的 `fixtures/`、`support.mjs` 和 `helpers.mjs` 为上述测试提供 canonical 输入或测试环境，
+不单独构成测试项目。只有被全量命令实际消费的 fixture 才构成自动化覆盖；例如当前
+`fixtures/transform-v1/rule-matrix.canonical-vectors.json` 尚未被 Python 或 JavaScript 测试引用。

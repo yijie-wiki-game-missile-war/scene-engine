@@ -62,7 +62,7 @@ export interface ThreeRenderBackendPort {
   dispose(): Promise<void> | void;
 }
 
-export const THREE_RENDER_BACKEND_SCHEMA: 'scene-engine-three-render-backend@1';
+export const THREE_RENDER_BACKEND_SCHEMA: 'scene-engine-three-render-backend@3';
 
 export class ThreeRenderBackendError extends Error {
   readonly code: string;

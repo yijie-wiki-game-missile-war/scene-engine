@@ -56,11 +56,19 @@
   ],
   "prefabs": [
     {
-      "schema": "scene-engine-prefab-definition@2",
+      "schema": "scene-engine-prefab-definition@3",
       "id": "unit.basic",
       "gameplayType": "unit.basic",
       "root": {
-        "components": [],
+        "components": [
+          {
+            "key": "animator",
+            "type": "animation.player@1",
+            "properties": {
+              "animationId": "anim.unit.idle"
+            }
+          }
+        ],
         "children": [
           {
             "localName": "body",
@@ -85,17 +93,14 @@
             "visible": true,
             "components": [
               {
-                "key": "model",
-                "type": "render.model@1",
+                "key": "sprite",
+                "type": "render.sprite@3",
                 "properties": {
-                  "modelResourceId": "model/unit",
-                  "animation": {
-                    "clipId": "idle",
-                    "startTick": 0,
-                    "clock": "simulation",
-                    "loop": true
-                  },
-                  "materialOverrides": {}
+                  "textureResourceId": "texture/unit",
+                  "width": 1,
+                  "height": 1,
+                  "frame": 0,
+                  "pickable": true
                 }
               }
             ],
@@ -103,29 +108,62 @@
           }
         ]
       },
-      "revision": 1
+      "revision": 2,
+      "prefabInstances": [],
+      "prefabSlots": []
     }
   ],
   "resources": [
-    {
-      "id": "model/unit",
-      "kind": "model",
-      "url": "./unit.glb",
-      "clipNames": [
-        "idle",
-        "move"
-      ]
-    },
     {
       "id": "texture/ui",
       "kind": "texture",
       "url": "./ui.png",
       "colorSpace": "srgb"
+    },
+    {
+      "id": "texture/unit",
+      "kind": "texture-atlas",
+      "textureResourceId": "texture/ui",
+      "columns": 4,
+      "rows": 2
+    },
+    {
+      "id": "anim.unit.idle",
+      "kind": "animation",
+      "schema": "scene-engine-animation-resource@2",
+      "durationMs": 400,
+      "loop": true,
+      "tracks": [
+        {
+          "channel": "sprite.frame",
+          "target": {
+            "node": "body",
+            "component": "sprite"
+          },
+          "interpolation": "step",
+          "keyframes": [
+            {
+              "atMs": 0,
+              "value": 0
+            },
+            {
+              "atMs": 100,
+              "value": 1
+            }
+          ]
+        }
+      ]
     }
   ],
   "components": [
     {
-      "typeId": "behavior.billboard@1",
+      "typeId": "animation.player@1",
+      "allowMultiple": true,
+      "tickPhase": null,
+      "drivesTransform": false
+    },
+    {
+      "typeId": "behavior.billboard@2",
       "allowMultiple": false,
       "tickPhase": "before-render",
       "drivesTransform": true
@@ -167,13 +205,13 @@
       "drivesTransform": false
     },
     {
-      "typeId": "render.model@1",
+      "typeId": "render.model@2",
       "allowMultiple": true,
       "tickPhase": null,
       "drivesTransform": false
     },
     {
-      "typeId": "render.particle@1",
+      "typeId": "render.particle@2",
       "allowMultiple": true,
       "tickPhase": null,
       "drivesTransform": false
@@ -191,7 +229,7 @@
       "drivesTransform": false
     },
     {
-      "typeId": "render.sprite@1",
+      "typeId": "render.sprite@3",
       "allowMultiple": true,
       "tickPhase": null,
       "drivesTransform": false

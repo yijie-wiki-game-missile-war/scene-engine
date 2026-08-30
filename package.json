@@ -12,8 +12,11 @@
     "js/packages/*"
   ],
   "scripts": {
-    "test": "npm test --workspaces --if-present && npm run typecheck",
-    "verify": "uv run python scripts/verify_cutover.py",
+    "test": "npm test --workspaces && npm run typecheck && npm run test:resource-lifecycle",
+    "benchmark:communication": "uv run python scripts/benchmark_python_js_communication.py",
+    "benchmark:display": "node scripts/benchmark_display_runtime_scale.mjs",
+    "benchmark:display:browser": "node scripts/benchmark_display_browser.mjs",
+    "test:resource-lifecycle": "node --expose-gc scripts/verify_display_leaks.mjs",
     "typecheck": "tsc -p js/types/tsconfig.json"
   },
   "devDependencies": {

@@ -10,10 +10,11 @@ mutable product World
   -> recorder + sessions
   -> SceneEngineClient 0.10
        -> immutable WorldState + cumulative ACK + O(1) DisplaySummary
-       -> DisplayRuntime 0.4 AuthorityPort
+       -> DisplayRuntime 0.8 AuthorityPort
             -> one NodeIndex / one NodeGraph / one Component scheduler / one RAF
+            -> one private flat Prefab materialization ledger
             -> RenderSystem
-                 -> flat ThreeRenderBackend 0.9.3 bindings
+                 -> flat ThreeRenderBackend 0.11.0 bindings
 ```
 
 The boundary is renderer-isolated: product code and Arts definitions use Display contracts, while only the browser composition
@@ -32,7 +33,8 @@ root imports the Three backend. The current Display API is browser-oriented and 
 | recorded bytes and Replay seek | packet-log@2 | exact Engine packets |
 
 There is no second mutable World, product Node tree, Transform cache, application RAF, ACK cursor, packet decoder or fallback
-renderer.
+renderer. The private Prefab materialization ledger records definition-instance provenance and owned ordinary Nodes/Components;
+it is not a second hierarchy or a public child-Prefab object model.
 
 ## Product and catalog boundary
 
@@ -41,7 +43,15 @@ existence, parent, local Transform, visibility, exact `prefabId` and complete au
 textures, materials, lights, cameras or Prefab-local paths.
 
 Arts/product display code owns concrete Scene, Prefab, Resource and Component definitions. `PrefabDefinition.id` is the unique
-lookup key; `gameplayType` is non-unique state-contract metadata, so multiple Prefabs may share it.
+lookup key; `gameplayType` is non-unique state-contract metadata, so multiple Prefabs may share it. Prefab definition schema
+`scene-engine-prefab-definition@3` can compose exact child Prefab ids through fixed `prefabInstances` and bounded dynamic
+`prefabSlots`. The catalog compiler validates every fixed reference and every slot allowlist, including missing definitions and
+cycles, before the runtime installs any Scene.
+
+Python still owns only the outer `py/` authority root and sends its complete state. A synchronous resolver may derive fixed-child
+overrides and each slot's complete desired instance set; each child resolver then consumes the complete state assigned to that
+child. Materialization recursively flattens all levels into the existing NodeIndex and NodeGraph as ordinary Nodes and
+Components. It does not add child commands, another authority boundary or a nested runtime tree.
 
 A build generates one canonical catalog manifest from:
 
@@ -63,7 +73,8 @@ For a commit, Client:
 
 1. validates the whole packet, World candidate and command stream;
 2. opens the exact Display commit gate;
-3. synchronously applies every single-target Authority operation;
+3. synchronously applies every single-target Authority operation, including complete nested-Prefab candidate validation and
+   materialization diff;
 4. seals the cursor;
 5. publishes WorldState and cursors;
 6. reads `runtime.summary()` and encodes cumulative ACK;
@@ -71,6 +82,11 @@ For a commit, Client:
 
 After activation, Authority operations outside an open commit gate fail. A component cannot bypass this boundary: Behaviour
 hooks receive read-only NodeView and Display query capabilities, not NodeIndex, NodeGraph, Authority or RenderSystem.
+
+For a state update, an instance with the same slot key, instance key and `prefabId` retains its Node/Component identity; a new
+key is added, a missing key is removed and a changed `prefabId` is replaced. The runtime validates and stages the complete
+candidate before exposing it. This is atomic for the single Authority operation; the commit contract still does not promise
+rollback across multiple commands.
 
 ACK means the World candidate, all Display operations and the cursor passed this synchronous barrier. It does not wait for
 resource loading, a full DisplayView, HUD, observers, RAF or draw. Any projection error emits no ACK and requires a fresh
@@ -82,6 +98,7 @@ DisplayRuntime owns the only application RAF. Its frame order is:
 
 ```text
 update Behaviour ticks
+AnimationSystem sample
 NodeGraph world-transform flush
 before-render Behaviour ticks
 NodeGraph world-transform flush
@@ -89,10 +106,20 @@ RenderSystem.prepareFrame
 RenderBackend.render()
 ```
 
-All built-in render properties, including nested model animation, material overrides, flipbooks, surface parameters and
-particle animation, are normalized and resource-validated before node state changes or commit seal. The Three backend repeats
+All built-in render properties, including nested material overrides, sprite atlas frames, surface parameters and particle
+parameters, are normalized and resource-validated before node state changes or commit seal. The Three backend repeats
 defensive checks but must not be the first layer to discover an invalid business record.
 
+Visual timelines follow one path: an Animation Resource (one clip per Resource, schema `scene-engine-animation-resource@2`)
+plus an `animation.player@1` on a Prefab-definition instance root, sampled by the Display AnimationSystem against each player's
+local `visualSeconds` origin, delivered to the renderer as a transient override of the base properties. The renderer only
+applies final effective values — it never interprets playable time. Global procedural effects (water, noise) keep sampling
+`visualSeconds`, and procedural particle emitters use renderer-local origins. See [Display animator](display-animation.md).
+
+Animation target scope is established from materialization identity/provenance, not by testing whether a canonical Node name
+starts with `prefab/`. Each nested definition instance therefore gets its own `$root` and local-path namespace even though all
+targets are ordinary Components in the one runtime graph.
+
 The backend owns only renderer resources and flat `(nodeName, componentKey)` bindings. It never reconstructs a business tree or
-returns Three objects. Disposal stops scheduling, aborts pending work, unloads Scene/Prefab scopes, releases Components,
-resource leases and backend bindings, and is idempotent.
+returns Three objects. Disposal stops scheduling, aborts pending work, unloads Scene and Prefab materializations, clears the
+private ledger, releases Components, resource leases and backend bindings, and is idempotent.

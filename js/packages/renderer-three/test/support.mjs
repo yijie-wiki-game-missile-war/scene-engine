@@ -67,13 +67,16 @@ export function createHarness({ descriptors = [], loadResource = loadThreeResour
     get observerDisconnected() { return observerDisconnected; } };
 }
 
-export function descriptor(nodeName, componentKey, componentType, properties, registry, signal = undefined) {
-  return { nodeName, componentKey, componentType, properties, resourceRegistry: registry,
-    ...(signal ? { signal } : {}) };
+export function descriptor(nodeName, componentKey, componentType, properties, registry,
+  signal = undefined, batchable = true) {
+  return { nodeName, componentKey, componentType, properties, batchable,
+    resourceRegistry: registry, ...(signal ? { signal } : {}) };
 }
 
-export function patch(nodeName, componentKey, properties, matrix = new THREE.Matrix4(), visible = true) {
-  return { identity: { nodeName, componentKey }, worldMatrix: matrix.toArray(), visible, properties };
+export function patch(nodeName, componentKey, properties, matrix = new THREE.Matrix4(),
+  visible = true, batchable = true) {
+  return { identity: { nodeName, componentKey }, worldMatrix: matrix.toArray(), panelAnchorWorld: null,
+    visible, batchable, properties };
 }
 
 export const CAMERA_PROPERTIES = Object.freeze({

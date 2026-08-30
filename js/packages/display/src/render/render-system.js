@@ -1,9 +1,26 @@
 import { attachedComponentNode } from '../component/component.js';
 import { assertSynchronous, cloneAndFreeze } from '../internal.js';
 import { DisplayRuntimeError, fail } from '../runtime/health.js';
-import { CameraComponent } from './components.js';
+import { CameraComponent, SpriteRendererComponent } from './components.js';
+import { BillboardComponent } from '../behaviours/billboard.js';
 import { assertRenderBackendPort, bindingIdentity } from './render-backend-port.js';
 import { RenderComponent } from './render-component.js';
+
+function fixedPanelAnchor(node) {
+  for (let ancestor = node; ancestor !== null; ancestor = ancestor.parent) {
+    const facing = ancestor.getComponent(BillboardComponent);
+    if (facing !== null) {
+      return facing.enabled && !facing.disposed && facing.properties.facing === 'fixed'
+        ? Object.freeze(Array.from(ancestor._worldTransform.position)) : null;
+    }
+  }
+  return null;
+}
+
+function sameAnchor(left, right) {
+  return left === right || (left != null && right !== null
+    && left.every((value, index) => value === right[index]));
+}
 
 function identityKey(identity) {
   return JSON.stringify([identity.nodeName, identity.componentKey]);
@@ -23,6 +40,9 @@ export class RenderSystem {
     this._cancelBackendWait = null;
     this._entries = new Map();
     this._byNode = new Map();
+    // Transient animation values (Display AnimationSystem only). Never written into
+    // component properties; backends always receive base+override "effective" data.
+    this._animationOverrides = new WeakMap();
     this._pending = new Set();
     this._identityBarriers = new Map();
     this._generation = 0;
@@ -98,6 +118,39 @@ export class RenderSystem {
 
   setEnabled(component) { this.markComponentDirty(component); }
 
+  /**
+   * Package-private transient override owned by the AnimationSystem. `patch` currently
+   * only carries `{ frame }`; the layer stays shallow and is not a public animation API.
+   */
+  setAnimationOverride(component, patch) {
+    const entry = this._entries.get(component);
+    const previous = this._animationOverrides.get(component) ?? null;
+    const next = cloneAndFreeze(patch, 'display-animation-override-invalid');
+    if (previous !== null && Object.keys(next).every((key) => previous[key] === next[key])
+        && Object.keys(previous).every((key) => next[key] !== undefined)) {
+      return;
+    }
+    this._animationOverrides.set(component, next);
+    if (entry) entry.dirty = true;
+    this._onNeedsDraw?.();
+  }
+
+  clearAnimationOverride(component) {
+    if (!this._animationOverrides.has(component)) return;
+    this._animationOverrides.delete(component);
+    const entry = this._entries.get(component);
+    if (entry) entry.dirty = true;
+    this._onNeedsDraw?.();
+  }
+
+  hasAnimationOverride(component) { return this._animationOverrides.has(component); }
+
+  effectiveProperties(component) {
+    const override = this._animationOverrides.get(component);
+    return override === undefined ? component.properties
+      : Object.freeze({ ...component.properties, ...override });
+  }
+
   markComponentDirty(component) {
     const entry = this._entries.get(component);
     if (!entry) return;
@@ -122,14 +175,18 @@ export class RenderSystem {
     if (activeCameraBinding === null) return false;
     const dirtyBindings = [];
     for (const entry of this._entries.values()) {
-      if (!entry.dirty || entry.state !== 'ready') continue;
+      if (entry.state !== 'ready') continue;
       const component = entry.component;
       const node = attachedComponentNode(component);
+      const panelAnchorWorld = component instanceof SpriteRendererComponent ? fixedPanelAnchor(node) : null;
+      if (!entry.dirty && sameAnchor(entry.panelAnchorWorld, panelAnchorWorld)) continue;
       const patch = Object.freeze({
         identity: entry.identity,
         worldMatrix: Object.freeze(Array.from(node._worldTransform.matrix)),
+        panelAnchorWorld,
         visible: node.visibleInHierarchy && component.enabled,
-        properties: component.properties,
+        properties: this.effectiveProperties(component),
+        batchable: !this._animationOverrides.has(component),
       });
       this._runBackend('display-render-binding-update-failed', () => {
         assertSynchronous(
@@ -138,6 +195,7 @@ export class RenderSystem {
         );
       });
       entry.dirty = false;
+      entry.panelAnchorWorld = panelAnchorWorld;
       dirtyBindings.push(Object.freeze({ identity: entry.identity, binding: entry.binding }));
     }
     const preparation = this._runBackend('display-render-prepare-failed', () => assertSynchronous(
@@ -258,6 +316,7 @@ export class RenderSystem {
     this._identityBarriers.clear();
     this._backend = null;
     this._entries.clear(); this._byNode.clear();
+    this._animationOverrides = new WeakMap();
     this._activeCameraName = null;
     this._requiresContinuousDraw = false;
     this._disposePromise = Promise.resolve().then(async () => {
@@ -302,7 +361,8 @@ export class RenderSystem {
         nodeName: entry.identity.nodeName,
         componentKey: entry.identity.componentKey,
         componentType: entry.component.constructor.typeId,
-        properties: entry.component.properties,
+        properties: this.effectiveProperties(entry.component),
+        batchable: !this._animationOverrides.has(entry.component),
         resourceRegistry: this._resourceRegistry,
         signal: this._backendAbortController.signal,
       });

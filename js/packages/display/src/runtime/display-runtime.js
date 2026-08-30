@@ -9,6 +9,9 @@ import { NodeGraph } from '../node/node-graph.js';
 import { NodeIndex } from '../node/node-index.js';
 import { RenderSystem } from '../render/render-system.js';
 import { RenderComponent } from '../render/render-component.js';
+import { AnimationPlayerComponent } from '../animation/animation-player.js';
+import { AnimationSystem } from '../animation/animation-system.js';
+import { compilePrefabCatalog } from '../resource/prefab-compiler.js';
 import { AuthorityPort } from './authority-port.js';
 import { DisplayView } from './display-view.js';
 import { DisplayRuntimeError, fail, healthEvent } from './health.js';
@@ -121,6 +124,11 @@ export class DisplayRuntime {
       authorityStateSchemas,
     });
     this._catalogIdentity = computeDisplayCatalogIdentity(this._catalogManifest);
+    const compiledPrefabCatalog = compilePrefabCatalog({
+      prefabRegistry,
+      componentRegistry,
+      resourceRegistry,
+    });
 
     for (const registry of [sceneRegistry, prefabRegistry, resourceRegistry, componentRegistry]) {
       if (typeof registry.seal !== 'function') fail('display-options-invalid');
@@ -137,6 +145,12 @@ export class DisplayRuntime {
       onHealth: (event) => this._handleRenderHealth(event),
       onNeedsDraw: () => this.requestDraw(),
     });
+    this._animationSystem = new AnimationSystem({
+      resourceRegistry,
+      nodeIndex: this._nodeIndex,
+      renderSystem: this._renderSystem,
+      onNeedsDraw: () => this.requestDraw(),
+    });
     this._nodeGraph = new NodeGraph({
       nodeIndex: this._nodeIndex,
       maximumDepth: 128,
@@ -144,7 +158,13 @@ export class DisplayRuntime {
       onWorldTransform: (node) => this._renderSystem.markNodeDirty(node),
       onVisibility: (node) => this._renderSystem.markNodeDirty(node),
     });
-    const registries = Object.freeze({ sceneRegistry, prefabRegistry, resourceRegistry, componentRegistry });
+    const registries = Object.freeze({
+      sceneRegistry,
+      prefabRegistry,
+      resourceRegistry,
+      componentRegistry,
+      compiledPrefabCatalog,
+    });
     this._scene = new Scene({
       registries,
       nodeIndex: this._nodeIndex,
@@ -157,7 +177,9 @@ export class DisplayRuntime {
       scene: this._scene,
       nodeIndex: this._nodeIndex,
       nodeGraph: this._nodeGraph,
+      animationSystem: this._animationSystem,
       componentAttached: (component) => this._componentAttached(component),
+      componentSuspending: (component) => this._componentSuspending(component),
       componentEnabledChanged: (component) => this._componentEnabledChanged(component),
       componentPropertiesChanged: (component) => this._componentPropertiesChanged(component),
       componentDetaching: (component) => this._componentDetaching(component),
@@ -165,6 +187,8 @@ export class DisplayRuntime {
     this._prefabInstantiator = new PrefabInstantiator({
       scene: this._scene,
       componentContext: this._componentContext,
+      animationSystem: this._animationSystem,
+      onCleanupErrors: (errors) => this._reportCleanupErrors(errors),
     });
     this.authority = Object.freeze(new AuthorityPort({
       scene: this._scene,
@@ -215,6 +239,9 @@ export class DisplayRuntime {
     this._assertNotDisposed();
     if (!this._installed || this._active) fail('display-activate-state-invalid');
     if (this._health !== 'initializing') fail('display-unhealthy');
+    // Bootstrap property patches do not pass through a commit gate. Validate and
+    // reconcile their final animation bindings before the runtime becomes drawable.
+    this._animationSystem.validateAndApplyPendingChanges();
     this._cursor = normalizeCursor(cursor);
     this._scene.activate();
     this._active = true;
@@ -349,6 +376,9 @@ export class DisplayRuntime {
         try { cleanupErrors.push(...prefabInstantiator.dispose('runtime-disposed')); } catch (error) {
           cleanupErrors.push(error);
         }
+        // Animation players must drop ownership and transient overrides before the
+        // RenderSystem and its backend disappear.
+        try { this._animationSystem.clear(); } catch (error) { cleanupErrors.push(error); }
         let renderDisposal = null;
         try { renderDisposal = renderSystem.dispose(); } catch (error) { cleanupErrors.push(error); }
         try { scheduler.clear(); } catch (error) { cleanupErrors.push(error); }
@@ -378,6 +408,7 @@ export class DisplayRuntime {
         this._nodeIndex = null;
         this._scheduler = null;
         this._renderSystem = null;
+        this._animationSystem = null;
         this._nodeGraph = null;
         this._scene = null;
         this._componentContext = null;
@@ -411,6 +442,10 @@ export class DisplayRuntime {
     if (this._pendingCursor === null || !sameCursor(next, this._pendingCursor)) {
       fail('display-commit-gate-cursor-mismatch');
     }
+    // Cross-component animation/resource validity belongs to the synchronous ACK
+    // barrier. This sees the transaction's final properties, independent of resolver
+    // patch order, and applies player ownership only after every candidate validates.
+    this._animationSystem.validateAndApplyPendingChanges();
     this._nodeGraph.flushWorldTransforms();
     this._cursor = next;
     this._pendingCursor = null;
@@ -432,20 +467,31 @@ export class DisplayRuntime {
   }
 
   _componentAttached(component) {
-    if (component instanceof RenderComponent) this._renderSystem.register(component);
+    if (component instanceof AnimationPlayerComponent) this._animationSystem.register(component);
+    else if (component instanceof RenderComponent) this._renderSystem.register(component);
     else this._scheduler.register(component);
   }
+  _componentSuspending(component) {
+    return component instanceof AnimationPlayerComponent
+      ? this._animationSystem.suspend(component) : null;
+  }
   _componentEnabledChanged(component) {
-    if (component instanceof RenderComponent) this._renderSystem.setEnabled(component);
+    if (component instanceof AnimationPlayerComponent) this._animationSystem.setEnabled(component);
+    else if (component instanceof RenderComponent) this._renderSystem.setEnabled(component);
     else this._scheduler.setEnabled(component, component.enabled);
     this.requestDraw();
   }
   _componentPropertiesChanged(component) {
-    if (component instanceof RenderComponent) this._renderSystem.markComponentDirty(component);
+    if (component instanceof AnimationPlayerComponent) this._animationSystem.propertiesChanged(component);
+    else if (component instanceof RenderComponent) {
+      this._animationSystem.targetPropertiesChanged(component);
+      this._renderSystem.markComponentDirty(component);
+    }
     this.requestDraw();
   }
   _componentDetaching(component) {
-    if (component instanceof RenderComponent) this._renderSystem.unregister(component);
+    if (component instanceof AnimationPlayerComponent) this._animationSystem.unregister(component);
+    else if (component instanceof RenderComponent) this._renderSystem.unregister(component);
     else this._scheduler.unregister(component);
   }
 
@@ -455,6 +501,7 @@ export class DisplayRuntime {
     if (!this._running || !this._active || !this._drawGateOpen || this._health !== 'ready'
         || this._rafId !== null) return;
     const continuous = this._scene.compiledDefinition?.rendererProfile.drawMode === 'continuous'
+      || this._animationSystem.requiresContinuousDraw
       || this._renderSystem.requiresContinuousDraw;
     if (!this._drawRequested && !continuous) return;
     this._rafId = this._frameAdapter.request((time) => this._runFrame(time));
@@ -478,6 +525,7 @@ export class DisplayRuntime {
     });
     try {
       this._scheduler.runUpdate(frame);
+      this._animationSystem.sample(frame);
       this._nodeGraph.flushWorldTransforms();
       this._scheduler.runBeforeRender(frame);
       this._nodeGraph.flushWorldTransforms();
@@ -489,6 +537,7 @@ export class DisplayRuntime {
       return;
     }
     const continuous = this._scene.compiledDefinition.rendererProfile.drawMode === 'continuous'
+      || this._animationSystem.requiresContinuousDraw
       || this._renderSystem.requiresContinuousDraw;
     if (continuous) this._drawRequested = true;
     this._scheduleFrame();

@@ -5,6 +5,7 @@ import { clone as cloneSkeleton } from 'three/addons/utils/SkeletonUtils.js';
 import { fail } from './errors.js';
 import { TICKS_PER_SECOND } from './constants.js';
 import { exactRecord, finiteTuple, isPlainRecord, stableData } from './validation.js';
+import { installInstancedPanelProjection, installPanelProjection } from './panel-projection.js';
 
 const DISPOSED_ASSETS = new WeakSet();
 const MATERIAL_BASE = new WeakMap();
@@ -38,12 +39,12 @@ export const DEFAULT_THREE_IMPLEMENTATION = Object.freeze({
 
 export function resourceIdsForComponent(componentType, properties) {
   switch (componentType) {
-    case 'render.model@1': return [requiredId(properties.modelResourceId)];
+    case 'render.model@2': return [requiredId(properties.modelResourceId)];
     case 'render.mesh@1': return [requiredId(properties.meshResourceId),
       requiredId(properties.materialResourceId)];
-    case 'render.sprite@1': return [requiredId(properties.textureResourceId)];
+    case 'render.sprite@3': return [requiredId(properties.textureResourceId)];
     case 'render.surface@1': return [requiredId(properties.surfaceResourceId)];
-    case 'render.particle@1': return [requiredId(properties.particleResourceId)];
+    case 'render.particle@2': return [requiredId(properties.particleResourceId)];
     case 'render.background@1': return [properties.textureResourceId,
       properties.environmentResourceId].filter((value) => value !== null && value !== undefined)
       .map(requiredId);
@@ -55,11 +56,11 @@ export function assertComponentResourceKinds(componentType, leases) {
   const kinds = leases.map((lease) => lease.descriptor.kind);
   const valid = (() => {
     switch (componentType) {
-      case 'render.model@1': return kinds.length === 1 && kinds[0] === 'model';
+      case 'render.model@2': return kinds.length === 1 && kinds[0] === 'model';
       case 'render.mesh@1': return kinds.length === 2 && kinds[0] === 'mesh' && kinds[1] === 'material';
-      case 'render.sprite@1': return kinds.length === 1 && ['texture', 'texture-atlas'].includes(kinds[0]);
+      case 'render.sprite@3': return kinds.length === 1 && ['texture', 'texture-atlas'].includes(kinds[0]);
       case 'render.surface@1': return kinds.length === 1 && kinds[0] === 'surface';
-      case 'render.particle@1': return kinds.length === 1 && kinds[0] === 'particle';
+      case 'render.particle@2': return kinds.length === 1 && kinds[0] === 'particle';
       case 'render.background@1': return kinds.every((kind) => ['texture', 'texture-atlas'].includes(kind));
       default: return kinds.length === 0;
     }
@@ -71,11 +72,11 @@ export function createComponentHandle({ componentType, properties, leases, scene
   const assets = leases.map((lease) => lease.value);
   const descriptors = leases.map((lease) => lease.descriptor);
   switch (componentType) {
-    case 'render.model@1': return createModelHandle(assets[0], descriptors[0], properties);
+    case 'render.model@2': return createModelHandle(assets[0], properties);
     case 'render.mesh@1': return createMeshHandle(assets[0], assets[1], properties);
-    case 'render.sprite@1': return createSpriteHandle(assets[0], descriptors[0], properties);
+    case 'render.sprite@3': return createSpriteHandle(assets[0], descriptors[0], properties);
     case 'render.surface@1': return createSurfaceHandle(assets[0], properties);
-    case 'render.particle@1': return createParticleHandle(assets[0], properties);
+    case 'render.particle@2': return createParticleHandle(assets[0], properties);
     case 'render.camera@1': return createCameraHandle(properties);
     case 'render.background@1': return createBackgroundHandle(scene, assets, properties);
     case 'render.ambient-light@1': return createLightHandle('ambient', properties);
@@ -97,7 +98,6 @@ export async function loadThreeResource(descriptor, signal, dependencies) {
         descriptor,
         template: results[0].scene,
         templates: results.map((result) => result.scene),
-        animations: results[0].animations ?? [],
       };
     }
     case 'mesh': return loadMeshResource(descriptor, signal);
@@ -124,7 +124,6 @@ export async function loadThreeResource(descriptor, signal, dependencies) {
       positiveInteger(descriptor.maximumCapacity);
       return { kind: 'particle', descriptor, dependencies };
     }
-    case 'animation': return { kind: 'animation', descriptor };
     default: fail('three-resource-kind-invalid');
   }
 }
@@ -148,24 +147,12 @@ export function disposeThreeResource(asset) {
   }
 }
 
-function createModelHandle(asset, descriptor, initialProperties) {
+function createModelHandle(asset, initialProperties) {
   let properties = normalizeModelProperties(initialProperties);
-  validateModelAnimation(asset, descriptor, properties);
   validateModelOverrides(asset.templates ?? [asset.template], properties.materialOverrides);
   const levels = [];
   const ownedMaterials = new Set();
   let object = null;
-  let mixer = null;
-  const configureAnimation = () => {
-    mixer?.stopAllAction(); mixer = null;
-    if (!properties.animation) return;
-    const clip = asset.animations.find((candidate) => candidate.name === properties.animation.clipId);
-    mixer = new THREE.AnimationMixer(levels[0]);
-    const action = mixer.clipAction(clip);
-    action.loop = properties.animation.loop === false ? THREE.LoopOnce : THREE.LoopRepeat;
-    action.clampWhenFinished = properties.animation.loop === false;
-    action.play();
-  };
   try {
     for (const template of asset.templates ?? [asset.template]) levels.push(cloneSkeleton(template));
     object = levels.length === 1 ? levels[0] : new THREE.LOD();
@@ -173,44 +160,36 @@ function createModelHandle(asset, descriptor, initialProperties) {
       for (let index = 0; index < levels.length; index += 1) object.addLevel(levels[index], index * 25);
     }
     for (const level of levels) configureModel(level, properties, ownedMaterials);
-    configureAnimation();
     return {
       object,
       camera: null,
       pickable: properties.pickable,
-      requiresContinuousDraw: properties.animation?.clock === 'visual',
+      requiresContinuousDraw: false,
       update(nextValue) {
         const next = normalizeModelProperties(nextValue);
-        validateModelAnimation(asset, descriptor, next);
         validateModelOverrides(levels, next.materialOverrides);
-        const animationChanged = stableData(next.animation) !== stableData(properties.animation);
         properties = next;
         for (const level of levels) updateModel(level, properties);
         this.pickable = properties.pickable;
-        this.requiresContinuousDraw = properties.animation?.clock === 'visual';
-        if (animationChanged) configureAnimation();
       },
-      sample(frame) {
-        if (!mixer || !properties.animation) return;
-        mixer.setTime(animationSeconds(properties.animation, frame));
-      },
+      sample() {},
       createBatch: null,
       batchFingerprint: null,
-      dispose() { disposeModelInstance(object, ownedMaterials, mixer); mixer = null; },
+      dispose() { disposeModelInstance(object, ownedMaterials); },
     };
   } catch (error) {
-    disposeModelInstance(object ?? levels, ownedMaterials, mixer);
+    disposeModelInstance(object ?? levels, ownedMaterials);
     throw error;
   }
 }
 
 function createMeshHandle(meshAsset, materialAsset, initialProperties) {
   let properties = normalizeMeshProperties(initialProperties);
+  // Resource material properties are already applied; each instance owns a clone
+  // of that appearance, while mesh updates change only presentation flags.
   const material = materialAsset.material.clone();
-  rememberMaterialBase(material);
   const object = new THREE.Mesh(meshAsset.geometry, material);
   const configure = () => {
-    applyMaterial(material, materialAsset.descriptor.properties ?? {}, true);
     object.castShadow = properties.castShadow;
     object.receiveShadow = properties.receiveShadow;
     object.renderOrder = properties.renderOrder;
@@ -255,6 +234,7 @@ function createSpriteHandle(asset, descriptor, initialProperties) {
   const material = new THREE.MeshBasicMaterial({ map: texture, side: THREE.DoubleSide });
   rememberMaterialBase(material);
   const object = new THREE.Mesh(geometry, material);
+  const setPanelAnchor = installPanelProjection(object, material);
   const configure = () => {
     applyMaterial(material, properties.material, false, properties.alpha);
     object.renderOrder = properties.renderOrder;
@@ -266,18 +246,20 @@ function createSpriteHandle(asset, descriptor, initialProperties) {
   configure();
   const handle = {
     object,
+    setPanelAnchor,
     camera: null,
     pickable: properties.pickable,
-    requiresContinuousDraw: properties.flipbook?.clock === 'visual',
+    requiresContinuousDraw: false,
     batchFingerprint: spriteBatchFingerprint(),
     createBatch(count) {
       const batchGeometry = new THREE.PlaneGeometry(1, 1);
       const batchTexture = texture.clone(); batchTexture.needsUpdate = true;
       const batchMaterial = material.clone(); batchMaterial.map = batchTexture;
       const batch = new THREE.InstancedMesh(batchGeometry, batchMaterial, count);
+      const setPanelAnchorAt = installInstancedPanelProjection(batch, batchMaterial, count);
       const local = new THREE.Matrix4().makeScale(properties.width, properties.height, 1).toArray();
       batch.renderOrder = properties.renderOrder;
-      return { object: batch, localMatrix: local,
+      return { object: batch, localMatrix: local, setPanelAnchorAt,
         dispose() { batch.removeFromParent(); batchGeometry.dispose(); batchMaterial.dispose();
           batchTexture.dispose(); } };
     },
@@ -285,24 +267,12 @@ function createSpriteHandle(asset, descriptor, initialProperties) {
       properties = normalizeSpriteProperties(nextValue, descriptor);
       configure();
       this.pickable = properties.pickable;
-      this.requiresContinuousDraw = properties.flipbook?.clock === 'visual';
       this.batchFingerprint = spriteBatchFingerprint();
     },
-    sample(frame) {
-      if (!properties.flipbook) return;
-      const timeline = properties.flipbook.clock === 'simulation'
-        ? Math.max(0, frame.sourceTick - properties.flipbook.startTick)
-        : Math.max(0, frame.visualSeconds * TICKS_PER_SECOND);
-      const ordinal = Math.floor(timeline / properties.flipbook.frameTicks);
-      const offset = properties.flipbook.loop
-        ? ordinal % properties.flipbook.frameCount
-        : Math.min(ordinal, properties.flipbook.frameCount - 1);
-      setAtlasFrame(texture, descriptor, properties.flipbook.startFrame + offset);
-    },
+    sample() {},
     dispose() { object.removeFromParent(); geometry.dispose(); material.dispose(); texture.dispose(); },
   };
   function spriteBatchFingerprint() {
-    if (properties.flipbook) return null;
     return stableData({ kind: 'sprite', resource: descriptor.id, width: properties.width,
       height: properties.height, material: properties.material, alpha: properties.alpha,
       frame: properties.frame, renderOrder: properties.renderOrder, pickable: properties.pickable });
@@ -368,18 +338,23 @@ function createParticleHandle(asset, initialProperties) {
     material.needsUpdate = true; object.renderOrder = properties.renderOrder;
   };
   configure();
+  // Procedural emitter time is renderer-local: a newly created emitter starts from its
+  // own visual zero instead of inheriting the page-wide visualSeconds phase.
+  let visualOriginSeconds = null;
   return {
     object,
     camera: null,
     pickable: false,
-    requiresContinuousDraw: properties.animation?.clock !== 'simulation',
+    requiresContinuousDraw: true,
     batchFingerprint: null,
     createBatch: null,
     update(nextValue) {
       properties = normalizeParticleProperties(nextValue, asset.descriptor); configure();
-      this.requiresContinuousDraw = properties.animation?.clock !== 'simulation';
     },
-    sample(frame) { sampleParticles(object, properties, frame); },
+    sample(frame) {
+      if (visualOriginSeconds === null) visualOriginSeconds = frame.visualSeconds;
+      sampleParticles(object, properties, Math.max(0, frame.visualSeconds - visualOriginSeconds));
+    },
     dispose() { object.removeFromParent(); geometry.dispose(); material.dispose(); texture?.dispose(); },
   };
 }
@@ -610,14 +585,13 @@ function configureTexture(texture, descriptor) {
 
 function normalizeModelProperties(value) {
   const record = exactRecord(value, new Set(['modelResourceId', 'materialOverrides', 'castShadow',
-    'receiveShadow', 'renderOrder', 'pickable', 'animation']), 'three-model-properties-invalid');
+    'receiveShadow', 'renderOrder', 'pickable']), 'three-model-properties-invalid');
   requiredId(record.modelResourceId);
   return Object.freeze({
     modelResourceId: record.modelResourceId,
     materialOverrides: record.materialOverrides ?? {},
     castShadow: boolean(record.castShadow ?? false), receiveShadow: boolean(record.receiveShadow ?? false),
     renderOrder: integer(record.renderOrder ?? 0), pickable: boolean(record.pickable ?? false),
-    animation: normalizeAnimation(record.animation ?? null),
   });
 }
 
@@ -632,14 +606,13 @@ function normalizeMeshProperties(value) {
 
 function normalizeSpriteProperties(value, descriptor) {
   const record = exactRecord(value, new Set(['textureResourceId', 'width', 'height', 'material',
-    'alpha', 'frame', 'flipbook', 'renderOrder', 'pickable']), 'three-sprite-properties-invalid');
+    'alpha', 'frame', 'renderOrder', 'pickable']), 'three-sprite-properties-invalid');
   const alpha = unit(record.alpha ?? 1);
   const frame = nonnegativeInteger(record.frame ?? 0);
-  const flipbook = normalizeFlipbook(record.flipbook ?? null, descriptor);
   validateAtlasFrame(descriptor, frame);
   return Object.freeze({ textureResourceId: requiredId(record.textureResourceId),
     width: positiveNumber(record.width), height: positiveNumber(record.height),
-    material: normalizeMaterial(record.material ?? {}, false), alpha, frame, flipbook,
+    material: normalizeMaterial(record.material ?? {}, false), alpha, frame,
     renderOrder: integer(record.renderOrder ?? 0), pickable: boolean(record.pickable ?? false) });
 }
 
@@ -668,7 +641,7 @@ function normalizeSurfaceProperties(value, descriptor) {
 
 function normalizeParticleProperties(value, descriptor) {
   const record = exactRecord(value, new Set(['particleResourceId', 'intensity', 'parameters',
-    'animation', 'renderOrder']), 'three-particle-properties-invalid');
+    'renderOrder']), 'three-particle-properties-invalid');
   const params = { ...(descriptor.defaults ?? {}), ...(record.parameters ?? {}) };
   const result = {
     durationTicks: positiveInteger(params.durationTicks ?? TICKS_PER_SECOND),
@@ -683,7 +656,7 @@ function normalizeParticleProperties(value, descriptor) {
   if (result.capacity > descriptor.maximumCapacity) fail('three-particle-capacity-invalid');
   return Object.freeze({ particleResourceId: requiredId(record.particleResourceId),
     intensity: nonnegative(record.intensity ?? 1), parameters: Object.freeze(result),
-    animation: normalizeParticleAnimation(record.animation), renderOrder: integer(record.renderOrder ?? 0) });
+    renderOrder: integer(record.renderOrder ?? 0) });
 }
 
 function normalizeCameraProperties(value) {
@@ -728,40 +701,6 @@ function normalizeLightProperties(value, kind) {
   return Object.freeze(result);
 }
 
-function normalizeAnimation(value) {
-  if (value === null) return null;
-  const record = exactRecord(value, new Set(['clipId', 'startTick', 'clock', 'loop']),
-    'three-model-animation-invalid');
-  return Object.freeze({ clipId: requiredId(record.clipId), startTick: nonnegativeInteger(record.startTick ?? 0),
-    clock: ['simulation', 'visual'].includes(record.clock ?? 'simulation')
-      ? (record.clock ?? 'simulation') : fail('three-model-animation-invalid'),
-    loop: boolean(record.loop ?? true) });
-}
-
-function normalizeParticleAnimation(value) {
-  if (value === null || value === undefined) return Object.freeze({ startTick: 0, clock: 'visual' });
-  const record = exactRecord(value, new Set(['startTick', 'clock']), 'three-particle-animation-invalid');
-  const clock = record.clock ?? 'visual';
-  if (!['simulation', 'visual'].includes(clock)) fail('three-particle-animation-invalid');
-  return Object.freeze({ startTick: nonnegativeInteger(record.startTick ?? 0), clock });
-}
-
-function normalizeFlipbook(value, descriptor) {
-  if (value === null) return null;
-  if (descriptor.kind !== 'texture-atlas') fail('three-sprite-flipbook-atlas-required');
-  const record = exactRecord(value, new Set(['startFrame', 'frameCount', 'frameTicks', 'loop',
-    'clock', 'startTick']), 'three-sprite-flipbook-invalid');
-  const result = Object.freeze({ startFrame: nonnegativeInteger(record.startFrame ?? 0),
-    frameCount: positiveInteger(record.frameCount), frameTicks: positiveInteger(record.frameTicks),
-    loop: boolean(record.loop ?? true), clock: record.clock ?? 'simulation',
-    startTick: nonnegativeInteger(record.startTick ?? 0) });
-  if (!['simulation', 'visual'].includes(result.clock)
-      || result.startFrame + result.frameCount > descriptor.columns * descriptor.rows) {
-    fail('three-sprite-flipbook-invalid');
-  }
-  return result;
-}
-
 function normalizeMaterial(value, allowInherit) {
   const record = exactRecord(value, MATERIAL_FIELDS, 'three-material-properties-invalid');
   const alphaMode = record.alphaMode ?? (allowInherit ? 'inherit' : 'opaque');
@@ -773,17 +712,6 @@ function normalizeMaterial(value, allowInherit) {
   return Object.freeze({ tintRgba: uint32(record.tintRgba ?? 0xffff_ffff),
     opacity: unit(record.opacity ?? 1), emissive: nonnegative(record.emissive ?? 0),
     alphaMode, alphaCutoff });
-}
-
-function validateModelAnimation(asset, descriptor, properties) {
-  if (!properties.animation) return;
-  if ((descriptor.lodUrls?.length ?? 0) > 0) fail('three-model-lod-animation-unsupported');
-  if (descriptor.clipNames && !descriptor.clipNames.includes(properties.animation.clipId)) {
-    fail('three-model-animation-clip-invalid');
-  }
-  if (!asset.animations.some((clip) => clip.name === properties.animation.clipId)) {
-    fail('three-model-animation-clip-missing');
-  }
 }
 
 function validateModelOverrides(roots, overrides) {
@@ -823,8 +751,7 @@ function updateModel(object, properties) {
   });
 }
 
-function disposeModelInstance(objectOrRoots, ownedMaterials, mixer) {
-  mixer?.stopAllAction?.();
+function disposeModelInstance(objectOrRoots, ownedMaterials) {
   const roots = Array.isArray(objectOrRoots) ? objectOrRoots : [objectOrRoots];
   const skeletons = new Set();
   for (const root of roots) root?.traverse?.((child) => {
@@ -917,11 +844,9 @@ function applyTextureScale(texture, scale) {
   texture.repeat.set(scale, scale); texture.needsUpdate = true;
 }
 
-function sampleParticles(points, properties, frame) {
+function sampleParticles(points, properties, elapsedSeconds) {
   const params = properties.parameters;
-  const elapsedTicks = properties.animation.clock === 'simulation'
-    ? Math.max(0, frame.sourceTick - properties.animation.startTick)
-    : Math.max(0, frame.visualSeconds * TICKS_PER_SECOND);
+  const elapsedTicks = elapsedSeconds * TICKS_PER_SECOND;
   const positions = points.geometry.attributes.position.array;
   const rate = params.rate * properties.intensity;
   const alive = Math.min(params.capacity,
@@ -976,11 +901,6 @@ function validateAtlasFrame(descriptor, frame) {
   if (descriptor.kind === 'texture-atlas') {
     if (frame >= descriptor.columns * descriptor.rows) fail('three-sprite-frame-invalid');
   } else if (frame !== 0) fail('three-sprite-frame-invalid');
-}
-
-function animationSeconds(animation, frame) {
-  if (animation.clock === 'visual') return Math.max(0, frame.visualSeconds);
-  return Math.max(0, frame.sourceTick - animation.startTick) / TICKS_PER_SECOND;
 }
 
 function disposeTemplates(templates) {

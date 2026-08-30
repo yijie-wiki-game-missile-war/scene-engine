@@ -1,16 +1,16 @@
 import { cloneAndFreeze, exactKeys, nonemptyString, plainRecord, safeInteger } from '../internal.js';
 import { fail } from '../runtime/health.js';
+import { normalizeAnimationDescriptor } from '../animation/animation-resource.js';
 import { Resource } from './resource.js';
 
 export const RESOURCE_REGISTRY_SCHEMA = 'scene-engine-resource-registry@1';
 
 const SHAPES = Object.freeze({
-  model: { required: ['url'], optional: ['lodUrls', 'clipNames'] },
+  model: { required: ['url'], optional: ['lodUrls'] },
   mesh: { required: [], optional: ['url', 'positions', 'normals', 'uvs', 'indices'] },
   texture: { required: ['url'], optional: ['colorSpace', 'wrap'] },
   'texture-atlas': { required: ['columns', 'rows'], optional: ['url', 'textureResourceId', 'colorSpace', 'wrap'] },
   material: { required: ['family'], optional: ['properties', 'textureResourceIds'] },
-  animation: { required: ['clips'], optional: [] },
   surface: { required: ['family', 'geometry'], optional: ['textureResourceIds', 'defaults'] },
   particle: { required: ['maximumCapacity'], optional: ['textureResourceId', 'defaults'] },
 });
@@ -22,6 +22,10 @@ function validateUrl(value) {
 }
 
 function normalizeDescriptor(value) {
+  // Animation resources carry their own closed schema; every other kind uses SHAPES.
+  if (plainRecord(value, 'display-resource-definition-invalid').kind === 'animation') {
+    return normalizeAnimationDescriptor(value);
+  }
   const header = exactKeys(value, ['id', 'kind'], ['schema', 'revision', 'hash',
     ...Object.values(SHAPES).flatMap(({ required, optional }) => [...required, ...optional])],
   'display-resource-definition-invalid');
@@ -43,15 +47,6 @@ function normalizeDescriptor(value) {
   if (Object.hasOwn(descriptor, 'lodUrls')) {
     if (!Array.isArray(descriptor.lodUrls)) fail('display-resource-definition-invalid');
     for (const url of descriptor.lodUrls) validateUrl(url);
-  }
-  if (Object.hasOwn(descriptor, 'clipNames')) {
-    if (!Array.isArray(descriptor.clipNames)) fail('display-resource-definition-invalid');
-    const names = new Set();
-    for (const name of descriptor.clipNames) {
-      nonemptyString(name, 'display-resource-definition-invalid');
-      if (names.has(name)) fail('display-resource-definition-invalid');
-      names.add(name);
-    }
   }
   if (kind === 'mesh' && !Object.hasOwn(descriptor, 'url') && !Object.hasOwn(descriptor, 'positions')) {
     fail('display-resource-definition-invalid');

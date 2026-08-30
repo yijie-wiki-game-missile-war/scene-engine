@@ -8,13 +8,16 @@ import {
 import { fail } from '../runtime/health.js';
 import { BillboardComponent, BILLBOARD_COMPONENT_DESCRIPTOR } from '../behaviours/billboard.js';
 import { LookAtComponent, LOOK_AT_COMPONENT_DESCRIPTOR } from '../behaviours/look-at.js';
+import { ANIMATION_PLAYER_COMPONENT_DESCRIPTOR } from '../animation/animation-player.js';
 import { AuthorityComponent } from './authority-component.js';
 import { BehaviourComponent } from './behaviour-component.js';
 import { Component, replaceComponentProperties } from './component.js';
 import { RenderComponent } from '../render/render-component.js';
 import { RENDER_COMPONENT_DESCRIPTORS } from '../render/components.js';
 
-const FINAL_METHODS = ['attach', 'setEnabled', 'setDrivenLocalTransform', 'patchProperties', 'dispose'];
+const FINAL_METHODS = ['attach', 'setEnabled', 'setDrivenLocalTransform', 'setAnimation',
+  'playAnimation', 'stopAnimation', '_animationCommand', '_adoptContext',
+  'patchProperties', 'dispose'];
 const FORBIDDEN_TRANSFORM_FIELDS = new Set([
   'position', 'rotation', 'rotationXyzw', 'scale', 'transform', 'matrix', 'worldMatrix',
   'localTransform',
@@ -208,6 +211,7 @@ export function createComponentRegistry({ includeBuiltIns = true } = {}) {
   const registry = new ComponentRegistry();
   if (includeBuiltIns) {
     for (const descriptor of RENDER_COMPONENT_DESCRIPTORS) registry.register(descriptor);
+    registry.register(ANIMATION_PLAYER_COMPONENT_DESCRIPTOR);
     registry.register(BILLBOARD_COMPONENT_DESCRIPTOR);
     registry.register(LOOK_AT_COMPONENT_DESCRIPTOR);
   }

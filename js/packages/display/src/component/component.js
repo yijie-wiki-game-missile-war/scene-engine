@@ -1,13 +1,146 @@
 import { assertSynchronous, cloneAndFreeze, nonemptyString } from '../internal.js';
 import { fail } from '../runtime/health.js';
-
 const COMPONENT_MUTATION_TOKEN = Object.freeze({});
 const REPLACE_PROPERTIES = Symbol('scene-engine.component.replace-properties');
 const ATTACHMENTS = new WeakMap();
+const FINAL_INSTANCE_METHODS = Object.freeze([
+  'attach',
+  'setEnabled',
+  'setDrivenLocalTransform',
+  'setAnimation',
+  'playAnimation',
+  'stopAnimation',
+  'dispose',
+]);
+
+function lockFinalInstanceMethods(component) {
+  const descriptors = {};
+  for (const name of FINAL_INSTANCE_METHODS) {
+    descriptors[name] = {
+      value: Component.prototype[name],
+      writable: false,
+      configurable: false,
+      enumerable: false,
+    };
+  }
+  Object.defineProperties(component, descriptors);
+}
 
 // Package-private helpers. The package root does not export these capabilities.
 export function attachedComponentNode(component) {
   return ATTACHMENTS.get(component)?.node ?? null;
+}
+
+function requireAttachedComponent(component) {
+  if (!(component instanceof Component) || component._disposed) {
+    fail('display-component-adopt-state-invalid');
+  }
+  const attachment = ATTACHMENTS.get(component);
+  if (!component._attached || !attachment || !attachment.registered) {
+    fail('display-component-adopt-state-invalid');
+  }
+  return attachment;
+}
+
+function requireComponentContext(context) {
+  if (!context || typeof context.nodeViewFor !== 'function' || !context.publicDisplay) {
+    fail('display-component-adopt-state-invalid');
+  }
+  return context;
+}
+
+/**
+ * Package-private, non-virtual context transfer. Prefab shadow adoption must not call
+ * a user-overridable method on Component. The returned closure reverses a completed
+ * transfer, including live scheduler/player/render registration.
+ */
+export function adoptComponentContext(component, context) {
+  const attachment = requireAttachedComponent(component);
+  const next = requireComponentContext(context);
+  const previous = Object.freeze({
+    context: attachment.context,
+    view: attachment.view,
+  });
+  if (previous.context === next) return () => {};
+
+  try {
+    previous.context.componentDetaching?.(component);
+  } catch (error) {
+    // A registry callback can fail after partially unregistering. Re-advertise the
+    // unchanged attachment before exposing the error.
+    try {
+      previous.context.componentAttached?.(component);
+      attachment.registered = true;
+    } catch { /* preserve the adoption error */ }
+    throw error;
+  }
+  attachment.registered = false;
+  try {
+    attachment.context = next;
+    attachment.view = next.nodeViewFor(attachment.node);
+    next.componentAttached?.(component);
+    attachment.registered = true;
+  } catch (error) {
+    try { next.componentDetaching?.(component); } catch { /* preserve the adoption error */ }
+    attachment.context = previous.context;
+    attachment.view = previous.view;
+    try {
+      previous.context.componentAttached?.(component);
+      attachment.registered = true;
+    } catch { /* preserve the adoption error */ }
+    throw error;
+  }
+
+  let active = true;
+  return () => {
+    if (!active) return;
+    active = false;
+    try {
+      if (attachment.registered) next.componentDetaching?.(component);
+    } finally {
+      attachment.context = previous.context;
+      attachment.view = previous.view;
+      attachment.registered = false;
+      previous.context.componentAttached?.(component);
+      attachment.registered = true;
+    }
+  };
+}
+
+/** Temporarily remove one attached component from its current live registries. */
+export function suspendComponentRegistration(component) {
+  const attachment = requireAttachedComponent(component);
+  const resumeSuspended = attachment.context.componentSuspending?.(component) ?? null;
+  if (resumeSuspended !== null && typeof resumeSuspended !== 'function') {
+    fail('display-component-adopt-state-invalid');
+  }
+  if (resumeSuspended !== null) {
+    attachment.registered = false;
+    let active = true;
+    return () => {
+      if (!active) return;
+      resumeSuspended();
+      attachment.registered = true;
+      active = false;
+    };
+  }
+  try {
+    attachment.context.componentDetaching?.(component);
+  } catch (error) {
+    try {
+      attachment.context.componentAttached?.(component);
+      attachment.registered = true;
+    } catch { /* preserve the suspension error */ }
+    throw error;
+  }
+  attachment.registered = false;
+  let active = true;
+  return () => {
+    if (!active) return;
+    attachment.context.componentAttached?.(component);
+    attachment.registered = true;
+    active = false;
+  };
 }
 
 // Package-private: the mutation token and symbol are intentionally not exported. The
@@ -15,6 +148,23 @@ export function attachedComponentNode(component) {
 export function replaceComponentProperties(component, properties) {
   if (!(component instanceof Component)) fail('display-component-invalid');
   return component[REPLACE_PROPERTIES](COMPONENT_MUTATION_TOKEN, properties);
+}
+
+function dispatchAnimationCommand(component, operation, playerKey, animationId = null) {
+  if (component._disposed) fail('display-component-disposed');
+  nonemptyString(playerKey, 'display-animation-command-invalid');
+  if (operation !== 'stop' && animationId === null) {
+    fail('display-animation-command-invalid');
+  }
+  const attachment = ATTACHMENTS.get(component);
+  if (!attachment || (!component._attached && !attachment.attachHookActive)) {
+    fail('display-component-not-attached');
+  }
+  const context = attachment.context;
+  if (typeof context.setAnimation !== 'function') {
+    fail('display-animation-system-unavailable');
+  }
+  context.setAnimation(component, operation, playerKey, animationId);
 }
 
 export class Component {
@@ -33,6 +183,10 @@ export class Component {
     this._attached = false;
     this._attachAttempted = false;
     this._disposed = false;
+    // An inherited non-writable method does not stop JavaScript class fields from
+    // defining an own property. Lock the final API on every instance so class fields,
+    // constructor defineProperty calls and later assignment all fail closed.
+    lockFinalInstanceMethods(this);
   }
 
   get key() { return this._key; }
@@ -49,19 +203,35 @@ export class Component {
     }
     if (!node || !context || typeof context.nodeViewFor !== 'function'
         || !context.publicDisplay) fail('display-component-attach-invalid');
-    const attachment = { node, context, view: context.nodeViewFor(node) };
+    const attachment = {
+      node,
+      context,
+      view: context.nodeViewFor(node),
+      registered: false,
+      attachHookActive: false,
+    };
     ATTACHMENTS.set(this, attachment);
     this._attachAttempted = true;
     let hookStarted = false;
     try {
       hookStarted = true;
+      attachment.attachHookActive = true;
       assertSynchronous(this.onAttach?.(context.publicDisplay), 'display-component-async-handler');
+      attachment.attachHookActive = false;
+      // A hook may call the public dispose method while attachment is still being
+      // staged. Never resurrect that component or register a disposed identity.
+      if (this._disposed || ATTACHMENTS.get(this) !== attachment) {
+        fail('display-component-disposed');
+      }
       this._attached = true;
       context.componentAttached?.(this);
+      attachment.registered = true;
     } catch (error) {
+      attachment.attachHookActive = false;
       if (this._attached) {
         try { context.componentDetaching?.(this); } catch { /* preserve the attach error */ }
       }
+      attachment.registered = false;
       if (hookStarted) {
         try {
           assertSynchronous(this.onDispose?.(context.publicDisplay, 'attach-rollback'),
@@ -79,9 +249,23 @@ export class Component {
     if (this._disposed) fail('display-component-disposed');
     if (typeof enabled !== 'boolean') fail('display-component-enabled-invalid');
     if (enabled === this._enabled) return;
+    const previous = this._enabled;
     this._enabled = enabled;
     const attachment = ATTACHMENTS.get(this);
-    if (this._attached) attachment.context.componentEnabledChanged?.(this);
+    try {
+      if (this._attached) attachment.context.componentEnabledChanged?.(this);
+    } catch (error) {
+      this._enabled = previous;
+      // Runtime callbacks update scheduler/player/render registration from the
+      // component's current value. Replay the prior value as compensation if a
+      // callback failed after making a partial external change.
+      if (this._attached) {
+        try { attachment.context.componentEnabledChanged?.(this); } catch {
+          /* preserve the original transition error */
+        }
+      }
+      throw error;
+    }
   }
 
   /**
@@ -96,12 +280,32 @@ export class Component {
     attachment.context.setDrivenLocalTransform(this, attachment.node, transform);
   }
 
+  /**
+   * Animation operations address an `animation.player@1` on the caller's own node.
+   * They validate and enqueue synchronously; the visual start point is resolved by the
+   * AnimationSystem on its next sample. Subclasses cannot override these methods.
+   */
+  setAnimation(playerKey, animationId) {
+    dispatchAnimationCommand(this, 'set', playerKey, animationId);
+  }
+
+  playAnimation(playerKey, animationId) {
+    dispatchAnimationCommand(this, 'play', playerKey, animationId);
+  }
+
+  stopAnimation(playerKey) {
+    dispatchAnimationCommand(this, 'stop', playerKey);
+  }
+
   dispose(reason = 'disposed') {
     if (this._disposed) return Object.freeze([]);
     const errors = [];
     const attachment = ATTACHMENTS.get(this) ?? null;
     if (this._attached && attachment !== null) {
-      try { attachment.context.componentDetaching?.(this); } catch (error) { errors.push(error); }
+      if (attachment.registered) {
+        try { attachment.context.componentDetaching?.(this); } catch (error) { errors.push(error); }
+        attachment.registered = false;
+      }
       try {
         assertSynchronous(
           this.onDispose?.(attachment.context.publicDisplay, reason),
@@ -130,14 +334,7 @@ export class Component {
     return this.#properties;
   }
 
-  _adoptContext(context) {
-    const attachment = ATTACHMENTS.get(this);
-    if (!this._attached || this._disposed || !attachment
-        || typeof context.nodeViewFor !== 'function' || !context.publicDisplay) {
-      fail('display-component-adopt-state-invalid');
-    }
-    attachment.context = context;
-    attachment.view = context.nodeViewFor(attachment.node);
-    context.componentAttached?.(this);
-  }
 }
+
+// Prevent mutation of the shared fallback methods as well as instance shadowing.
+Object.freeze(Component.prototype);

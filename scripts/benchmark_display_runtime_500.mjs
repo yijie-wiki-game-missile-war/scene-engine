@@ -2,7 +2,7 @@
 
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
+import { readFile, readdir, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -28,7 +28,6 @@ import {
 } from '../js/packages/renderer-three/src/resources.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const DEFAULT_FORMAL_OUTPUT = 'docs/evidence/display-node-cutover/js-display-runtime-500-formal.json';
 const AUTHORITY_ROOTS = 500;
 const INITIAL_ROOTS = 250;
 const PREFAB_LOCAL_NODES_PER_ROOT = 2;
@@ -117,7 +116,7 @@ class FrameAdapter {
   }
 }
 
-class EvidenceRenderer {
+class BenchmarkRenderer {
   constructor() {
     this.width = 1;
     this.height = 1;
@@ -658,7 +657,7 @@ async function run({ quick }) {
   const hostElement = { getBoundingClientRect: () => ({ left: 0, top: 0, width: 1_280, height: 720 }) };
   const canvas = { getContext: () => ({}), toDataURL: () => 'data:image/png;base64,benchmark' };
   const createRenderBackend = (options) => {
-    const renderer = new EvidenceRenderer();
+    const renderer = new BenchmarkRenderer();
     const backend = new ThreeRenderBackend(options, {
       ...DEFAULT_THREE_IMPLEMENTATION,
       createRenderer: () => renderer,
@@ -911,17 +910,11 @@ async function run({ quick }) {
 
 function parseArguments(argv) {
   let quick = false;
-  let output = null;
-  for (let index = 0; index < argv.length; index += 1) {
-    const argument = argv[index];
+  for (const argument of argv) {
     if (argument === '--quick') quick = true;
-    else if (argument === '--output') {
-      output = argv[index + 1] ?? null;
-      index += 1;
-    } else throw new Error(`unknown benchmark option: ${argument}`);
+    else throw new Error(`unknown benchmark option: ${argument}`);
   }
-  if (!quick && output === null) output = DEFAULT_FORMAL_OUTPUT;
-  return { quick, output };
+  return { quick };
 }
 
 try {
@@ -935,11 +928,6 @@ try {
   }
   const options = parseArguments(process.argv.slice(2));
   const report = await run(options);
-  if (options.output !== null) {
-    const target = path.resolve(process.cwd(), options.output);
-    await mkdir(path.dirname(target), { recursive: true });
-    await writeFile(target, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
-  }
   process.stdout.write(
     `${report.schema} ${report.status} roots=${report.fixture.authorityRoots} `
     + `local=${report.fixture.prefabLocalNodes} ticks=${report.parameters.totalCommittedTicks} `

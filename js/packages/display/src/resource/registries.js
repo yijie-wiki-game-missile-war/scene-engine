@@ -34,7 +34,7 @@ export class PrefabRegistry {
   constructor() { this._definitions = new Map(); this._sealed = false; }
   register(definition) {
     if (this._sealed) fail('display-registry-sealed');
-    assertFinalDefinition(definition, PrefabDefinition, ['compile', 'validatePatch']);
+    assertFinalDefinition(definition, PrefabDefinition, ['compile', '_compileBase', 'validatePatch']);
     const id = assertPrefabId(definition.id);
     if (this._definitions.has(id)) fail('display-prefab-id-duplicate');
     this._definitions.set(id, definition);

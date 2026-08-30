@@ -121,9 +121,43 @@ export interface PrefabNodeDefinition {
   readonly children: readonly PrefabNodeDefinition[];
 }
 
+export interface FixedPrefabInstanceDefinition {
+  readonly key: string;
+  readonly parentLocalPath: string | null;
+  readonly prefabId: string;
+  readonly transform?: DisplayTransform;
+  readonly visible?: boolean;
+  readonly state?: JSONRecord;
+}
+
+export interface PrefabSlotDefinition {
+  readonly key: string;
+  readonly parentLocalPath: string | null;
+  readonly allowedPrefabIds: readonly string[];
+  readonly maximumInstances: number;
+}
+
+export interface FixedPrefabInstanceState {
+  readonly transform?: DisplayTransform;
+  readonly visible?: boolean;
+  readonly state?: JSONRecord;
+}
+
+export interface DynamicPrefabInstanceState {
+  readonly prefabId: string;
+  readonly transform?: DisplayTransform;
+  readonly visible?: boolean;
+  readonly state?: JSONRecord;
+}
+
 export interface PrefabStatePatch {
   readonly nodes?: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
   readonly components?: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
+  readonly prefabInstances?: Readonly<Record<string, FixedPrefabInstanceState>>;
+  readonly prefabSlots?: Readonly<Record<
+    string,
+    Readonly<Record<string, DynamicPrefabInstanceState>>
+  >>;
 }
 
 export interface PrefabDefinitionInput {
@@ -132,6 +166,8 @@ export interface PrefabDefinitionInput {
   readonly revision?: number;
   readonly gameplayType: string;
   readonly root: PrefabNodeDefinition;
+  readonly prefabInstances?: readonly FixedPrefabInstanceDefinition[];
+  readonly prefabSlots?: readonly PrefabSlotDefinition[];
   readonly resolveState?: (
     state: JSONRecord,
     context: Readonly<Record<string, unknown>>,
@@ -245,6 +281,9 @@ export class Component<P extends JSONRecord = JSONRecord> {
   readonly drivesTransform: boolean;
   setEnabled(enabled: boolean): void;
   setDrivenLocalTransform(transform: DisplayTransform): void;
+  setAnimation(playerKey: string, animationId: string): void;
+  playAnimation(playerKey: string, animationId: string): void;
+  stopAnimation(playerKey: string): void;
   dispose(reason?: string): readonly unknown[];
   onAttach?(display: PublicDisplayContext): void;
   onDispose?(display: PublicDisplayContext, reason: string): void;
@@ -323,6 +362,7 @@ export class PrefabDefinition {
   compile(registries: {
     readonly componentRegistry: ComponentRegistry;
     readonly resourceRegistry: ResourceRegistry;
+    readonly prefabRegistry?: PrefabRegistry;
   }): Readonly<Record<string, unknown>>;
   resolveState(state: JSONRecord, context?: Readonly<Record<string, unknown>>): PrefabStatePatch;
 }
@@ -470,18 +510,18 @@ export class DisplayRuntimeError extends Error {
   constructor(code: string, message?: string, options?: ErrorOptions);
 }
 
-export class ModelRendererComponent extends RenderComponent { static readonly typeId: 'render.model@1'; }
+export class ModelRendererComponent extends RenderComponent { static readonly typeId: 'render.model@2'; }
 export class MeshRendererComponent extends RenderComponent { static readonly typeId: 'render.mesh@1'; }
-export class SpriteRendererComponent extends RenderComponent { static readonly typeId: 'render.sprite@1'; }
+export class SpriteRendererComponent extends RenderComponent { static readonly typeId: 'render.sprite@3'; }
 export class SurfaceRendererComponent extends RenderComponent { static readonly typeId: 'render.surface@1'; }
-export class ParticleRendererComponent extends RenderComponent { static readonly typeId: 'render.particle@1'; }
+export class ParticleRendererComponent extends RenderComponent { static readonly typeId: 'render.particle@2'; }
 export class CameraComponent extends RenderComponent { static readonly typeId: 'render.camera@1'; static readonly allowMultiple: false; }
 export class BackgroundComponent extends RenderComponent { static readonly typeId: 'render.background@1'; static readonly allowMultiple: false; }
 export class AmbientLightComponent extends RenderComponent { static readonly typeId: 'render.ambient-light@1'; }
 export class DirectionalLightComponent extends RenderComponent { static readonly typeId: 'render.directional-light@1'; }
 export class PointLightComponent extends RenderComponent { static readonly typeId: 'render.point-light@1'; }
 export class SpotLightComponent extends RenderComponent { static readonly typeId: 'render.spot-light@1'; }
-export class BillboardComponent extends BehaviourComponent { static readonly typeId: 'behavior.billboard@1'; static readonly tickPhase: 'before-render'; static readonly drivesTransform: true; }
+export class BillboardComponent extends BehaviourComponent { static readonly typeId: 'behavior.billboard@2'; static readonly tickPhase: 'before-render'; static readonly drivesTransform: true; }
 export class LookAtComponent extends BehaviourComponent { static readonly typeId: 'behavior.look-at@1'; static readonly tickPhase: 'before-render'; static readonly drivesTransform: true; }
 
 export const TICKS_PER_SECOND: 60;
@@ -489,8 +529,69 @@ export const DISPLAY_RUNTIME_SCHEMA: 'scene-engine-display-node@3';
 export const DISPLAY_SUMMARY_SCHEMA: 'scene-engine-display-summary@1';
 export const DISPLAY_CATALOG_MANIFEST_SCHEMA: 'scene-engine-display-catalog-manifest@1';
 export const SCENE_DEFINITION_SCHEMA: 'scene-engine-scene-definition@1';
-export const PREFAB_DEFINITION_SCHEMA: 'scene-engine-prefab-definition@2';
+export const PREFAB_DEFINITION_SCHEMA: 'scene-engine-prefab-definition@3';
 export const RESOURCE_REGISTRY_SCHEMA: 'scene-engine-resource-registry@1';
+export const ANIMATION_RESOURCE_SCHEMA: 'scene-engine-animation-resource@2';
+
+export interface AnimationTarget {
+  readonly node: '$root' | string;
+  readonly component: string;
+}
+
+export interface SpriteFrameKeyframe {
+  readonly atMs: number;
+  readonly value: number;
+}
+
+export interface SpriteFrameAnimationTrack {
+  readonly channel: 'sprite.frame';
+  readonly target: AnimationTarget;
+  readonly interpolation: 'step';
+  readonly keyframes: readonly SpriteFrameKeyframe[];
+}
+
+export interface AnimationResourceDescriptor {
+  readonly id: string;
+  readonly kind: 'animation';
+  readonly schema: typeof ANIMATION_RESOURCE_SCHEMA;
+  readonly revision?: number;
+  readonly hash?: string;
+  readonly durationMs: number;
+  readonly loop: boolean;
+  readonly tracks: readonly SpriteFrameAnimationTrack[];
+}
+
+export interface DefineAnimationInput {
+  readonly id: string;
+  readonly durationMs: number;
+  readonly loop: boolean;
+  readonly tracks: readonly SpriteFrameAnimationTrack[];
+  readonly revision?: number;
+  readonly hash?: string;
+}
+
+export interface DefineFrameAnimationInput {
+  readonly id: string;
+  readonly target: AnimationTarget;
+  readonly frames: readonly number[];
+  readonly fps: number;
+  readonly loop: boolean;
+  readonly revision?: number;
+  readonly hash?: string;
+}
+
+export interface AnimationPlayerProperties {
+  readonly animationId: string | null;
+  readonly [key: string]: JSONValue;
+}
+
+export class AnimationPlayerComponent extends Component<AnimationPlayerProperties> {
+  static readonly typeId: 'animation.player@1';
+  static readonly allowMultiple: true;
+}
+
+export function defineAnimation(value: DefineAnimationInput): Readonly<AnimationResourceDescriptor>;
+export function defineFrameAnimation(value: DefineFrameAnimationInput): Readonly<AnimationResourceDescriptor>;
 
 export function defineDisplayCatalogManifest(value: DisplayCatalogManifest): DisplayCatalogManifest;
 export function buildDisplayCatalogManifest(value: {

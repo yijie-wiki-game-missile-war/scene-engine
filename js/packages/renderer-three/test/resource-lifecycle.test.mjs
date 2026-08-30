@@ -11,6 +11,7 @@ import {
   TestRegistry,
   createHarness,
   descriptor,
+  frame,
   patch,
 } from './support.mjs';
 
@@ -121,7 +122,7 @@ test('ImageBitmap textures are decoded in Three UV orientation exactly once',
 test('pending create honors AbortSignal and cannot attach a late resource', async () => {
   let resolveLoad; let disposedAsset = 0;
   const asset = { kind: 'model', descriptor: { id: 'model/slow', kind: 'model' },
-    template: new THREE.Group(), templates: [new THREE.Group()], animations: [] };
+    template: new THREE.Group(), templates: [new THREE.Group()] };
   const loadResource = () => new Promise((resolve) => { resolveLoad = resolve; });
   const { backend, registry } = createHarness({
     descriptors: [{ id: 'model/slow', kind: 'model', url: 'memory:slow' }],
@@ -130,9 +131,9 @@ test('pending create honors AbortSignal and cannot attach a late resource', asyn
   const originalDispose = backend._implementation.disposeResource;
   backend._resources.disposeAsset = (value) => { disposedAsset += 1; originalDispose(value); };
   const controller = new AbortController();
-  const pending = backend.createBinding(descriptor('py/late', 'model', 'render.model@1', {
+  const pending = backend.createBinding(descriptor('py/late', 'model', 'render.model@2', {
     modelResourceId: 'model/slow', materialOverrides: {}, castShadow: false,
-    receiveShadow: false, renderOrder: 0, pickable: false, animation: null,
+    receiveShadow: false, renderOrder: 0, pickable: false,
   }, registry, controller.signal));
   await Promise.resolve();
   controller.abort();
@@ -154,14 +155,14 @@ test('backend disposal aborts an unscoped pending create and late work cannot re
   const originalDispose = backend._resources.disposeAsset;
   backend._resources.disposeAsset = (value) => { disposedAsset += 1; originalDispose(value); };
   const pending = backend.createBinding(descriptor('py/late-unscoped', 'model',
-    'render.model@1', {
+    'render.model@2', {
       modelResourceId: 'model/late', materialOverrides: {}, castShadow: false,
-      receiveShadow: false, renderOrder: 0, pickable: false, animation: null,
+      receiveShadow: false, renderOrder: 0, pickable: false,
     }, registry));
   await Promise.resolve();
   backend.dispose();
   resolveLoad({ kind: 'model', descriptor: { id: 'model/late', kind: 'model' },
-    template: new THREE.Group(), templates: [new THREE.Group()], animations: [] });
+    template: new THREE.Group(), templates: [new THREE.Group()] });
   await assert.rejects(pending, /disposed|aborted/u);
   await Promise.resolve();
   assert.equal(backend.diagnostics().bindingCount, 0);
@@ -177,9 +178,9 @@ test('technical failures report the exact health envelope with binding and resou
     onHealth: (event) => events.push(event),
   });
   await assert.rejects(() => backend.createBinding(descriptor('py/broken', 'model',
-    'render.model@1', {
+    'render.model@2', {
       modelResourceId: 'model/broken', materialOverrides: {}, castShadow: false,
-      receiveShadow: false, renderOrder: 0, pickable: false, animation: null,
+      receiveShadow: false, renderOrder: 0, pickable: false,
     }, registry)), /broken asset/u);
   assert.equal(events.length, 2);
   for (const event of events) {
@@ -194,23 +195,21 @@ test('technical failures report the exact health envelope with binding and resou
   backend.dispose();
 });
 
-test('real model clone preserves source material, validates clips, samples, and cleans up', async () => {
+test('real model clone preserves source material, updates, and cleans up', async () => {
   const template = new THREE.Group();
   const sourceMaterial = new THREE.MeshStandardMaterial({ color: 0x80ff80, opacity: 0.8 });
   const geometry = new THREE.BoxGeometry(1, 1, 1);
   const mesh = new THREE.Mesh(geometry, sourceMaterial); template.add(mesh);
-  const clip = new THREE.AnimationClip('idle', 1, []);
-  const asset = { kind: 'model', descriptor: null, template, templates: [template], animations: [clip] };
-  const modelDescriptor = { id: 'model/ship', kind: 'model', url: 'memory:ship', clipNames: ['idle'] };
+  const asset = { kind: 'model', descriptor: null, template, templates: [template] };
+  const modelDescriptor = { id: 'model/ship', kind: 'model', url: 'memory:ship' };
   const loadResource = async (resource, signal, dependencies) => resource.kind === 'model'
     ? { ...asset, descriptor: resource } : loadThreeResource(resource, signal, dependencies);
   const { backend, registry } = createHarness({ descriptors: [modelDescriptor], loadResource });
   const properties = { modelResourceId: 'model/ship',
     materialOverrides: { tintRgba: 0xff00_00ff, opacity: 0.5, emissive: 0,
       alphaMode: 'blend', alphaCutoff: 0 }, castShadow: true, receiveShadow: true,
-    renderOrder: 3, pickable: true,
-    animation: { clipId: 'idle', startTick: 10, clock: 'simulation', loop: true } };
-  const binding = await backend.createBinding(descriptor('py/ship', 'model', 'render.model@1',
+    renderOrder: 3, pickable: true };
+  const binding = await backend.createBinding(descriptor('py/ship', 'model', 'render.model@2',
     properties, registry));
   const clonedMesh = backend._records.get(binding).handle.object.children[0];
   assert.notStrictEqual(clonedMesh.material, sourceMaterial);
@@ -224,22 +223,120 @@ test('real model clone preserves source material, validates clips, samples, and 
   geometry.dispose(); sourceMaterial.dispose();
 });
 
-test('model LOD plus animation is rejected before a clone becomes active', async () => {
+test('mesh material appearance survives ordinary, batched, and updated clones without reapplication', async () => {
+  for (const spec of [
+    { family: 'material.unlit', tintRgba: 0x1024_2aff, opacity: 0.28 },
+    { family: 'material.standard', tintRgba: 0x4b72_9180, opacity: 0.65 },
+  ]) {
+    const materialDescriptor = {
+      id: 'material/tinted', kind: 'material', family: spec.family,
+      properties: { tintRgba: spec.tintRgba, opacity: spec.opacity, emissive: 0,
+        alphaMode: 'blend', alphaCutoff: 0 },
+    };
+    const assets = new Map();
+    const disposals = new Map();
+    const watch = (object, label) => {
+      disposals.set(label, 0);
+      object.addEventListener('dispose', () => disposals.set(label, disposals.get(label) + 1));
+    };
+    const { backend, registry } = createHarness({
+      descriptors: [INLINE_RESOURCES[0], materialDescriptor],
+      async loadResource(resource, signal, dependencies) {
+        const asset = await loadThreeResource(resource, signal, dependencies);
+        assets.set(resource.id, asset);
+        watch(asset.material ?? asset.geometry, resource.id);
+        return asset;
+      },
+    });
+    const assertAppearance = (material) => {
+      assert.equal(material.color.getHex(), spec.tintRgba >>> 8);
+      assert.equal(material.opacity, spec.opacity * ((spec.tintRgba & 255) / 255));
+      assert.equal(material.transparent, true);
+      assert.equal(material.depthWrite, false);
+    };
+    try {
+      const camera = await backend.createBinding(descriptor('scene/camera', 'camera',
+        'render.camera@1', CAMERA_PROPERTIES, registry));
+      backend.updateBinding(camera, patch('scene/camera', 'camera', CAMERA_PROPERTIES,
+        new THREE.Matrix4().makeTranslation(0, 0, 5)));
+      const properties = { meshResourceId: 'mesh/triangle', materialResourceId: 'material/tinted',
+        castShadow: false, receiveShadow: false, renderOrder: 0, pickable: true };
+      const first = await backend.createBinding(descriptor('py/first', 'mesh', 'render.mesh@1',
+        properties, registry));
+      const ordinary = backend._records.get(first).handle.object;
+      const sourceMaterial = assets.get('material/tinted').material;
+      watch(ordinary.material, 'first-material');
+      assert.notStrictEqual(ordinary.material, sourceMaterial);
+      assertAppearance(sourceMaterial);
+      assertAppearance(ordinary.material);
+      backend.updateBinding(first, patch('py/first', 'mesh', properties));
+      backend.prepareFrame(frame(camera)); backend.render();
+      assert.equal(backend.diagnostics().batchCount, 0);
+
+      const second = await backend.createBinding(descriptor('py/second', 'mesh', 'render.mesh@1',
+        properties, registry));
+      const peerMaterial = backend._records.get(second).handle.object.material;
+      watch(peerMaterial, 'second-material');
+      assert.notStrictEqual(peerMaterial, ordinary.material);
+      assert.notStrictEqual(peerMaterial, sourceMaterial);
+      backend.updateBinding(second, patch('py/second', 'mesh', properties,
+        new THREE.Matrix4().makeTranslation(2, 0, 0)));
+      backend.prepareFrame(frame(camera)); backend.render();
+      assert.equal(backend.diagnostics().batchCount, 1);
+      const batch = backend._batches[0].object;
+      watch(batch.material, 'batch-material'); watch(batch.geometry, 'batch-geometry');
+      assert.notStrictEqual(batch.material, ordinary.material);
+      assertAppearance(batch.material);
+
+      const updated = { ...properties, renderOrder: 7, castShadow: true, receiveShadow: true };
+      backend.updateBinding(first, patch('py/first', 'mesh', updated));
+      backend.prepareFrame(frame(camera)); backend.render();
+      assert.equal(backend.diagnostics().batchCount, 0);
+      assert.equal(ordinary.renderOrder, 7);
+      assert.equal(ordinary.castShadow, true);
+      assert.equal(ordinary.receiveShadow, true);
+      assertAppearance(ordinary.material);
+      assertAppearance(peerMaterial);
+      assertAppearance(sourceMaterial);
+      assert.equal(disposals.get('batch-material'), 1);
+      assert.equal(disposals.get('batch-geometry'), 1);
+      assert.equal(disposals.get('material/tinted'), 0);
+
+      backend.updateBinding(first, patch('py/first', 'mesh', properties));
+      backend.prepareFrame(frame(camera)); backend.render();
+      const rebuiltBatch = backend._batches[0].object;
+      watch(rebuiltBatch.material, 'rebuilt-material'); watch(rebuiltBatch.geometry, 'rebuilt-geometry');
+      assertAppearance(rebuiltBatch.material);
+      backend.destroyBinding(second);
+      assert.equal(disposals.get('second-material'), 1);
+      assert.equal(disposals.get('first-material'), 0);
+      assert.equal(disposals.get('material/tinted'), 0, 'the remaining mesh still leases the resource');
+      backend.destroyBinding(first); backend.destroyBinding(camera);
+      assert.equal(backend.diagnostics().resourceLeaseCount, 0);
+      assert.equal(backend.diagnostics().resourceCount, 0);
+      backend.dispose();
+      for (const [label, count] of disposals) assert.equal(count, 1, label);
+    } finally {
+      backend.dispose();
+    }
+  }
+});
+
+test('model properties carrying legacy animation fields are rejected fail-closed', async () => {
   const makeTemplate = () => {
     const root = new THREE.Group(); root.add(new THREE.Mesh(new THREE.BoxGeometry(),
       new THREE.MeshStandardMaterial())); return root;
   };
   const descriptorValue = { id: 'model/lod', kind: 'model', url: 'memory:lod0',
-    lodUrls: ['memory:lod1'], clipNames: ['idle'] };
+    lodUrls: ['memory:lod1'] };
   const loadResource = async (resource) => ({ kind: 'model', descriptor: resource,
-    template: makeTemplate(), templates: [makeTemplate(), makeTemplate()],
-    animations: [new THREE.AnimationClip('idle', 1, [])] });
+    template: makeTemplate(), templates: [makeTemplate(), makeTemplate()] });
   const { backend, registry } = createHarness({ descriptors: [descriptorValue], loadResource });
-  await assert.rejects(() => backend.createBinding(descriptor('py/lod', 'model', 'render.model@1', {
+  await assert.rejects(() => backend.createBinding(descriptor('py/lod', 'model', 'render.model@2', {
     modelResourceId: 'model/lod', materialOverrides: {}, castShadow: false,
     receiveShadow: false, renderOrder: 0, pickable: false,
     animation: { clipId: 'idle', startTick: 0, clock: 'simulation', loop: true },
-  }, registry)), /three-model-lod-animation-unsupported/u);
+  }, registry)), /three-model-properties-invalid/u);
   assert.equal(backend.diagnostics().bindingCount, 0);
   backend.dispose();
 });

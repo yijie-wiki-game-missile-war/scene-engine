@@ -108,15 +108,17 @@ export class ThreeRenderBackend {
       identity: Object.freeze({ nodeName: descriptor.nodeName, componentKey: descriptor.componentKey }),
       componentType: descriptor.componentType,
       properties: descriptor.properties,
+      batchable: descriptor.batchable,
       resourceIds,
       leases: [],
       handle: null,
       nodeRoot: null,
       visible: true,
       batched: false,
+      panelAnchorWorld: null,
       worldMatrix: Object.freeze([1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 1]),
       controller: new AbortController(),
-      pendingController: null,
+      pendingReplacement: null,
       generation: 0,
       destroyed: false,
       unlinkSignal: null,
@@ -144,34 +146,56 @@ export class ThreeRenderBackend {
     this._assertOpen();
     const record = this._requireRecord(binding);
     const patch = normalizeUpdatePatch(value, record.identity);
+    if (patch.panelAnchorWorld !== null && record.componentType !== 'render.sprite@3') {
+      fail('three-backend-panel-anchor-invalid');
+    }
     record.worldMatrix = patch.worldMatrix;
+    record.panelAnchorWorld = patch.panelAnchorWorld;
+    record.handle.setPanelAnchor?.(patch.panelAnchorWorld);
     record.visible = patch.visible;
     if (record.nodeRoot) {
       record.nodeRoot.matrix.fromArray(patch.worldMatrix);
       record.nodeRoot.matrixWorldNeedsUpdate = true;
     }
     this._applyRecordVisibility(record);
-    const nextResourceIds = resourceIdsForComponent(record.componentType, patch.properties);
-    if (stableData(nextResourceIds) !== stableData(record.resourceIds)) {
-      this._scheduleReplacement(record, patch.properties, nextResourceIds);
-    } else {
-      if (record.pendingController) {
-        record.generation += 1;
-        record.pendingController.abort('binding-replacement-reverted');
-        record.pendingController = null;
-      }
-      if (stableData(record.properties) === stableData(patch.properties)) return;
+    const eligibilityChanged = patch.batchable !== record.batchable;
+    if (eligibilityChanged) {
+      // Eligibility is part of the latest logical binding state even while a
+      // resource replacement is loading. Leave/rebuild batches immediately so
+      // an animated binding is never represented by a stale static instance.
       this._disposeBatches();
-      try {
-        record.handle.update(patch.properties);
-        record.properties = patch.properties;
-        this._applyRecordVisibility(record);
-      } catch (error) {
-        const wrapped = wrapError('three-binding-update-failed', error); this._failure = wrapped;
-        this._emitHealth({ phase: 'binding-update', record, errorCode: wrapped.code,
-          recoverable: true });
-        throw wrapped;
+      record.batchable = patch.batchable;
+    }
+    const nextResourceIds = resourceIdsForComponent(record.componentType, patch.properties);
+    const nextResourceKey = stableData(nextResourceIds);
+    if (nextResourceKey !== stableData(record.resourceIds)) {
+      const pending = record.pendingReplacement;
+      if (pending?.resourceKey === nextResourceKey) {
+        // A full patch is emitted whenever world or animation state changes.
+        // Keep one load for the same target resources and let its completion
+        // install the newest normalized properties.
+        pending.properties = patch.properties;
+      } else {
+        this._scheduleReplacement(record, patch.properties, nextResourceIds, nextResourceKey);
       }
+      return;
+    }
+    this._cancelReplacement(record, 'binding-replacement-reverted');
+    const propertiesChanged = stableData(record.properties) !== stableData(patch.properties);
+    if (!propertiesChanged) return;
+    // Animated (non-batchable) frame flips update only this handle and never touch
+    // batches. Eligibility changes and static fingerprint updates leave or reshape a
+    // batch and dispose the current batches at most once per change.
+    if (record.batched) this._disposeBatches();
+    try {
+      record.handle.update(patch.properties);
+      record.properties = patch.properties;
+      this._applyRecordVisibility(record);
+    } catch (error) {
+      const wrapped = wrapError('three-binding-update-failed', error); this._failure = wrapped;
+      this._emitHealth({ phase: 'binding-update', record, errorCode: wrapped.code,
+        recoverable: true });
+      throw wrapped;
     }
   }
 
@@ -248,6 +272,10 @@ export class ThreeRenderBackend {
     for (const candidate of candidates) candidate.updateWorldMatrix(true, true);
     raycaster.setFromCamera(pointer, camera);
     for (const hit of raycaster.intersectObjects(candidates, true)) {
+      // Raycaster's radial near/far distance does not match the camera's view-
+      // space clipping planes away from the optical axis. Test the actual hit
+      // point against the same depth interval used by GPU projection instead.
+      if (!pointWithinCameraDepth(hit.point, camera)) continue;
       let record = null;
       let activeRepresentation = false;
       if (hit.object?.userData?.threeBatchRecords && Number.isInteger(hit.instanceId)) {
@@ -395,6 +423,7 @@ export class ThreeRenderBackend {
       requireNotAborted(record.controller.signal);
     }
     handle.resize?.(this._width / this._height);
+    handle.setPanelAnchor?.(record.panelAnchorWorld);
     record.handle = handle;
     if (handle.object) {
       record.nodeRoot = this._acquireNodeRoot(record.identity.nodeName);
@@ -409,28 +438,32 @@ export class ThreeRenderBackend {
     return record.token;
   }
 
-  _scheduleReplacement(record, properties, resourceIds) {
+  _scheduleReplacement(record, properties, resourceIds, resourceKey = stableData(resourceIds)) {
     record.generation += 1;
     const generation = record.generation;
-    record.pendingController?.abort('binding-superseded');
+    this._cancelReplacement(record, 'binding-superseded', false);
     const controller = new AbortController();
     const unlink = linkSignal(record.controller.signal, controller);
-    record.pendingController = controller;
+    const replacement = { controller, generation, resourceIds, resourceKey, properties };
+    record.pendingReplacement = replacement;
     const operation = (async () => {
       const leases = resourceIds.map((id) => this._resources.acquire(id, controller.signal));
       try {
         assertComponentResourceKinds(record.componentType, leases);
         await Promise.all(leases.map((lease) => lease.ready)); requireNotAborted(controller.signal);
+        const latestProperties = replacement.properties;
         const handle = createComponentHandle({ componentType: record.componentType,
-          properties, leases, scene: this._scene });
-        if (record.destroyed || record.generation !== generation || controller.signal.aborted) {
+          properties: latestProperties, leases, scene: this._scene });
+        if (record.destroyed || record.generation !== generation || controller.signal.aborted
+            || record.pendingReplacement !== replacement) {
           handle.dispose(); for (const lease of leases) lease.release(); return;
         }
         handle.resize?.(this._width / this._height);
+        handle.setPanelAnchor?.(record.panelAnchorWorld);
         this._disposeBatches();
         const previousHandle = record.handle; const previousLeases = record.leases;
         if (previousHandle.object) previousHandle.object.removeFromParent();
-        record.handle = handle; record.leases = leases; record.properties = properties;
+        record.handle = handle; record.leases = leases; record.properties = latestProperties;
         record.resourceIds = resourceIds;
         if (handle.object) {
           record.nodeRoot ??= this._acquireNodeRoot(record.identity.nodeName);
@@ -449,17 +482,26 @@ export class ThreeRenderBackend {
             errorCode: wrapped.code, recoverable: true });
         }
       } finally {
-        unlink(); if (record.pendingController === controller) record.pendingController = null;
+        unlink();
+        if (record.pendingReplacement === replacement) record.pendingReplacement = null;
       }
     })();
     this._track(operation);
+  }
+
+  _cancelReplacement(record, reason, advanceGeneration = true) {
+    const pending = record.pendingReplacement;
+    if (pending === null) return;
+    if (advanceGeneration) record.generation += 1;
+    record.pendingReplacement = null;
+    pending.controller.abort(reason);
   }
 
   _destroyRecord(record, disposing = false) {
     if (record.destroyed) return;
     this._disposeBatches();
     record.destroyed = true; record.generation += 1;
-    record.pendingController?.abort('binding-destroyed');
+    this._cancelReplacement(record, 'binding-destroyed', false);
     record.unlinkSignal?.();
     this._bindings.delete(record.key); this._reservations.delete(record.key);
     if (this._backgroundKey === record.key) this._backgroundKey = null;
@@ -496,6 +538,7 @@ export class ThreeRenderBackend {
   _updateBatches() {
     const groups = new Map();
     for (const record of this._bindings.values()) {
+      if (!record.batchable) continue;
       const fingerprint = record.handle.batchFingerprint;
       if (!fingerprint || typeof record.handle.createBatch !== 'function') continue;
       const key = `${record.componentType}\u0000${fingerprint}`;
@@ -525,6 +568,7 @@ export class ThreeRenderBackend {
     for (const batch of this._batches) {
       for (let index = 0; index < batch.records.length; index += 1) {
         const record = batch.records[index];
+        batch.setPanelAnchorAt?.(index, record.panelAnchorWorld);
         if (!record.visible) batch.object.setMatrixAt(index, ZERO_MATRIX);
         else { world.fromArray(record.worldMatrix); final.multiplyMatrices(world, batch.localMatrix);
           batch.object.setMatrixAt(index, final); }
@@ -584,6 +628,11 @@ export function createThreeRenderBackend(options) {
 }
 
 function identityKey(value) { return JSON.stringify([value.nodeName, value.componentKey]); }
+function pointWithinCameraDepth(point, camera) {
+  const viewPoint = point.clone().applyMatrix4(camera.matrixWorldInverse);
+  const depth = -viewPoint.z;
+  return Number.isFinite(depth) && depth >= camera.near && depth <= camera.far;
+}
 function positiveDimension(value) { const number = Number(value); return Number.isFinite(number) && number > 0
   ? Math.max(1, Math.round(number)) : 1; }
 function linkSignal(signal, controller) {

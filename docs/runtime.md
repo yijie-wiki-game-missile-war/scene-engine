@@ -84,6 +84,26 @@ DisplayCommand.remove(name)
 Generic `DisplayCommand(kind=..., **fields)` construction is intentionally unavailable. Engine owns `command_seq`,
 `source_tick`, stream/commit/revision and encoded bytes.
 
+## Nested Prefab projection
+
+Nested Prefabs are entirely inside `@scene-engine/display@0.8.0` and Prefab definition schema
+`scene-engine-prefab-definition@3`. They do not change `scene-engine-wire@2`, `scene-engine-display-node@3`,
+`scene-engine-packet-log@2`, checkpoint records, Display commands or ACK cursors.
+
+Python still creates and controls only the outer `py/` authority root. `set_state` sends one complete outer state. Display calls
+the registered synchronous resolvers, recursively derives fixed-child overrides and every dynamic slot's complete desired set,
+and materializes the result as ordinary Nodes/Components in its one NodeIndex and NodeGraph. Definition-owned children do not
+become independently addressable authority nodes or new runtime Prefab objects.
+
+This resolution and diff is part of the synchronous command barrier. Retaining the same slot key, instance key and `prefabId`
+preserves Node/Component identity; missing instances are removed, new instances are added and a changed `prefabId` is replaced.
+An invalid nested candidate fails the Display operation, produces no ACK and requires the normal fresh-checkpoint/session
+recovery if the projection becomes invalid. Resource readiness, animation sampling and rendering remain outside ACK.
+
+Animation players use private Prefab materialization Scope identity to resolve `$root` and local targets. Canonical name prefixes
+do not define animation ownership. Visual animation still samples only per-player `visualSeconds`; nested composition does not
+introduce another clock or any Python/Replay animation state.
+
 ## Transaction order
 
 A tick transaction is:

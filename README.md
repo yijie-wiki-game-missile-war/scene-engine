@@ -1,197 +1,80 @@
 # Scene Engine 0.9
 
-Scene Engine 是一个面向**服务端权威游戏**的确定性世界发布、浏览器同步与 3D 显示投影运行时。玩法状态和规则留在
-Python；引擎把每次已提交事务发布为 World patch 与逻辑 Display command；JavaScript Client 原子应用并累计 ACK；
-DisplayRuntime 维护唯一节点树；Three backend 只管理渲染资源与绘制。
+Scene Engine 是面向**服务端权威浏览器游戏**的运行时基础设施。产品世界与玩法规则保留在 Python，按固定
+`60 tick/s` 推进；已提交的状态变化以完整基线和增量事务同步到浏览器，并投影为可渲染的 3D 场景。
 
-它是 **renderer-isolated**，不是试图统一所有渲染器的通用游戏引擎：产品和美术壳不直接接触 Three.js，但当前
-Display API 明确面向浏览器显示环境。
+它聚焦从“权威世界”到“浏览器画面”的生产链路，让玩法、显示内容和渲染实现可以独立演进。录制保存实时发布的
+权威数据，实时运行与 Replay 共享同一条状态同步和显示投影路径。
 
-```text
-Python authoritative World（固定 60 Hz）
-  -> scene-engine-wire@2 checkpoint / commit
-  -> @scene-engine/client 原子同步、WorldState、ACK
-  -> @scene-engine/display 唯一 Node/Transform/Component/RAF
-  -> @scene-engine/renderer-three GPU 资源、binding、draw
-```
+## 主要功能
 
-## 它负责什么
+- **权威世界发布**：以固定步进推进产品世界，按确定顺序独立发布每次已发生的状态变化，避免用渲染帧率或墙钟
+  决定玩法结果。
+- **浏览器状态同步**：通过完整基线和增量提交同步逻辑状态与显示变化；只有在校验并通过提交屏障后才确认进度，
+  资源加载和绘制不会阻塞状态确认。
+- **声明式显示内容**：用 Scene、Prefab、Resource 和 Component 描述场景与表现，支持复用、嵌套和受约束的
+  动态 Prefab 组合，并统一落入一棵显示节点树。
+- **浏览器 3D 渲染**：当前由隔离的 Three.js 后端负责资源加载、批处理、绘制、拾取、坐标投影、聚焦和截图，
+  产品与美术定义不需要直接依赖 Three.js 对象。
+- **玩法与视觉分离**：玩法发布权威状态与真实运动；对于表现动画，只发布“移动”“受击”等业务语义，由显示端
+  映射为精灵帧动画，不改变权威世界，也不把动画进度写入网络或 Replay。
+- **录制与 Replay**：精确记录权威数据，并通过与实时运行相同的 Client 和 Display 路径回放，用于权威状态与
+  显示投影的复现、调试和验收。
+- **完整性与恢复**：显示目录在场景安装前校验，每次状态候选在确认进度前校验；可恢复的渲染故障可以重建后端，
+  失效的显示投影则从新的完整基线安全重建。
 
-| Scene Engine 负责 | 产品或宿主负责 |
-|---|---|
-| 固定步进、事务、checkpoint、commit、session 与 recording | 玩法规则、物理与可变 World 数据结构 |
-| 精确 wire、Client WorldState、累计 ACK 与 Replay 同路复用 | HTTP/WebSocket 框架、连接轮询与进程生命周期 |
-| Scene/Prefab/Resource/Component 合同和唯一 Display 节点树 | 游戏 Scene/Prefab、资产、状态 schema、UI 与视觉设计 |
-| Three.js 隔离、资源生命周期、binding、pick、capture 与 draw | 编辑器、资产生产、产品控制器和平台级界面 |
+## 产品特色
 
-不存在第二套 World、节点树、Transform、RAF、ACK cursor、packet decoder 或兼容旧合同的 fallback。
+- **一致性优先**：权威世界、逻辑时钟、显示节点树和同步进度都只有一个明确所有者，避免多份状态互相漂移。
+- **同一条生产路径**：录制保存实时发布的权威数据，Replay 不使用备用解码器或平行投影实现。
+- **逻辑与表现解耦**：真实运动由权威时钟决定，视觉动画使用独立显示时间；模型、材质、灯光和动画细节不会污染
+  玩法状态。
+- **组合优于复制**：Prefab 可以由更小的 Prefab 组成，并在受控范围内动态增删或替换；定义与实例标识不变时，
+  运行时身份保持稳定。
+- **渲染器隔离**：产品面向稳定的显示合同，Three.js 保持在渲染边界内；当前目标是做深浏览器生产链路，而不是
+  宣称支持任意平台和渲染器。
+- **失败边界清晰**：非法内容尽早拒绝，失败时不确认无效投影；资源加载、观察者和绘制不参与权威状态确认。
 
-## 最小接入
+## 适用范围
 
-### Python：发布权威事务
+Scene Engine 适合：
 
-合同帧率固定为 60 Hz；代码仍通过变量传递该值，避免在计算和上下文中散落字面量。`RuntimeConfig` 只接受
-`TICKS_PER_SECOND`，当前等于 60。
+- 服务端权威、浏览器负责显示的实时游戏；
+- 需要确定事件顺序、严格状态同步，以及权威状态与显示投影回放的产品；
+- 希望把玩法规则、显示内容和 Three.js 实现分离的团队；
+- 需要统一实时运行、调试、录制和验收路径的项目。
 
-```python
-import json
-from scene_engine import (
-    DisplayCatalogIdentity,
-    DisplayCommand,
-    MutationResult,
-    ProductCheckpoint,
-    RuntimeConfig,
-    SceneEngineRuntime,
-    TICKS_PER_SECOND,
-)
+Scene Engine 不负责：
 
-catalog = DisplayCatalogIdentity.from_record(
-    json.loads(open("display-catalog-identity.json", encoding="utf-8").read())
-)
+- 具体玩法规则、物理逻辑、产品 World 数据结构和 UI；
+- HTTP、WebSocket 框架、连接轮询与进程托管；
+- 游戏资产生产、视觉设计和产品级 Scene、Prefab 或状态定义；
+- 编辑器、关卡制作工具和通用物理系统；
+- 面向所有平台与渲染器的统一游戏引擎抽象。
 
-# EngineProgram.build_checkpoint 中把同一构建产物身份写入 checkpoint：
-checkpoint = ProductCheckpoint(
-    world_codec="product-world@1",
-    world_snapshot=world_snapshot,
-    scene_name="main",
-    display_catalog=catalog,
-    display_nodes=display_nodes,
-)
+## 发展方向
 
-runtime = SceneEngineRuntime(
-    world=world,
-    program=program,
-    transport=transport,
-    recorder=recorder,
-    config=RuntimeConfig(ticks_per_second=TICKS_PER_SECOND),
-)
+当前没有按日期或版本承诺的公开路线图。产品演进遵循以下方向：
 
-# EngineProgram.step / handle_input 中：
-mutation = MutationResult.changed(commit_context={"changed_units": [42]})
+- 持续强化浏览器与 Three.js 生产链路的稳定性、性能、资源生命周期和故障恢复；
+- 提升声明式场景、Prefab 组合和可复用显示内容的表达能力，同时保持唯一显示节点树；
+- 丰富纯视觉表现能力，同时坚持玩法时间与视觉时间分离；
+- 加强目录身份、状态校验和跨语言一致性，让错误内容尽早暴露；
+- 改善产品与美术仓库的接入、构建和验收体验；
+- 保持实时运行与 Replay 同路，不引入第二套状态、时钟、节点树、确认进度或兼容分支。
 
-# EngineProgram.build_commit 中只使用命名构造器：
-command = DisplayCommand.set_state("py/unit/42", {"animation": "walk"})
-```
+## 技术文档
 
-`EngineProgram` 的六个回调、完整 checkpoint/commit 结构和事务顺序见
-[Runtime 与 60 Hz](docs/runtime.md)。
-
-### JavaScript：构建目录并创建投影
-
-```js
-import { SceneEngineClient } from '@scene-engine/client';
-import {
-  buildDisplayCatalogManifest,
-  computeDisplayCatalogIdentity,
-  createDisplayRuntime,
-  toDisplayCatalogIdentityRecord,
-} from '@scene-engine/display';
-import { createThreeRenderBackend } from '@scene-engine/renderer-three';
-
-const authorityStateSchemas = [
-  { gameplayType: 'unit.basic', schemaId: 'unit.basic.state', revision: 1 },
-];
-
-const manifest = buildDisplayCatalogManifest({
-  sceneRegistry,
-  prefabRegistry,
-  resourceRegistry,
-  componentRegistry,
-  authorityStateSchemas,
-});
-const catalogIdentityRecord = toDisplayCatalogIdentityRecord(
-  computeDisplayCatalogIdentity(manifest),
-); // 构建时写入 display-catalog-identity.json，供 Python 原样加载。
-
-function createProductDisplaySession() {
-  const runtime = createDisplayRuntime({
-    hostElement,
-    canvas,
-    sceneRegistry,
-    prefabRegistry,
-    resourceRegistry,
-    componentRegistry,
-    authorityStateSchemas,
-    createRenderBackend: createThreeRenderBackend,
-  });
-  return {
-    runtime,
-    authorityPort: runtime.authority,
-    commitGate: runtime.commitGate,
-    dispose: () => runtime.dispose(),
-    debugName: 'main-projection', // Client 只提取上面四项，包装字段可保留在调用侧。
-  };
-}
-
-const client = new SceneEngineClient({
-  createDisplaySession: createProductDisplaySession,
-  onCommit({ worldState, commit, displaySummary }) {
-    updateHud(worldState, commit, displaySummary);
-  },
-});
-```
-
-## 必须保持的合同
-
-- **时间固定，代码可变量化**：权威率严格为 `60 tick/s`；`ticks_per_second` 用于传值和计算，不是可选帧率。
-- **Python 权威**：Python 决定每个 `py/` 根节点的存在、父级、Transform、可见性、精确 `prefabId` 和完整状态。
-- **提交门禁**：checkpoint 初始化可在激活前装载节点；激活后所有 Authority 修改必须位于同一个
-  `commitGate.begin -> apply -> seal` 内，门外修改直接失败。
-- **目录身份真实可重建**：Scene、Prefab/Resource/Component、authority-state schema 分域生成 SHA-256；Client 在
-  `installScene` 前比较本地身份与 checkpoint，任何不匹配都拒绝 session。
-- **校验先于 ACK**：内建 model/material/animation/sprite/surface/particle/light/camera 状态在 Display 侧完整
-  normalize 后才改变节点；非法嵌套字段不能拖到下一次 RAF 才报错。
-- **Behaviour 只拿窄能力**：组件只能读取冻结的 NodeView 和 Display 查询面；不能接触 NodeIndex、NodeGraph、
-  Authority、RenderSystem，也不能修改 Python 权威根节点。
-- **ACK 语义有限且明确**：ACK 表示 World candidate、全部 Display commands 与 cursor 已同步通过提交屏障；它不等
-  资源加载、HUD、observer、RAF 或 draw。
-- **静态与动态分离**：Scene、Prefab、Resource、Component 定义在 runtime 构造前注册；逐事务只传 World patch 和
-  单目标 Display command。
-
-## 当前发布组合
-
-| 层 | 版本 / schema |
-|---|---|
-| Python | `scene-engine==0.9.0` |
-| Client | `@scene-engine/client@0.10.0` |
-| Display | `@scene-engine/display@0.4.0` |
-| Three backend | `@scene-engine/renderer-three@0.9.3` |
-| Wire | `scene-engine-wire@2` |
-| Display codec | `scene-engine-display-node@3` |
-| Packet log | `scene-engine-packet-log@2` |
-| Catalog manifest | `scene-engine-display-catalog-manifest@1` |
-
-JavaScript 三个包都随包发布 `src/index.d.ts`。当前 tuple 不提供旧 decoder、别名、双写、旧包重定向或 fallback
-renderer。
-
-## 验证与打包
-
-```bash
-uv run python -m pytest -q
-npm ci
-npm test
-uv run python scripts/verify_cutover.py
-uv run python scripts/benchmark_scene_500.py --quick
-node --expose-gc scripts/benchmark_client_ack_500.mjs --quick
-node --expose-gc scripts/benchmark_display_runtime_500.mjs --quick
-npm pack --workspace @scene-engine/client --pack-destination dist
-npm pack --workspace @scene-engine/display --pack-destination dist
-npm pack --workspace @scene-engine/renderer-three --pack-destination dist
-```
-
-Python 需要 `>=3.10`；Node 需要 `^20.19.0 || >=22.12.0`。
-
-## 当前合同
+开发接入、API、协议、版本和验证方式由以下技术合同和测试说明维护：
 
 - [架构与所有权](docs/architecture.md)
-- [Runtime 与 60 Hz](docs/runtime.md)
-- [Display Node、Prefab、Component 与目录身份](docs/display.md)
-- [Wire v2](docs/wire.md)
-- [JavaScript Client](docs/client.md)
-- [Three backend](docs/render-runtime.md)
+- [Runtime 与固定 60 Hz](docs/runtime.md)
+- [Client 与状态同步](docs/client.md)
+- [Display、Prefab 与 Component](docs/display.md)
+- [显示端动画](docs/display-animation.md)
+- [Three 渲染后端](docs/render-runtime.md)
 - [Recording 与 Replay](docs/recording-replay.md)
+- [Wire 协议](docs/wire.md)
 - [Transform](docs/transform.md)
-- [Agent 使用说明](.agents/skills/scene-engine/SKILL.md)
-
-迁移方案、旧审计、旧发布验收和 0.9.2 renderer patch 属于历史资料，分别位于 `docs/migration/`、`docs/reviews/`、
-`docs/cutover-report.md`、`docs/evidence/` 和 `docs/renderer-three-0.9.2-patch.md`，不作为当前 API 事实。
+- [测试方法与标准](docs/testing.md)
+- [测试项目](docs/tests/README.md)

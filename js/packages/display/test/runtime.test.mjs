@@ -2,9 +2,12 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  AnimationPlayerComponent,
   BehaviourComponent,
   DISPLAY_SUMMARY_SCHEMA,
   PREFAB_DEFINITION_SCHEMA,
+  RenderComponent,
+  defineFrameAnimation,
   definePrefab,
 } from '../src/index.js';
 import { createFakeRenderBackend } from '../src/testing/fake-render-backend.js';
@@ -119,7 +122,7 @@ test('state resolver validates the whole patch before changing any target', asyn
     root: { components: [], children: [{
       localName: 'body', visible: true, transform: IDENTITY,
       components: [{
-        key: 'model', type: 'render.model@1', properties: { modelResourceId: 'model/good' },
+        key: 'model', type: 'render.model@2', properties: { modelResourceId: 'model/good' },
       }], children: [],
     }] },
     resolveState(state) {
@@ -155,26 +158,28 @@ test('nested renderer state fails before cursor seal or backend update', async (
     gameplayType: 'test.animated',
     childComponents: [{
       key: 'model',
-      type: 'render.model@1',
+      type: 'render.model@2',
       properties: {
         modelResourceId: 'model/animated',
-        animation: { clipId: 'idle', startTick: 0, clock: 'simulation', loop: true },
+        materialOverrides: { tintRgba: 0xff00_00ff, opacity: 1, emissive: 0,
+          alphaMode: 'opaque', alphaCutoff: 0 },
       },
     }],
     resolveState(state) {
-      return { nodes: {}, components: { 'body/model': { animation: state.animation } } };
+      return { nodes: {}, components: { 'body/model': { materialOverrides: state.materialOverrides } } };
     },
   });
   const { runtime, fakeBackends } = await createHarness({
     resources: [{
-      id: 'model/animated', kind: 'model', url: './animated.glb', clipNames: ['idle'],
+      id: 'model/animated', kind: 'model', url: './animated.glb',
     }],
     prefabEntries: [prefab],
   });
   t.after(() => runtime.dispose());
   commitAuthority(runtime, () => runtime.authority.createNode({
     ...createCommand('py/animated', prefab.id),
-    state: { animation: { clipId: 'idle', startTick: 0, clock: 'simulation', loop: true } },
+    state: { materialOverrides: { tintRgba: 0xff00_00ff, opacity: 1, emissive: 0,
+      alphaMode: 'opaque', alphaCutoff: 0 } },
   }), { sourceTickDelta: 1 });
   await runtime.whenReady();
 
@@ -184,7 +189,7 @@ test('nested renderer state fails before cursor seal or backend update', async (
   const backendCallsBefore = fakeBackends[0].calls.length;
 
   expectAuthorityFailure(runtime, () => runtime.authority.setNodeState({
-    name: 'py/animated', state: { animation: { clipId: 7 } },
+    name: 'py/animated', state: { materialOverrides: { tintRgba: -1 } },
   }), 'display-component-properties-invalid');
 
   assert.deepEqual(runtime.summary().cursor, before.cursor);
@@ -197,7 +202,7 @@ test('invalid resource patch leaves RenderSystem dirty, draw, and lease state un
   const fake = createFakeRenderBackend();
   const leases = new Map();
   let leaseAcquisitions = 0; let leaseReleases = 0;
-  const resourceIds = (componentType, properties) => componentType === 'render.model@1'
+  const resourceIds = (componentType, properties) => componentType === 'render.model@2'
     ? [properties.modelResourceId] : [];
   const replaceLeases = (binding, nextIds) => {
     const previousIds = leases.get(binding) ?? [];
@@ -244,7 +249,7 @@ test('invalid resource patch leaves RenderSystem dirty, draw, and lease state un
     id: 'target.atomic-resource',
     gameplayType: 'test.atomic-resource',
     childComponents: [{
-      key: 'model', type: 'render.model@1', properties: { modelResourceId: 'model/good' },
+      key: 'model', type: 'render.model@2', properties: { modelResourceId: 'model/good' },
     }],
     resolveState(state) {
       return { nodes: {}, components: { 'body/model': { modelResourceId: state.modelResourceId } } };
@@ -345,6 +350,316 @@ test('replaceNodePrefab stages a private shadow scope and preserves authority ch
   assert.equal(runtime.currentView().getNode('py/child').parentName, 'py/root');
 });
 
+test('replacement onAttach sees the final root childNames including preserved authority children',
+  async (t) => {
+    let observedChildNames = null;
+    class AuthorityChildCandidateProbe extends BehaviourComponent {
+      static typeId = 'test.authority-child-candidate-probe@1';
+
+      onAttach(display) {
+        observedChildNames = [...display.nodes.require('py/candidate-root').childNames];
+      }
+    }
+    const original = emptyPrefab({
+      id: 'target.candidate-authority-old',
+      gameplayType: 'test.candidate-authority-old',
+      childName: 'old',
+    });
+    const replacement = definePrefab({
+      schema: PREFAB_DEFINITION_SCHEMA,
+      id: 'target.candidate-authority-new',
+      gameplayType: 'test.candidate-authority-new',
+      root: {
+        components: [{
+          key: 'probe', type: AuthorityChildCandidateProbe.typeId, properties: {},
+        }],
+        children: [{
+          localName: 'new', transform: IDENTITY, visible: true, components: [], children: [],
+        }],
+      },
+    });
+    const { runtime } = await createHarness({
+      configureComponents: (registry) => registry.register({
+        ComponentClass: AuthorityChildCandidateProbe,
+      }),
+      prefabEntries: [original, replacement],
+    });
+    t.after(() => runtime.dispose());
+    commitAuthority(runtime, () => {
+      runtime.authority.createNode(createCommand('py/candidate-root', original.id));
+      runtime.authority.createNode(createCommand(
+        'py/candidate-child', original.id, 'py/candidate-root',
+      ));
+    }, { sourceTickDelta: 1, commandCount: 2 });
+
+    commitAuthority(runtime, () => runtime.authority.replaceNodePrefab({
+      name: 'py/candidate-root', prefabId: replacement.id, state: {},
+    }), { sourceTickDelta: 1 });
+
+    const expected = ['prefab/py/candidate-root/new', 'py/candidate-child'];
+    assert.deepEqual(observedChildNames, expected);
+    assert.deepEqual(runtime.currentView().getNode('py/candidate-root').childNames, expected);
+    const scope = runtime._prefabInstantiator.getScope(
+      runtime._nodeIndex.require('py/candidate-root'),
+    );
+    assert.strictEqual(scope.componentContext, runtime._componentContext);
+    assert.equal(scope.shadowParent, null);
+    assert.equal(scope.shadowNodeIndex, null);
+  });
+
+test('shadow adoption uses the non-virtual live registration path for every component kind',
+  async (t) => {
+    let shadowMethodCalls = 0;
+    class ShadowBehaviour extends BehaviourComponent {
+      static typeId = 'test.shadow-behaviour@1';
+      static tickPhase = 'update';
+      _adoptContext = () => { shadowMethodCalls += 1; };
+      tick() {}
+    }
+    class ShadowPlayer extends AnimationPlayerComponent {
+      static typeId = 'test.shadow-player@1';
+      _adoptContext = () => { shadowMethodCalls += 1; };
+    }
+    class ShadowRender extends RenderComponent {
+      static typeId = 'render.shadow@1';
+      _adoptContext = () => { shadowMethodCalls += 1; };
+    }
+    const original = emptyPrefab({ id: 'target.adopt-old', gameplayType: 'test.adopt-old' });
+    const replacement = definePrefab({
+      schema: PREFAB_DEFINITION_SCHEMA,
+      id: 'target.adopt-new',
+      gameplayType: 'test.adopt-new',
+      root: {
+        components: [
+          { key: 'behaviour', type: ShadowBehaviour.typeId, properties: {} },
+          { key: 'animator', type: ShadowPlayer.typeId,
+            properties: { animationId: 'anim.shadow' } },
+        ],
+        children: [{
+          localName: 'body', transform: IDENTITY, visible: true,
+          components: [
+            { key: 'sprite', type: 'render.sprite@3', properties: {
+              textureResourceId: 'tex.shadow', width: 1, height: 1, frame: 0,
+            } },
+            { key: 'custom-render', type: ShadowRender.typeId, properties: {} },
+          ],
+          children: [],
+        }],
+      },
+    });
+    const animation = defineFrameAnimation({
+      id: 'anim.shadow', target: { node: 'body', component: 'sprite' },
+      frames: [0, 1], fps: 10, loop: true,
+    });
+    const { runtime } = await createHarness({
+      resources: [
+        { id: 'tex.shadow', kind: 'texture-atlas', url: './shadow.png', columns: 2, rows: 1 },
+        animation,
+      ],
+      configureComponents(registry) {
+        registry.register({ ComponentClass: ShadowBehaviour });
+        registry.register({
+          ComponentClass: ShadowPlayer,
+          normalizeProperties: (value) => Object.freeze({ animationId: value.animationId ?? null }),
+          resourceReferences: ({ animationId }) => animationId === null ? []
+            : [{ id: animationId, kinds: ['animation'] }],
+        });
+        registry.register({ ComponentClass: ShadowRender,
+          normalizeProperties: () => Object.freeze({}) });
+      },
+      prefabEntries: [original, replacement],
+    });
+    t.after(() => runtime.dispose());
+    commitAuthority(runtime, () => runtime.authority.createNode(
+      createCommand('py/adopt', original.id),
+    ), { sourceTickDelta: 1 });
+    commitAuthority(runtime, () => runtime.authority.replaceNodePrefab({
+      name: 'py/adopt', prefabId: replacement.id, state: {},
+    }), { sourceTickDelta: 1 });
+
+    const root = runtime._nodeIndex.require('py/adopt');
+    const body = runtime._nodeIndex.require('prefab/py/adopt/body');
+    const behaviour = root.requireComponent('behaviour');
+    const player = root.requireComponent('animator');
+    const render = body.requireComponent('custom-render');
+    assert.equal(shadowMethodCalls, 0);
+    assert.equal(runtime._scheduler._registered.has(behaviour), true);
+    assert.equal(runtime._animationSystem._players.has(player), true);
+    assert.equal(runtime._renderSystem._entries.has(render), true);
+  });
+
+test('replacement adoption failure restores the complete old live scope', async (t) => {
+  class AdoptionProbe extends BehaviourComponent {
+    static typeId = 'test.adoption-probe@1';
+    static tickPhase = 'update';
+    static allowMultiple = true;
+    tick() {}
+  }
+  const original = emptyPrefab({
+    id: 'target.atomic-adopt-old', gameplayType: 'test.atomic-adopt-old',
+    childComponents: [
+      { key: 'old', type: AdoptionProbe.typeId, properties: {} },
+      { key: 'model', type: 'render.model@2', properties: { modelResourceId: 'model/adopt' } },
+    ],
+  });
+  const replacement = emptyPrefab({
+    id: 'target.atomic-adopt-new', gameplayType: 'test.atomic-adopt-new',
+    childComponents: [
+      { key: 'model', type: 'render.model@2', properties: { modelResourceId: 'model/adopt' } },
+      { key: 'first', type: AdoptionProbe.typeId, properties: {} },
+      { key: 'fail', type: AdoptionProbe.typeId, properties: {} },
+    ],
+  });
+  const { runtime } = await createHarness({
+    resources: [{ id: 'model/adopt', kind: 'model', url: './adopt.glb' }],
+    configureComponents: (registry) => registry.register({ ComponentClass: AdoptionProbe }),
+    prefabEntries: [original, replacement],
+  });
+  t.after(() => runtime.dispose());
+  commitAuthority(runtime, () => runtime.authority.createNode(
+    createCommand('py/atomic-adopt', original.id),
+  ), { sourceTickDelta: 1 });
+  const oldRoot = runtime._nodeIndex.require('py/atomic-adopt');
+  const oldBody = runtime._nodeIndex.require('prefab/py/atomic-adopt/body');
+  const oldComponent = oldBody.requireComponent('old');
+  const oldRender = oldBody.requireComponent('model');
+  const originalAttached = runtime._componentAttached.bind(runtime);
+  const failure = new Error('live adoption rejected');
+  runtime._componentAttached = (component) => {
+    originalAttached(component);
+    if (component.key === 'fail') throw failure;
+  };
+
+  const cursor = nextCursor(runtime);
+  runtime.commitGate.begin(cursor);
+  let caught = null;
+  try {
+    runtime.authority.replaceNodePrefab({
+      name: 'py/atomic-adopt', prefabId: replacement.id, state: {},
+    });
+  } catch (error) { caught = error; }
+  runtime._componentAttached = originalAttached;
+  assert.strictEqual(caught, failure);
+  assert.strictEqual(runtime._nodeIndex.require('py/atomic-adopt'), oldRoot);
+  assert.strictEqual(runtime._nodeIndex.require('prefab/py/atomic-adopt/body'), oldBody);
+  assert.strictEqual(oldBody.requireComponent('old'), oldComponent);
+  assert.equal(oldComponent.disposed, false);
+  assert.equal(runtime._scheduler._registered.has(oldComponent), true);
+  assert.equal(runtime._renderSystem._entries.has(oldRender), true);
+  assert.equal([...runtime._scheduler._registered]
+    .some((component) => component.key === 'first' || component.key === 'fail'), false);
+  runtime.commitGate.fail(caught);
+});
+
+test('replacement adoption rollback restores interleaved Prefab and authority sibling order',
+  async (t) => {
+    class OrderAdoptionProbe extends BehaviourComponent {
+      static typeId = 'test.order-adoption-probe@1';
+      static allowMultiple = true;
+    }
+    const nested = emptyPrefab({
+      id: 'target.order-nested', gameplayType: 'test.order-nested', childName: null,
+    });
+    const original = definePrefab({
+      schema: PREFAB_DEFINITION_SCHEMA,
+      id: 'target.order-old',
+      gameplayType: 'test.order-old',
+      root: {
+        components: [],
+        children: [{
+          localName: 'fixed', transform: IDENTITY, visible: true, components: [], children: [],
+        }],
+      },
+      prefabSlots: [{
+        key: 'units',
+        parentLocalPath: null,
+        allowedPrefabIds: [nested.id],
+        maximumInstances: 2,
+      }],
+      resolveState(state) {
+        return {
+          prefabSlots: {
+            units: {
+              ...(state.alpha ? { alpha: { prefabId: nested.id } } : {}),
+              ...(state.bravo ? { bravo: { prefabId: nested.id } } : {}),
+            },
+          },
+        };
+      },
+    });
+    const replacement = definePrefab({
+      schema: PREFAB_DEFINITION_SCHEMA,
+      id: 'target.order-new',
+      gameplayType: 'test.order-new',
+      root: {
+        components: [
+          { key: 'first', type: OrderAdoptionProbe.typeId, properties: {} },
+          { key: 'fail', type: OrderAdoptionProbe.typeId, properties: {} },
+        ],
+        children: [],
+      },
+    });
+    const { runtime } = await createHarness({
+      configureComponents: (registry) => registry.register({
+        ComponentClass: OrderAdoptionProbe,
+      }),
+      prefabEntries: [original, replacement, nested],
+    });
+    t.after(() => runtime.dispose());
+    const rootName = 'py/order-root';
+    commitAuthority(runtime, () => runtime.authority.createNode({
+      ...createCommand(rootName, original.id), state: { alpha: false, bravo: false },
+    }), { sourceTickDelta: 1 });
+    commitAuthority(runtime, () => runtime.authority.createNode(
+      createCommand('py/order-a', nested.id, rootName),
+    ), { sourceTickDelta: 1 });
+    commitAuthority(runtime, () => runtime.authority.setNodeState({
+      name: rootName, state: { alpha: true, bravo: false },
+    }), { sourceTickDelta: 1 });
+    commitAuthority(runtime, () => runtime.authority.createNode(
+      createCommand('py/order-b', nested.id, rootName),
+    ), { sourceTickDelta: 1 });
+    commitAuthority(runtime, () => runtime.authority.setNodeState({
+      name: rootName, state: { alpha: true, bravo: true },
+    }), { sourceTickDelta: 1 });
+
+    const root = runtime._nodeIndex.require(rootName);
+    const baselineChildren = [...root._children];
+    const baselineNames = [
+      `prefab/${rootName}/fixed`,
+      'py/order-a',
+      `prefab/${rootName}/units/alpha`,
+      'py/order-b',
+      `prefab/${rootName}/units/bravo`,
+    ];
+    assert.deepEqual(baselineChildren.map((node) => node.name), baselineNames);
+
+    const originalAttached = runtime._componentAttached.bind(runtime);
+    const failure = new Error('injected ordered adoption failure');
+    runtime._componentAttached = (component) => {
+      originalAttached(component);
+      if (component.key === 'fail') throw failure;
+    };
+    let caught;
+    try {
+      caught = expectAuthorityFailure(runtime, () => runtime.authority.replaceNodePrefab({
+        name: rootName, prefabId: replacement.id, state: {},
+      }), Error);
+    } finally {
+      runtime._componentAttached = originalAttached;
+    }
+
+    assert.strictEqual(caught, failure);
+    assert.strictEqual(runtime._nodeIndex.require(rootName), root);
+    assert.deepEqual(root._children.map((node) => node.name), baselineNames);
+    for (let index = 0; index < baselineChildren.length; index += 1) {
+      assert.strictEqual(root._children[index], baselineChildren[index]);
+      assert.strictEqual(baselineChildren[index].parent, root);
+    }
+    assert.equal(runtime._nodeIndex.get(`prefab/${rootName}/units/alpha`), baselineChildren[2]);
+    assert.equal(runtime._nodeIndex.get(`prefab/${rootName}/units/bravo`), baselineChildren[4]);
+  });
+
 test('replacement shadow handlers cannot mutate live nodes through lookup capabilities', async (t) => {
   class EscapingBehaviour extends BehaviourComponent {
     static typeId = 'test.shadow-escape@1';
@@ -378,8 +693,8 @@ test('each RenderComponent owns a (nodeName, componentKey) backend binding', asy
   const prefab = emptyPrefab({
     id: 'target.rendered', gameplayType: 'test.rendered', childName: 'body',
     childComponents: [
-      { key: 'first', type: 'render.model@1', properties: { modelResourceId: 'model/a' } },
-      { key: 'second', type: 'render.model@1', properties: { modelResourceId: 'model/a' } },
+      { key: 'first', type: 'render.model@2', properties: { modelResourceId: 'model/a' } },
+      { key: 'second', type: 'render.model@2', properties: { modelResourceId: 'model/a' } },
     ],
   });
   const { runtime, fakeBackends } = await createHarness({
@@ -398,7 +713,7 @@ test('each RenderComponent owns a (nodeName, componentKey) backend binding', asy
 test('pending binding create cannot attach after its Node was removed', async (t) => {
   const prefab = emptyPrefab({
     id: 'target.pending', gameplayType: 'test.pending', childName: 'body',
-    childComponents: [{ key: 'model', type: 'render.model@1', properties: { modelResourceId: 'model/a' } }],
+    childComponents: [{ key: 'model', type: 'render.model@2', properties: { modelResourceId: 'model/a' } }],
   });
   const fake = createFakeRenderBackend({ asyncCreate: true });
   const { runtime } = await createHarness({
@@ -417,9 +732,9 @@ test('pending binding create cannot attach after its Node was removed', async (t
 
 test('same binding identity waits for a pending old create and its stale cleanup', async (t) => {
   const first = emptyPrefab({ id: 'target.pending-first', gameplayType: 'test.pending-first', childName: 'body',
-    childComponents: [{ key: 'model', type: 'render.model@1', properties: { modelResourceId: 'model/a' } }] });
+    childComponents: [{ key: 'model', type: 'render.model@2', properties: { modelResourceId: 'model/a' } }] });
   const second = emptyPrefab({ id: 'target.pending-second', gameplayType: 'test.pending-second', childName: 'body',
-    childComponents: [{ key: 'model', type: 'render.model@1', properties: { modelResourceId: 'model/a' } }] });
+    childComponents: [{ key: 'model', type: 'render.model@2', properties: { modelResourceId: 'model/a' } }] });
   const fake = createFakeRenderBackend({ asyncCreate: true });
   const { runtime } = await createHarness({
     resources: [{ id: 'model/a', kind: 'model', url: './a.glb' }],
@@ -458,9 +773,9 @@ test('an asynchronous null binding result makes renderer health fail closed', as
 
 test('same binding identity waits for asynchronous old destroy before replacement create', async (t) => {
   const first = emptyPrefab({ id: 'target.render-first', gameplayType: 'test.render-first', childName: 'body',
-    childComponents: [{ key: 'model', type: 'render.model@1', properties: { modelResourceId: 'model/a' } }] });
+    childComponents: [{ key: 'model', type: 'render.model@2', properties: { modelResourceId: 'model/a' } }] });
   const second = emptyPrefab({ id: 'target.render-second', gameplayType: 'test.render-second', childName: 'body',
-    childComponents: [{ key: 'model', type: 'render.model@1', properties: { modelResourceId: 'model/a' } }] });
+    childComponents: [{ key: 'model', type: 'render.model@2', properties: { modelResourceId: 'model/a' } }] });
   const fake = createFakeRenderBackend({ asyncDestroy: true });
   const { runtime } = await createHarness({
     resources: [{ id: 'model/a', kind: 'model', url: './a.glb' }],
@@ -632,6 +947,86 @@ test('backend rebuild preserves Node state and remounts declarative bindings', a
   assert.deepEqual(runtime.currentView().getNode('py/stable').localTransform, before);
   assert.equal(fakes.length, 2);
   assert(fakes[1].bindings.has(JSON.stringify(['scene/main/camera', 'camera'])));
+});
+
+test('fixed panels send the same Node world matrix to the backend before and after rebuild', async (t) => {
+  const prefab = emptyPrefab({ childComponents: [
+    { key: 'facing', type: 'behavior.billboard@2', properties: { mode: 'continuous', axisMode: 'y-axis' } },
+    { key: 'sprite', type: 'render.sprite@3', properties: { textureResourceId: 'texture/card', width: 2, height: 3 } },
+  ] });
+  const { runtime, frames, fakeBackends } = await createHarness({
+    prefabEntries: [prefab], resources: [{ id: 'texture/card', kind: 'texture', url: './card.png' }],
+    bootstrapAuthority(authority) {
+      authority.createNode({ ...createCommand('py/card'), transform: {
+        position: [4, 2, -3], rotationXyzw: [0, Math.SQRT1_2, 0, Math.SQRT1_2], scale: [3, 1, 1],
+      } });
+    },
+  });
+  t.after(() => runtime.dispose());
+  runtime.start(); await runtime.whenReady(); frames.step();
+  const name = 'prefab/py/card/body';
+  const expected = Array.from(runtime.currentView().getWorldTransform(name).matrix);
+  for (const [offset, axis] of [[4, [0, 1, 0]], [8, [0, 0, 1]]]) {
+    const values = expected.slice(offset, offset + 3); const length = Math.hypot(...values);
+    values.forEach((value, index) => assert.ok(Math.abs(value / length - axis[index]) < 1e-12));
+  }
+  const assertBinding = () => {
+    const binding = fakeBackends.at(-1).bindings.get(JSON.stringify([name, 'sprite']));
+    assert.deepEqual(Array.from(binding.patch.worldMatrix), expected);
+    assert.deepEqual(binding.patch.panelAnchorWorld, [4, 2, -3]);
+    assert.equal(runtime.summary().cursor.sourceTick, 0);
+  };
+  assertBinding();
+  frames.step(1000); assertBinding();
+  await runtime.rebuildRenderBackend(); await runtime.whenReady(); frames.step(); assertBinding();
+});
+
+test('sprite projection uses its fixed ancestor footpoint across authority moves and backend rebuild', async (t) => {
+  const sprite = { key: 'sprite', type: 'render.sprite@3', properties: {
+    textureResourceId: 'texture/card', width: 2, height: 3,
+  } };
+  const prefab = definePrefab({
+    schema: PREFAB_DEFINITION_SCHEMA, id: 'target.test.item', gameplayType: 'test.item',
+    root: { components: [], children: [
+      { localName: 'body', transform: { ...IDENTITY, position: [1, 0, 0] },
+        components: [{ key: 'facing', type: 'behavior.billboard@2',
+          properties: { mode: 'continuous', axisMode: 'y-axis' } }],
+        children: [{ localName: 'card', transform: { ...IDENTITY, position: [0.6, 1.2, 0] },
+          components: [sprite], children: [] }] },
+      { localName: 'ground', components: [sprite], children: [] },
+    ] },
+  });
+  const { runtime, frames, fakeBackends } = await createHarness({
+    prefabEntries: [prefab], resources: [{ id: 'texture/card', kind: 'texture', url: './card.png' }],
+    bootstrapAuthority(authority) {
+      authority.createNode({ ...createCommand('py/card'), transform: {
+        position: [4, 2, -3], rotationXyzw: [0, Math.SQRT1_2, 0, Math.SQRT1_2], scale: [2, 2, 2],
+      } });
+    },
+  });
+  t.after(() => runtime.dispose());
+  runtime.start(); await runtime.whenReady(); frames.step();
+  const assertProjection = () => {
+    const view = runtime.currentView();
+    const bindings = fakeBackends.at(-1).bindings;
+    const card = bindings.get(JSON.stringify(['prefab/py/card/body/card', 'sprite']));
+    const foot = view.getWorldTransform('prefab/py/card/body');
+    const center = view.getWorldTransform('prefab/py/card/body/card');
+    assert.deepEqual(card.patch.panelAnchorWorld, Array.from(foot.position));
+    assert.notDeepEqual(card.patch.panelAnchorWorld, Array.from(center.position));
+    assert.deepEqual(Array.from(card.patch.worldMatrix), Array.from(center.matrix));
+    assert.equal(bindings.get(JSON.stringify(['prefab/py/card/ground', 'sprite'])).patch.panelAnchorWorld, null);
+    return card.patch.panelAnchorWorld;
+  };
+  const initial = assertProjection();
+  commitAuthority(runtime, () => runtime.authority.setNodeTransform({
+    name: 'py/card', transform: { ...IDENTITY, position: [9, 2, -3] },
+  }), { sourceTickDelta: 1 });
+  frames.step();
+  const moved = assertProjection();
+  assert.notDeepEqual(initial, moved);
+  await runtime.rebuildRenderBackend(); await runtime.whenReady(); frames.step();
+  assert.deepEqual(assertProjection(), moved);
 });
 
 test('rebuild cancels a never-settling old create before draining backend work', async (t) => {

@@ -1,5 +1,6 @@
 import { cloneAndFreeze, exactKeys, isPlainRecord, nonemptyString, safeInteger } from '../internal.js';
 import { fail } from '../runtime/health.js';
+import { compilePrefabCatalog } from '../resource/prefab-compiler.js';
 
 export const DISPLAY_CATALOG_MANIFEST_SCHEMA = 'scene-engine-display-catalog-manifest@1';
 const SCENE_CATALOG_HASH_SCHEMA = 'scene-engine-scene-catalog-input@1';
@@ -104,6 +105,7 @@ export function buildDisplayCatalogManifest({
       || typeof componentRegistry?.catalogEntries !== 'function') {
     fail('display-catalog-registry-invalid');
   }
+  compilePrefabCatalog({ prefabRegistry, componentRegistry, resourceRegistry });
   return defineDisplayCatalogManifest({
     schema: DISPLAY_CATALOG_MANIFEST_SCHEMA,
     scenes: [...sceneRegistry.values()].map((definition) => definition.describe()),

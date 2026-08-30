@@ -38,6 +38,13 @@ export {
 export { BillboardComponent } from './behaviours/billboard.js';
 export { LookAtComponent } from './behaviours/look-at.js';
 
+export {
+  ANIMATION_RESOURCE_SCHEMA,
+  defineAnimation,
+  defineFrameAnimation,
+} from './animation/animation-resource.js';
+export { AnimationPlayerComponent } from './animation/animation-player.js';
+
 export { SCENE_DEFINITION_SCHEMA, SceneDefinition, defineScene } from './resource/scene-definition.js';
 export { PREFAB_DEFINITION_SCHEMA, PrefabDefinition, definePrefab } from './resource/prefab-definition.js';
 export {

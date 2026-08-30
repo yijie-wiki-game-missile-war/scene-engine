@@ -81,30 +81,12 @@ function normalizeModelOverrides(value) {
   ]));
 }
 
-function normalizeModelAnimation(value, descriptor) {
-  if (value === null) return null;
-  const record = exactKeys(value, ['clipId'], ['startTick', 'clock', 'loop'], PROPERTY_ERROR);
-  const animation = {
-    clipId: nonemptyString(record.clipId, PROPERTY_ERROR),
-    startTick: optional(record, 'startTick', nonnegativeInteger, 0),
-    clock: optional(record, 'clock', (entry) => enumValue(
-      entry, ['simulation', 'visual'], PROPERTY_ERROR), 'simulation'),
-    loop: optional(record, 'loop', (entry) => booleanValue(entry, PROPERTY_ERROR), true),
-  };
-  if (descriptor !== null) {
-    if ((descriptor.lodUrls?.length ?? 0) > 0) fail('display-model-lod-animation-unsupported');
-    if (!Array.isArray(descriptor.clipNames)) fail('display-model-animation-catalog-required');
-    if (!descriptor.clipNames.includes(animation.clipId)) fail('display-model-animation-clip-invalid');
-  }
-  return animation;
-}
-
 function normalizeModel(value, resourceRegistry) {
   const record = exactKeys(value, ['modelResourceId'], [
-    'materialOverrides', 'castShadow', 'receiveShadow', 'renderOrder', 'pickable', 'animation',
+    'materialOverrides', 'castShadow', 'receiveShadow', 'renderOrder', 'pickable',
   ], PROPERTY_ERROR);
   const modelResourceId = resourceId(record.modelResourceId);
-  const descriptor = descriptorFor(resourceRegistry, modelResourceId);
+  descriptorFor(resourceRegistry, modelResourceId);
   return {
     modelResourceId,
     materialOverrides: optional(record, 'materialOverrides', normalizeModelOverrides, {}),
@@ -112,7 +94,6 @@ function normalizeModel(value, resourceRegistry) {
     receiveShadow: optional(record, 'receiveShadow', (entry) => booleanValue(entry, PROPERTY_ERROR), false),
     renderOrder: optional(record, 'renderOrder', (entry) => safeInteger(entry, PROPERTY_ERROR), 0),
     pickable: optional(record, 'pickable', (entry) => booleanValue(entry, PROPERTY_ERROR), false),
-    animation: normalizeModelAnimation(record.animation ?? null, descriptor),
   };
 }
 
@@ -139,33 +120,9 @@ function validateAtlasFrame(descriptor, frame) {
   }
 }
 
-function normalizeFlipbook(value, descriptor) {
-  if (value === null) return null;
-  if (descriptor !== null && descriptor.kind !== 'texture-atlas') {
-    fail('display-sprite-flipbook-atlas-required');
-  }
-  const record = exactKeys(value, ['frameCount', 'frameTicks'], [
-    'startFrame', 'loop', 'clock', 'startTick',
-  ], PROPERTY_ERROR);
-  const result = {
-    startFrame: optional(record, 'startFrame', nonnegativeInteger, 0),
-    frameCount: positiveInteger(record.frameCount),
-    frameTicks: positiveInteger(record.frameTicks),
-    loop: optional(record, 'loop', (entry) => booleanValue(entry, PROPERTY_ERROR), true),
-    clock: optional(record, 'clock', (entry) => enumValue(
-      entry, ['simulation', 'visual'], PROPERTY_ERROR), 'simulation'),
-    startTick: optional(record, 'startTick', nonnegativeInteger, 0),
-  };
-  if (descriptor !== null
-      && result.startFrame + result.frameCount > descriptor.columns * descriptor.rows) {
-    fail(PROPERTY_ERROR);
-  }
-  return result;
-}
-
 function normalizeSprite(value, resourceRegistry) {
   const record = exactKeys(value, ['textureResourceId', 'width', 'height'], [
-    'material', 'alpha', 'frame', 'flipbook', 'renderOrder', 'pickable',
+    'material', 'alpha', 'frame', 'renderOrder', 'pickable',
   ], PROPERTY_ERROR);
   const textureResourceId = resourceId(record.textureResourceId);
   const descriptor = descriptorFor(resourceRegistry, textureResourceId);
@@ -178,7 +135,6 @@ function normalizeSprite(value, resourceRegistry) {
     material: normalizeMaterial(record.material ?? {}, false),
     alpha: optional(record, 'alpha', unit, 1),
     frame,
-    flipbook: normalizeFlipbook(record.flipbook ?? null, descriptor),
     renderOrder: optional(record, 'renderOrder', (entry) => safeInteger(entry, PROPERTY_ERROR), 0),
     pickable: optional(record, 'pickable', (entry) => booleanValue(entry, PROPERTY_ERROR), false),
   };
@@ -252,19 +208,9 @@ function normalizeParticleParameters(value, descriptor) {
   };
 }
 
-function normalizeParticleAnimation(value) {
-  if (value === null || value === undefined) return { startTick: 0, clock: 'visual' };
-  const record = exactKeys(value, [], ['startTick', 'clock'], PROPERTY_ERROR);
-  return {
-    startTick: optional(record, 'startTick', nonnegativeInteger, 0),
-    clock: optional(record, 'clock', (entry) => enumValue(
-      entry, ['simulation', 'visual'], PROPERTY_ERROR), 'visual'),
-  };
-}
-
 function normalizeParticle(value, resourceRegistry) {
   const record = exactKeys(value, ['particleResourceId'], [
-    'intensity', 'parameters', 'animation', 'renderOrder',
+    'intensity', 'parameters', 'renderOrder',
   ], PROPERTY_ERROR);
   const particleResourceId = resourceId(record.particleResourceId);
   const descriptor = descriptorFor(resourceRegistry, particleResourceId);
@@ -272,7 +218,6 @@ function normalizeParticle(value, resourceRegistry) {
     particleResourceId,
     intensity: optional(record, 'intensity', nonnegative, 1),
     parameters: normalizeParticleParameters(record.parameters ?? {}, descriptor),
-    animation: normalizeParticleAnimation(record.animation),
     renderOrder: optional(record, 'renderOrder', (entry) => safeInteger(entry, PROPERTY_ERROR), 0),
   };
 }
@@ -327,11 +272,11 @@ function normalizeLight(value, directional = false, spot = false) {
   return result;
 }
 
-export class ModelRendererComponent extends RenderComponent { static typeId = 'render.model@1'; }
+export class ModelRendererComponent extends RenderComponent { static typeId = 'render.model@2'; }
 export class MeshRendererComponent extends RenderComponent { static typeId = 'render.mesh@1'; }
-export class SpriteRendererComponent extends RenderComponent { static typeId = 'render.sprite@1'; }
+export class SpriteRendererComponent extends RenderComponent { static typeId = 'render.sprite@3'; }
 export class SurfaceRendererComponent extends RenderComponent { static typeId = 'render.surface@1'; }
-export class ParticleRendererComponent extends RenderComponent { static typeId = 'render.particle@1'; }
+export class ParticleRendererComponent extends RenderComponent { static typeId = 'render.particle@2'; }
 export class CameraComponent extends RenderComponent { static typeId = 'render.camera@1'; static allowMultiple = false; }
 export class BackgroundComponent extends RenderComponent { static typeId = 'render.background@1'; static allowMultiple = false; }
 export class AmbientLightComponent extends RenderComponent { static typeId = 'render.ambient-light@1'; }

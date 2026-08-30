@@ -1,6 +1,7 @@
 # Three RenderBackend 0.9.2 texture-orientation patch
 
-> **Historical patch record only:** the active renderer version is listed in `README.md`; this file preserves 0.9.2 evidence.
+> **Historical patch and verification record only:** the active renderer version is listed in
+> `docs/display.md`; this file records the 0.9.2 change.
 
 
 Release date: 2026-08-25
@@ -33,5 +34,5 @@ texture flag, and checks bitmap disposal.
 - Browser smoke: city, building-card and weapon-card planes render upright
 
 Scene Engine `dist` and Arts `vendor` contain byte-identical copies of the
-0.9.2 renderer artifact. The 0.9.1 closeout report remains historical evidence
-for its original tuple and hashes.
+0.9.2 renderer artifact. Current renderer facts come from `docs/display.md` and
+`docs/render-runtime.md`.

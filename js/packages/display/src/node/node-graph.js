@@ -2,6 +2,12 @@ import { composeWorldTransform } from '../math/transform.js';
 import { AUTHORITY_PREFIX, AUTHORITY_ROOT_NAME, SCENE_ROOT_NAME } from './node-name.js';
 import { fail } from '../runtime/health.js';
 
+const DETACHED_FORESTS = new WeakSet();
+
+function sameNodeSequence(left, right) {
+  return left.length === right.length && left.every((node, index) => node === right[index]);
+}
+
 export class NodeGraph {
   constructor({ nodeIndex, maximumDepth = 128, onDirty = null,
     onWorldTransform = null, onVisibility = null }) {
@@ -59,6 +65,24 @@ export class NodeGraph {
     this.markVisibilityDirty(node);
   }
 
+  /** Package-private rollback helper; only reorders one unchanged attached child set. */
+  restoreChildOrder(parent, children) {
+    this._requireAttached(parent);
+    if (!Array.isArray(children) || children.length !== parent._children.length) {
+      fail('display-node-forest-invalid');
+    }
+    const expected = new Set(children);
+    if (expected.size !== children.length) fail('display-node-forest-invalid');
+    for (const child of children) {
+      this._requireAttached(child);
+      if (child.parent !== parent) fail('display-node-forest-invalid');
+    }
+    if (parent._children.some((child) => !expected.has(child))) {
+      fail('display-node-forest-invalid');
+    }
+    parent._children.splice(0, parent._children.length, ...children);
+  }
+
   detach(node) {
     this._requireAttached(node);
     if (node._children.length !== 0) fail('display-node-has-children');
@@ -70,6 +94,83 @@ export class NodeGraph {
     node._setGraph(null);
     this._transformDirtyRoots.delete(node);
     this._visibilityDirtyRoots.delete(node);
+  }
+
+  /** Package-private transactional detach for a complete Node forest. */
+  detachForest(nodes) {
+    if (!Array.isArray(nodes) || nodes.length === 0) fail('display-node-forest-invalid');
+    const forest = new Set(nodes);
+    if (forest.size !== nodes.length) fail('display-node-forest-invalid');
+    const originalParents = new Map();
+    const parentChildren = new Map();
+    for (const node of nodes) {
+      this._requireAttached(node);
+      if (node.parent === null) fail('display-node-forest-invalid');
+      for (const child of node._children) {
+        if (!forest.has(child)) fail('display-node-forest-invalid');
+      }
+      originalParents.set(node, node.parent);
+      if (!parentChildren.has(node.parent)) {
+        parentChildren.set(node.parent, [...node.parent._children]);
+      }
+    }
+    const token = {
+      graph: this,
+      nodes: [...nodes],
+      forest,
+      originalParents,
+      parentChildren,
+      transformDirtyRoots: new Set(this._transformDirtyRoots),
+      visibilityDirtyRoots: new Set(this._visibilityDirtyRoots),
+      active: true,
+    };
+    DETACHED_FORESTS.add(token);
+
+    for (const [parent, children] of parentChildren) {
+      parent._children.splice(0, parent._children.length,
+        ...children.filter((child) => !forest.has(child)));
+    }
+    for (const node of nodes) {
+      node._setParent(null);
+      node._setGraph(null);
+      this._transformDirtyRoots.delete(node);
+      this._visibilityDirtyRoots.delete(node);
+    }
+    return token;
+  }
+
+  restoreForest(token) {
+    this._requireForestToken(token);
+    for (const node of token.nodes) {
+      this._requireRegistered(node);
+      if (node._graph !== null || node.parent !== null) fail('display-node-forest-invalid');
+    }
+    for (const [parent, children] of token.parentChildren) {
+      if (token.forest.has(parent)) {
+        this._requireRegistered(parent);
+        if (parent._graph !== null || parent.parent !== null) fail('display-node-forest-invalid');
+      } else {
+        this._requireAttached(parent);
+      }
+      const remaining = children.filter((child) => !token.forest.has(child));
+      if (!sameNodeSequence(parent._children, remaining)) fail('display-node-forest-invalid');
+    }
+
+    for (const [parent, children] of token.parentChildren) {
+      parent._children.splice(0, parent._children.length, ...children);
+    }
+    for (const node of token.nodes) {
+      node._setParent(token.originalParents.get(node));
+      node._setGraph(this);
+    }
+    this._transformDirtyRoots = new Set(token.transformDirtyRoots);
+    this._visibilityDirtyRoots = new Set(token.visibilityDirtyRoots);
+    token.active = false;
+  }
+
+  commitDetachedForest(token) {
+    this._requireForestToken(token);
+    token.active = false;
   }
 
   markTransformDirty(node) {
@@ -156,6 +257,11 @@ export class NodeGraph {
   _requireAttached(node) {
     this._requireRegistered(node);
     if (node._graph !== this) fail('display-node-detached');
+  }
+  _requireForestToken(token) {
+    if (!token || !DETACHED_FORESTS.has(token) || token.graph !== this || !token.active) {
+      fail('display-node-forest-invalid');
+    }
   }
   _validateSameScene(left, right) {
     if (left._sceneToken !== right._sceneToken) fail('display-node-scene-mismatch');

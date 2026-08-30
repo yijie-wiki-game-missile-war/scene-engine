@@ -20,6 +20,8 @@ package_tarball_files = verify_cutover.package_tarball_files
 require_same_package_files = verify_cutover.require_same_package_files
 source_package_files = verify_cutover.source_package_files
 verify_npm_file_install = verify_cutover.verify_npm_file_install
+release_source_archive_files = verify_cutover.release_source_archive_files
+verify_python_wheel_metadata = verify_cutover.verify_python_wheel_metadata
 verify_python_wheel_source = verify_cutover.verify_python_wheel_source
 
 
@@ -51,11 +53,20 @@ def _write_source_package(root: Path) -> dict[str, bytes]:
     return files
 
 
-def _write_wheel(path: Path, files: dict[str, bytes]) -> None:
+def _write_wheel(
+    path: Path,
+    files: dict[str, bytes],
+    *,
+    metadata: bytes = b"ignored metadata\n",
+    metadata_path: str = "scene_engine-0.9.0.dist-info/METADATA",
+    extra_entries: dict[str, bytes] | None = None,
+) -> None:
     with zipfile.ZipFile(path, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
         for relative, contents in files.items():
             archive.writestr(f"scene_engine/{relative}", contents)
-        archive.writestr("scene_engine-0.9.0.dist-info/METADATA", b"ignored metadata\n")
+        archive.writestr(metadata_path, metadata)
+        for relative, contents in (extra_entries or {}).items():
+            archive.writestr(relative, contents)
 
 
 def test_package_tarball_is_closed_against_engine_source(tmp_path: Path) -> None:
@@ -176,3 +187,89 @@ def test_python_wheel_rejects_stale_package_files_but_ignores_dist_info(tmp_path
 
     with pytest.raises(AssertionError, match=r"unexpected=\['scene.py'\]"):
         verify_python_wheel_source(wheel, source_root)
+
+
+def test_python_wheel_metadata_closes_embedded_readme(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    readme = b"# Current release\n\nDisplay 0.7 / Renderer 0.11\n"
+    (tmp_path / "README.md").write_bytes(readme)
+    monkeypatch.setattr(verify_cutover, "ROOT", tmp_path)
+    wheel = tmp_path / "scene_engine-0.9.0-py3-none-any.whl"
+    headers = (
+        b"Metadata-Version: 2.4\n"
+        b"Name: scene-engine\n"
+        b"Version: 0.9.0\n"
+        b"Summary: Server-authoritative fixed-step runtime and deterministic Display projection publication\n"
+        b"Requires-Python: >=3.10\n"
+        b"Description-Content-Type: text/markdown\n"
+    )
+    _write_wheel(wheel, {"__init__.py": b""}, metadata=headers + b"\n" + readme)
+
+    verify_python_wheel_metadata(wheel)
+
+    _write_wheel(
+        wheel,
+        {"__init__.py": b""},
+        metadata=headers + b"\n# Stale release\n\nDisplay 0.6 / Renderer 0.10\n",
+    )
+    with pytest.raises(AssertionError, match="README metadata differs"):
+        verify_python_wheel_metadata(wheel)
+
+    spoofed = (
+        b"Metadata-Version: 2.4\n"
+        b"X-Name: scene-engine\n"
+        b"X-Version: 0.9.0\n"
+        b"Summary: Server-authoritative fixed-step runtime and deterministic Display projection publication\n"
+        b"Requires-Python: >=3.10\n"
+        b"Description-Content-Type: text/markdown\n\n"
+        + readme
+    )
+    _write_wheel(wheel, {"__init__.py": b""}, metadata=spoofed)
+    with pytest.raises(AssertionError, match="header set is not exact"):
+        verify_python_wheel_metadata(wheel)
+
+    _write_wheel(
+        wheel,
+        {"__init__.py": b""},
+        metadata=headers + b"\n" + readme,
+        metadata_path="unrelated-0.9.0.dist-info/METADATA",
+    )
+    with pytest.raises(AssertionError, match="dist-info identity mismatch"):
+        verify_python_wheel_metadata(wheel)
+
+    _write_wheel(
+        wheel,
+        {"__init__.py": b""},
+        metadata=headers + b"Requires-Dist: unwanted-dependency\n\n" + readme,
+    )
+    with pytest.raises(AssertionError, match="header set is not exact"):
+        verify_python_wheel_metadata(wheel)
+
+    _write_wheel(
+        wheel,
+        {"__init__.py": b""},
+        metadata=headers + b"\n" + readme,
+        extra_entries={"unrelated-1.0.dist-info/WHEEL": b"Wheel-Version: 1.0\n"},
+    )
+    with pytest.raises(AssertionError, match="dist-info identity mismatch"):
+        verify_python_wheel_metadata(wheel)
+
+
+def test_release_source_rejects_an_allowlist_root_symlink(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "payload.md").write_text("outside\n", encoding="utf-8")
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "docs").symlink_to(outside, target_is_directory=True)
+    monkeypatch.setattr(verify_cutover, "ROOT", root)
+    monkeypatch.setattr(verify_cutover, "SOURCE_ARCHIVE_DIRECTORIES", ("docs",))
+    monkeypatch.setattr(verify_cutover, "SOURCE_ARCHIVE_FILES", ())
+
+    with pytest.raises(AssertionError, match="release source contains a symlink"):
+        release_source_archive_files()

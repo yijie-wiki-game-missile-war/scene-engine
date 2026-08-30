@@ -74,6 +74,28 @@ test('Promise-returning handlers fail attach, consume rejection, and do not stay
   assert.deepEqual(unhandled, []);
 });
 
+test('a component disposed inside onAttach is never resurrected or registered', () => {
+  let registrations = 0;
+  const disposalReasons = [];
+  class SelfDisposingBehaviour extends BehaviourComponent {
+    static typeId = 'test.self-disposing@1';
+    onAttach() { this.dispose('inside-attach'); }
+    onDispose(_display, reason) { disposalReasons.push(reason); }
+  }
+  const component = new SelfDisposingBehaviour({ key: 'self-disposing', properties: {} });
+  const node = new Node({ name: 'scene/main/node', sceneToken: {}, transform: IDENTITY });
+  node.addComponent(component);
+  const context = componentContext(node, {
+    componentAttached() { registrations += 1; },
+  });
+
+  assert.throws(() => component.attach(node, context), { code: 'display-component-disposed' });
+  assert.equal(component.disposed, true);
+  assert.equal(component.node, null);
+  assert.equal(registrations, 0);
+  assert.deepEqual(disposalReasons, ['attach-rollback']);
+});
+
 test('Behaviour hooks receive only read-only Display and Node views', () => {
   let received = null;
   class CapabilityProbe extends BehaviourComponent {
@@ -126,6 +148,52 @@ test('Registry rejects final overrides and RenderComponent handlers', () => {
     { code: 'display-component-final-method-override' });
   assert.throws(() => registry.register({ ComponentClass: BadRender }),
     { code: 'display-render-component-handler-forbidden' });
+});
+
+test('final Component methods reject class fields, constructor shadows, and runtime assignment', () => {
+  class FieldShadow extends BehaviourComponent {
+    static typeId = 'test.field-shadow@1';
+    setAnimation = () => 'bypass';
+  }
+  assert.throws(() => new FieldShadow({ key: 'field', properties: {} }), TypeError);
+
+  class ConstructorShadow extends BehaviourComponent {
+    static typeId = 'test.constructor-shadow@1';
+    constructor(options) {
+      super(options);
+      Object.defineProperty(this, 'attach', { value() {} });
+    }
+  }
+  assert.throws(() => new ConstructorShadow({ key: 'constructor', properties: {} }), TypeError);
+
+  const component = new ProbeBehaviour({ key: 'locked', properties: {} });
+  for (const name of ['attach', 'setEnabled', 'setAnimation', 'dispose']) {
+    const descriptor = Object.getOwnPropertyDescriptor(component, name);
+    assert.equal(descriptor.writable, false, name);
+    assert.equal(descriptor.configurable, false, name);
+    assert.throws(() => Object.defineProperty(component, name, { value() {} }), TypeError, name);
+  }
+  assert.equal(Object.isFrozen(Object.getPrototypeOf(Object.getPrototypeOf(
+    Object.getPrototypeOf(component)))), true,
+    'the shared Component prototype is immutable');
+});
+
+test('setEnabled restores the prior value when its registration callback rejects', () => {
+  const failure = new Error('registration rejected');
+  const observed = [];
+  const component = new ProbeBehaviour({ key: 'probe', properties: {} });
+  const node = new Node({ name: 'scene/main/node', sceneToken: {}, transform: IDENTITY });
+  node.addComponent(component);
+  component.attach(node, componentContext(node, {
+    componentEnabledChanged(value) {
+      observed.push(value.enabled);
+      if (!value.enabled) throw failure;
+    },
+  }));
+
+  assert.throws(() => component.setEnabled(false), (error) => error === failure);
+  assert.equal(component.enabled, true);
+  assert.deepEqual(observed, [false, true]);
 });
 
 test('one Node rejects two transform-driving components', () => {

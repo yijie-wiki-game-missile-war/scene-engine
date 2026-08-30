@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Scene Engine browser display benchmark</title>
+  <style>
+    html, body, #host { width: 100%; height: 100%; margin: 0; overflow: hidden; }
+    canvas { display: block; width: 100%; height: 100%; }
+  </style>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "/node_modules/three/build/three.module.js",
+        "three/addons/": "/node_modules/three/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body data-state="running">
+  <div id="host"><canvas id="canvas"></canvas></div>
+  <script type="module">
+    import {
+      PREFAB_DEFINITION_SCHEMA,
+      SCENE_DEFINITION_SCHEMA,
+      createComponentRegistry,
+      createDisplayRuntime,
+      createPrefabRegistry,
+      createResourceRegistry,
+      createSceneRegistry,
+      definePrefab,
+      defineScene,
+    } from '/js/packages/display/src/index.js';
+    import { createThreeRenderBackend } from '/js/packages/renderer-three/src/index.js';
+
+    const params = new URLSearchParams(location.search);
+    const bindingCount = positiveInteger(params.get('bindings') ?? '500', 'bindings');
+    const ticks = positiveInteger(params.get('ticks') ?? '60', 'ticks');
+    const updateRatio = boundedRatio(params.get('updateRatio') ?? '0.01');
+    const identity = Object.freeze({
+      position: Object.freeze([0, 0, 0]),
+      rotationXyzw: Object.freeze([0, 0, 0, 1]),
+      scale: Object.freeze([1, 1, 1]),
+    });
+    const profile = Object.freeze({
+      drawMode: 'requested',
+      maximumPixelRatio: 1,
+      clearRgba: 0x0810_18ff,
+      antialias: false,
+      alpha: false,
+      shadows: false,
+      toneMapping: 'none',
+    });
+    class BrowserFrameAdapter {
+      constructor() {
+        this.nextIdentity = 1;
+        this.callbacks = new Map();
+      }
+      request(callback) {
+        const identity = this.nextIdentity;
+        this.nextIdentity += 1;
+        this.callbacks.set(identity, callback);
+        return identity;
+      }
+      cancel(identity) { this.callbacks.delete(identity); }
+      now() { return performance.now(); }
+      step() {
+        const callbacks = [...this.callbacks.values()];
+        this.callbacks.clear();
+        const now = performance.now();
+        for (const callback of callbacks) callback(now);
+        return callbacks.length;
+      }
+    }
+
+    const backends = [];
+    const healthEvents = [];
+    const frames = new BrowserFrameAdapter();
+    let runtime = null;
+    try {
+      const resources = createResourceRegistry([
+        {
+          id: 'benchmark/triangle', kind: 'mesh',
+          positions: [-0.45, -0.45, 0, 0.45, -0.45, 0, 0, 0.45, 0],
+          indices: [0, 1, 2],
+        },
+        {
+          id: 'benchmark/material', kind: 'material', family: 'material.standard',
+          properties: {
+            tintRgba: 0x66cc_ffff, opacity: 1, emissive: 0,
+            alphaMode: 'opaque', alphaCutoff: 0,
+          },
+        },
+      ]);
+      const prefab = definePrefab({
+        schema: PREFAB_DEFINITION_SCHEMA,
+        id: 'benchmark/static-mesh',
+        gameplayType: 'benchmark.static-mesh',
+        root: {
+          components: [],
+          children: [{
+            localName: 'visual', transform: identity, visible: true,
+            components: [{
+              key: 'mesh', type: 'render.mesh@1',
+              properties: {
+                meshResourceId: 'benchmark/triangle',
+                materialResourceId: 'benchmark/material',
+                castShadow: false, receiveShadow: false, renderOrder: 0, pickable: false,
+              },
+            }],
+            children: [],
+          }],
+        },
+      });
+      const scene = defineScene({
+        schema: SCENE_DEFINITION_SCHEMA,
+        id: 'benchmark',
+        sceneProfile: 'benchmark.browser-webgl',
+        rendererProfile: profile,
+        activeCameraLocalName: 'camera',
+        nodes: [{
+          localName: 'camera', parentLocalName: null,
+          transform: {
+            position: [0, 0, Math.max(50, Math.sqrt(bindingCount) * 1.2)],
+            rotationXyzw: [0, 0, 0, 1], scale: [1, 1, 1],
+          },
+          components: [{
+            key: 'camera', type: 'render.camera@1',
+            properties: { projection: 'perspective', fovYDegrees: 55, near: 0.1, far: 100_000 },
+          }],
+        }],
+        prefabInstances: [],
+      });
+      const runtimeStarted = performance.now();
+      runtime = createDisplayRuntime({
+        hostElement: document.querySelector('#host'),
+        canvas: document.querySelector('#canvas'),
+        sceneRegistry: createSceneRegistry([scene]),
+        prefabRegistry: createPrefabRegistry([prefab]),
+        resourceRegistry: resources,
+        componentRegistry: createComponentRegistry(),
+        authorityStateSchemas: [{
+          gameplayType: prefab.gameplayType,
+          schemaId: 'benchmark.static-mesh.state@1',
+          revision: 1,
+        }],
+        createRenderBackend(options) {
+          const backend = createThreeRenderBackend(options);
+          backends.push(backend);
+          return backend;
+        },
+        frameAdapter: frames,
+        onHealth: (event) => healthEvents.push(event),
+      });
+      const constructedMs = performance.now() - runtimeStarted;
+      const installStarted = performance.now();
+      runtime.installScene({ sceneName: 'benchmark' });
+      const columns = Math.ceil(Math.sqrt(bindingCount));
+      const expectedTransforms = Array.from(
+        { length: bindingCount },
+        (_, index) => transform(index, 0, columns),
+      );
+      for (let index = 0; index < bindingCount; index += 1) {
+        runtime.authority.createNode({
+          name: nodeName(index), parentName: null, prefabId: prefab.id,
+          transformMode: 'live', transform: expectedTransforms[index],
+          visible: true, state: {},
+        });
+      }
+      runtime.activate({ commitSeq: 0, sourceTick: 0, lastCommandSeq: 0 });
+      runtime.start();
+      await runtime.whenReady();
+      if (frames.step() !== 1) throw new Error('initial Display frame was not scheduled exactly once');
+      const installReadyFirstFrameMs = performance.now() - installStarted;
+      const updatesPerTick = Math.min(bindingCount, Math.round(bindingCount * updateRatio));
+      const samples = [];
+      let lastCommandSeq = 0;
+      for (let tick = 1; tick <= ticks; tick += 1) {
+        const started = performance.now();
+        const cursor = {
+          commitSeq: tick,
+          sourceTick: tick,
+          lastCommandSeq: lastCommandSeq + updatesPerTick,
+        };
+        runtime.commitGate.begin(cursor);
+        try {
+          for (let ordinal = 0; ordinal < updatesPerTick; ordinal += 1) {
+            const index = (tick * updatesPerTick + ordinal) % bindingCount;
+            const nextTransform = transform(index, tick, columns);
+            runtime.authority.setNodeTransform({
+              name: nodeName(index), transform: nextTransform,
+            });
+            expectedTransforms[index] = nextTransform;
+          }
+          runtime.commitGate.seal(cursor);
+        } catch (error) {
+          runtime.commitGate.fail(error);
+          throw error;
+        }
+        lastCommandSeq = cursor.lastCommandSeq;
+        if (frames.step() !== 1) throw new Error(`tick ${tick} did not schedule exactly one frame`);
+        samples.push(performance.now() - started);
+      }
+      const activeDiagnostics = backends.at(-1).diagnostics();
+      const finalSummary = runtime.summary();
+      const finalView = runtime.currentView();
+      const transformSamples = [...new Set([0, Math.floor((bindingCount - 1) / 2), bindingCount - 1])]
+        .map((index) => ({
+          index,
+          expected: expectedTransforms[index],
+          actual: finalView.getNode(nodeName(index)).localTransform,
+        }));
+      const gl = document.querySelector('#canvas').getContext('webgl2')
+        ?? document.querySelector('#canvas').getContext('webgl');
+      const debug = gl?.getExtension('WEBGL_debug_renderer_info');
+      const gpu = debug ? {
+        vendor: gl.getParameter(debug.UNMASKED_VENDOR_WEBGL),
+        renderer: gl.getParameter(debug.UNMASKED_RENDERER_WEBGL),
+      } : null;
+      const disposeStarted = performance.now();
+      await runtime.dispose();
+      const disposeMs = performance.now() - disposeStarted;
+      const disposedDiagnostics = backends.at(-1).diagnostics();
+      const expectedBatchCount = bindingCount >= 2 ? 1 : 0;
+      const expectedInstanceCount = bindingCount >= 2 ? bindingCount : 0;
+      const checks = {
+        nodeCount: finalSummary.nodeCount === 3 + bindingCount * 2,
+        cursor: finalSummary.cursor.commitSeq === ticks
+          && finalSummary.cursor.sourceTick === ticks
+          && finalSummary.cursor.lastCommandSeq === lastCommandSeq,
+        transforms: transformSamples.every(({ expected, actual }) => sameTransform(expected, actual)),
+        activeBindings: activeDiagnostics.bindingCount === 1 + bindingCount
+          && activeDiagnostics.nodeBindingCount === 1 + bindingCount
+          && activeDiagnostics.batchCount === expectedBatchCount
+          && activeDiagnostics.instanceCount === expectedInstanceCount
+          && activeDiagnostics.pendingBindingCount === 0
+          && activeDiagnostics.pendingResourceCount === 0
+          && activeDiagnostics.drawCount === ticks + 1,
+        disposedOwnership: disposedDiagnostics.bindingCount === 0
+          && disposedDiagnostics.nodeBindingCount === 0
+          && disposedDiagnostics.batchCount === 0
+          && disposedDiagnostics.instanceCount === 0
+          && disposedDiagnostics.pendingBindingCount === 0
+          && disposedDiagnostics.resourceCount === 0
+          && disposedDiagnostics.readyResourceCount === 0
+          && disposedDiagnostics.resourceLeaseCount === 0
+          && disposedDiagnostics.pendingResourceCount === 0
+          && disposedDiagnostics.disposed === true,
+        health: healthEvents.length === 0,
+      };
+      const correct = Object.values(checks).every(Boolean);
+      publish({
+        schema: 'scene-engine-browser-display-scale@1',
+        status: correct ? 'READY' : 'NOT READY',
+        parameters: { bindingCount, ticks, updateRatio, updatesPerTick },
+        environment: { userAgent: navigator.userAgent, gpu },
+        startup: { runtimeConstructMs: round(constructedMs), installReadyFirstFrameMs: round(installReadyFirstFrameMs) },
+        commitAndCpuSubmit: summarize(samples),
+        active: { summary: finalSummary, backend: activeDiagnostics, transformSamples },
+        dispose: {
+          durationMs: round(disposeMs),
+          backend: disposedDiagnostics,
+          rendererInfoMemoryCountersAreObservational: true,
+        },
+        checks,
+        healthEvents,
+      });
+    } catch (error) {
+      let cleanup = null;
+      if (runtime !== null) {
+        try {
+          await runtime.dispose();
+          cleanup = {
+            status: 'disposed',
+            backend: backends.length === 0 ? null : backends.at(-1).diagnostics(),
+            pendingFrameCallbacks: frames.callbacks.size,
+          };
+        } catch (cleanupError) {
+          cleanup = { status: 'failed', error: String(cleanupError?.stack ?? cleanupError) };
+        }
+      }
+      publish({
+        schema: 'scene-engine-browser-display-scale@1',
+        status: 'NOT READY',
+        error: String(error?.stack ?? error),
+        cleanup,
+        healthEvents,
+      });
+    }
+
+    function nodeName(index) { return `py/item-${String(index).padStart(6, '0')}`; }
+    function transform(index, tick, columns) {
+      const angle = ((tick + index) % 360) * Math.PI / 180;
+      return {
+        position: [(index % columns) - columns / 2 + (tick % 7) / 32,
+          Math.floor(index / columns) - columns / 2, 0],
+        rotationXyzw: [0, 0, Math.sin(angle / 2), Math.cos(angle / 2)],
+        scale: [1 + (tick % 3) * 0.05, 1 + (index % 5) * 0.02, 1],
+      };
+    }
+    function positiveInteger(value, name) {
+      const parsed = Number(value);
+      if (!Number.isSafeInteger(parsed) || parsed <= 0) throw new Error(`${name} must be a positive integer`);
+      if (name === 'bindings' && parsed > 50_000) throw new Error('bindings must not exceed 50000');
+      if (name === 'ticks' && parsed > 100_000) throw new Error('ticks must not exceed 100000');
+      return parsed;
+    }
+    function boundedRatio(value) {
+      const parsed = Number(value);
+      if (!Number.isFinite(parsed) || parsed < 0 || parsed > 1) throw new Error('updateRatio must be in [0, 1]');
+      return parsed;
+    }
+    function sameTransform(left, right) {
+      return ['position', 'rotationXyzw', 'scale'].every((field) => left[field].length === right[field].length
+        && left[field].every((value, index) => Math.abs(value - right[field][index]) <= 1e-12));
+    }
+    function percentile(sorted, ratio) {
+      return sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * ratio) - 1))];
+    }
+    function summarize(values) {
+      const sorted = [...values].sort((a, b) => a - b);
+      return {
+        samples: sorted.length,
+        p50Ms: round(percentile(sorted, 0.5)),
+        p95Ms: round(percentile(sorted, 0.95)),
+        p99Ms: round(percentile(sorted, 0.99)),
+        maximumMs: round(sorted.at(-1)),
+      };
+    }
+    function round(value) { return Math.round(value * 1_000_000) / 1_000_000; }
+    function publish(report) {
+      const encoded = btoa(unescape(encodeURIComponent(JSON.stringify(report))));
+      document.body.dataset.state = 'complete';
+      document.body.dataset.result = encoded;
+      document.title = report.status;
+    }
+  </script>
+</body>
+</html>
