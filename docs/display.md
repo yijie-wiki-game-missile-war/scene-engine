@@ -6,7 +6,7 @@ fallback runtime.
 ## Release tuple
 
 ```text
-scene-engine Python                 0.13.0
+scene-engine Python                 0.14.0
 @scene-engine/client               0.12.0
 @scene-engine/display              0.11.0
 @scene-engine/renderer-three       0.12.0
@@ -44,9 +44,12 @@ Every Node local Transform is exactly one 16-value column-major Matrix4:
 ]
 ```
 
-Python's hot-path owner is `DisplayTransform(matrix_bytes=...)`: it retains an immutable object of exactly 64 bytes and neither
-repackages nor interprets its sixteen binary32 bit patterns. `DisplayTransform.from_matrix(...)` exists for numeric authoring;
-it performs one little-endian `<16f` pack but does not canonicalize negative zero or check finite, affine or determinant rules.
+Python's hot-path owner is `DisplayTransform`: it retains one private NumPy `ndarray` with shape `(4, 4)`, dtype `<f4`,
+Fortran-contiguous column-major layout and `writeable=False`. It has no persistent byte or TRS sidecar.
+`DisplayTransform(matrix_bytes=...)` copies exactly 64 immutable input bytes into that owner without interpreting their sixteen
+binary32 bit patterns. `DisplayTransform.from_matrix(...)` exists for numeric authoring and converts exactly sixteen
+column-major values to little-endian float32; neither path canonicalizes negative zero or checks finite, affine or determinant
+rules.
 
 The browser Client is the first semantic boundary. It reads the payload into an owned Float32Array, canonicalizes negative zero,
 requires finite affine entries (`m[3]=m[7]=m[11]=0`, `m[15]=1`) and requires the upper-left 3x3 determinant to be positive and
@@ -66,7 +69,7 @@ Product and display-authoring code does not need to hand-write sixteen values. P
 
 | Operation | Python | JavaScript |
 | --- | --- | --- |
-| direct matrix ownership | `DisplayTransform(matrix_bytes=raw)` / `from_matrix(values)` | Client binary decode |
+| direct matrix construction | `DisplayTransform(matrix_bytes=raw)` / `from_matrix(values)` | Client binary decode |
 | identity / TRS construction | `identity()` / `from_trs(...)` | `identity()` / `fromTRS(...)` |
 | full composition | `parent.composed(local)` | `compose(parent, local)` |
 | absolute parent-space origin | `with_translation(position)` | `withTranslation(matrix, position)` |
@@ -95,6 +98,11 @@ Every convenience operation returns a new immutable binary32 Matrix4 and never c
 boundary to accept a TRS record, or stores TRS beside the matrix. Python deliberately leaves final matrix semantics to Client;
 the JavaScript facade returns canonical accepted matrices. `from_trs`/`fromTRS` accepts transient `position`, normalizes a
 nonzero `rotation_xyzw`/`rotationXyzw`, and accepts positive `scale` only to construct the resulting matrix.
+
+Python keeps the existing read API while protecting the NumPy owner: `matrix` returns the immutable 16-value column-major
+representation, while `matrix_bytes` creates an exact temporary 64-byte little-endian serialization. Neither accessor exposes
+a writable array, and `matrix_bytes` is not identity-preserving with bytes passed to the constructor. Binary Display encoding
+reads the resident column-major array directly and writes the same 64 bytes to the attachment.
 
 Let the local basis and origin be `B` and `t`. The suffix is mandatory because a local matrix by itself cannot perform a true
 world-space edit when it has an unknown parent:

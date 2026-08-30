@@ -68,8 +68,9 @@ identity = DisplayCatalogIdentity.from_record(record)
 ```
 
 Checkpoint nodes are complete parent-first `py/` authority roots. Product code chooses stable names, exact registered
-`prefab_id`, transform mode, one opaque 64-byte little-endian binary32 local Matrix4, visibility and complete authority state.
-Python retains and publishes those matrix bytes unchanged; the browser Client is the first matrix-semantic acceptance gate.
+`prefab_id`, transform mode, one column-major local Matrix4, visibility and complete authority state. Each Python
+`DisplayTransform` keeps that matrix in one private, read-only, little-endian float32 NumPy array; the encoder publishes its
+exact 64 column-major bytes, and the browser Client remains the first matrix-semantic acceptance gate.
 After checkpoint it publishes only single-target commands created through named constructors:
 
 ```python

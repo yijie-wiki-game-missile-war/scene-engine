@@ -88,10 +88,16 @@ with one opcode byte and the target name, followed by exactly these variant fiel
 Safe-integer cursor bounds and exact packet-header cursor/tick agreement remain mandatory.
 
 Every transmitted Transform is the complete 16-value, column-major 4x4 local matrix carried as `64` little-endian IEEE-754
-binary32 bytes. Those exact bytes are the typed Python publication path's sole persistent Transform storage and are appended
-to SDCP/SDCS without composition, repacking, negative-zero normalization, finite checks, affine-row checks or determinant
-checks. The public `DisplayTransform(matrix_bytes=...)` path accepts only an immutable `bytes` object of exactly 64 bytes;
-`from_matrix(...)` is an explicit one-time `<16f` packing helper and likewise does not inspect matrix semantics.
+binary32 bytes. The typed Python publication path's sole persistent Transform storage is one private NumPy `ndarray` with
+shape `(4, 4)`, dtype `<f4`, Fortran-contiguous column-major layout and `writeable=False`. The SDCP/SDCS encoder reads this owner
+in column-major order and emits its exact 64 bytes without composition, negative-zero normalization, finite checks,
+affine-row checks or determinant checks.
+
+The existing public API remains stable. `DisplayTransform(matrix_bytes=...)` accepts only an immutable `bytes` object of
+exactly 64 bytes and copies those sixteen bit patterns into the array owner; `from_matrix(...)` converts exactly sixteen
+column-major numeric values to little-endian float32 and likewise does not inspect matrix semantics. `matrix` returns the
+immutable 16-value public representation. `matrix_bytes` returns an exact temporary 64-byte serialization; it is not the
+persistent owner and callers must not rely on object identity with constructor input.
 
 The JavaScript Client is the first semantic acceptance gate. It converts negative zero to positive zero and requires finite
 values, the exact affine row (`m[3]=m[7]=m[11]=0`, `m[15]=1`) and a strictly positive upper-left 3x3 determinant. This admits

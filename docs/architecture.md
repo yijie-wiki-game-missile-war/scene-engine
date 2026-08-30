@@ -1,6 +1,6 @@
 # Current architecture
 
-Scene Engine 0.13 owns one deterministic publication and browser-projection boundary:
+Scene Engine 0.14 owns one deterministic publication and browser-projection boundary:
 
 ```text
 mutable product World
@@ -128,14 +128,19 @@ The backend owns only renderer resources and flat `(nodeName, componentKey)` bin
 returns Three objects. Disposal stops scheduling, aborts pending work, unloads Scene and Prefab materializations, clears the
 private ledger, releases Components, resource leases and backend bindings, and is idempotent.
 
-Transform has one representation end to end: a column-major local Matrix4 carried as 64 little-endian binary32 bytes. Python
-owns those bytes as an opaque immutable payload and appends them to the binary Display attachment unchanged; it checks only
-their type and fixed length. Client decodes an owned Float32Array and is the first semantic gate: it canonicalizes negative zero
-and rejects nonfinite, non-affine, reflected or singular matrices before Authority opens. Display repeats that validation and
-owns one private Float32Array per Node. NodeGraph derives the sole world matrix with direct
+Transform has one logical representation end to end: a column-major local Matrix4, carried on Wire as exactly 64
+little-endian binary32 bytes. Python `DisplayTransform` owns one private NumPy `ndarray` with shape `(4, 4)`, dtype `<f4`,
+Fortran-contiguous column-major layout and `writeable=False`; there is no persistent byte payload or parallel TRS owner. The
+binary Display encoder reads that array in column-major order and emits its exact 64 bytes. Client decodes an owned
+Float32Array and is still the first semantic gate: it canonicalizes negative zero and rejects nonfinite, non-affine, reflected
+or singular matrices before Authority opens. Display repeats that validation and owns one private Float32Array per Node.
+NodeGraph derives the sole world matrix with direct
 `parentWorld * localMatrix` multiplication into Float64Array storage. No layer owns a parallel TRS or decomposes the matrix
 during publication.
 
 Python `DisplayTransform` and the JavaScript `DisplayTransform` facade expose pure Matrix4 convenience operations. They never
-mutate a Node, bypass Authority, or cache position/rotation/scale beside the matrix. Python's raw byte owner is not implicitly
-repacked or semantically revalidated; browser-side helpers continue to return canonical accepted matrices.
+mutate a Node, bypass Authority, or cache position/rotation/scale beside the matrix. Python preserves the existing public
+`matrix_bytes=`, `from_matrix()`, `matrix` and `matrix_bytes` APIs: byte construction copies the exact bit patterns into the
+array, `matrix` returns the immutable 16-value tuple representation, and `matrix_bytes` creates an exact temporary serialization
+rather than exposing a persistent owner. Python does not apply matrix-semantic validation; browser-side helpers continue to return
+canonical accepted matrices.

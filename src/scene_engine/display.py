@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
 
+import numpy as np
+
 from .errors import ConfigurationError
 from .json_tree import validate_json_value
 
@@ -32,6 +34,8 @@ _NODE_SEGMENT = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _PREFAB_ID = re.compile(r"^[a-z0-9][a-z0-9._@-]*(?:/[a-z0-9][a-z0-9._@-]*)*$")
 _HASH = re.compile(r"^[0-9a-f]{64}$")
 _MATRIX4_F32 = struct.Struct("<16f")
+_IDENTITY_MATRIX4_F32 = np.eye(4, dtype="<f4", order="F")
+_IDENTITY_MATRIX4_F32.flags.writeable = False
 _COMMAND_KINDS = frozenset(
     {
         "node-create",
@@ -81,11 +85,11 @@ class DisplayCatalogIdentity:
         }
 
 
-@dataclass(frozen=True, slots=True, init=False)
+@dataclass(frozen=True, slots=True, init=False, eq=False)
 class DisplayTransform:
-    """One opaque column-major binary32 local matrix payload."""
+    """One immutable NumPy-owned column-major binary32 local matrix."""
 
-    _matrix_bytes: bytes
+    _matrix: np.ndarray
 
     def __init__(
         self,
@@ -96,7 +100,13 @@ class DisplayTransform:
             raise ConfigurationError(
                 "transform matrix_bytes must contain exactly 64 bytes"
             )
-        object.__setattr__(self, "_matrix_bytes", matrix_bytes)
+        matrix = (
+            np.frombuffer(matrix_bytes, dtype="<f4")
+            .reshape((4, 4), order="F")
+            .copy(order="F")
+        )
+        matrix.flags.writeable = False
+        object.__setattr__(self, "_matrix", matrix)
 
     @classmethod
     def from_matrix(cls, matrix: Sequence[float]) -> "DisplayTransform":
@@ -106,9 +116,11 @@ class DisplayTransform:
 
     @classmethod
     def identity(cls) -> "DisplayTransform":
-        return cls.from_matrix(
-            (1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1)
-        )
+        matrix = _IDENTITY_MATRIX4_F32.copy(order="F")
+        matrix.flags.writeable = False
+        instance = object.__new__(cls)
+        object.__setattr__(instance, "_matrix", matrix)
+        return instance
 
     @classmethod
     def from_trs(
@@ -166,11 +178,38 @@ class DisplayTransform:
 
     @property
     def matrix(self) -> tuple[float, ...]:
-        return _MATRIX4_F32.unpack(self._matrix_bytes)
+        return _MATRIX4_F32.unpack(self._matrix_buffer())
 
     @property
     def matrix_bytes(self) -> bytes:
-        return self._matrix_bytes
+        return self._matrix_buffer().tobytes()
+
+    def _matrix_buffer(self) -> np.ndarray:
+        """Return a read-only C-contiguous view of the column-major bytes."""
+
+        return self._matrix.T
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, DisplayTransform):
+            return NotImplemented
+        return bool(
+            np.array_equal(
+                self._matrix.view("<u4"),
+                other._matrix.view("<u4"),
+            )
+        )
+
+    def __hash__(self) -> int:
+        return hash(self.matrix_bytes)
+
+    def __copy__(self) -> "DisplayTransform":
+        return self
+
+    def __deepcopy__(self, _memo: dict[int, Any]) -> "DisplayTransform":
+        return self
+
+    def __reduce__(self) -> tuple[Any, tuple[bytes]]:
+        return (_restore_display_transform, (self.matrix_bytes,))
 
     def to_record(self) -> list[float]:
         return list(self.matrix)
@@ -180,7 +219,11 @@ class DisplayTransform:
 
         if not isinstance(local, DisplayTransform):
             raise ConfigurationError("local must be DisplayTransform")
-        return DisplayTransform.from_matrix(_multiply_matrix4(self.matrix, local.matrix))
+        with np.errstate(over="ignore", invalid="ignore"):
+            result = self._matrix.astype(np.float64) @ local._matrix.astype(
+                np.float64
+            )
+        return DisplayTransform._from_float64_matrix(result)
 
     def with_translation(self, position: Sequence[float]) -> "DisplayTransform":
         """Return a copy with its parent-space translation replaced."""
@@ -229,26 +272,28 @@ class DisplayTransform:
     ) -> "DisplayTransform":
         """Right-multiply the basis by an axis-angle rotation."""
 
-        rotation = _axis_angle_basis(axis, radians)
-        return DisplayTransform.from_matrix(
-            _replace_basis(
-                self.matrix,
-                _multiply_basis(_matrix_basis(self.matrix), rotation),
-            )
-        )
+        rotation = np.asarray(
+            _axis_angle_basis(axis, radians),
+            dtype=np.float64,
+        ).reshape((3, 3), order="F")
+        matrix = self._matrix.astype(np.float64, order="F")
+        with np.errstate(over="ignore", invalid="ignore"):
+            matrix[:3, :3] = matrix[:3, :3] @ rotation
+        return DisplayTransform._from_float64_matrix(matrix)
 
     def rotated_parent(
         self, axis: Sequence[float], radians: float
     ) -> "DisplayTransform":
         """Left-multiply the basis by an axis-angle rotation."""
 
-        rotation = _axis_angle_basis(axis, radians)
-        return DisplayTransform.from_matrix(
-            _replace_basis(
-                self.matrix,
-                _multiply_basis(rotation, _matrix_basis(self.matrix)),
-            )
-        )
+        rotation = np.asarray(
+            _axis_angle_basis(axis, radians),
+            dtype=np.float64,
+        ).reshape((3, 3), order="F")
+        matrix = self._matrix.astype(np.float64, order="F")
+        with np.errstate(over="ignore", invalid="ignore"):
+            matrix[:3, :3] = rotation @ matrix[:3, :3]
+        return DisplayTransform._from_float64_matrix(matrix)
 
     def scaled_self(self, scale: Sequence[float]) -> "DisplayTransform":
         """Right-multiply the basis by a positive diagonal scale."""
@@ -318,6 +363,28 @@ class DisplayTransform:
             self.matrix,
             _finite_vector(vector, 3, "vector"),
         )
+
+    @classmethod
+    def _from_float64_matrix(cls, value: np.ndarray) -> "DisplayTransform":
+        matrix64 = np.asarray(value, dtype=np.float64)
+        if matrix64.shape != (4, 4):
+            raise AssertionError("internal transform matrix must have shape (4, 4)")
+        with np.errstate(over="ignore", invalid="ignore"):
+            matrix32 = matrix64.astype("<f4", order="F")
+        if np.isinf(matrix32).any() and np.any(
+            np.isfinite(matrix64) & np.isinf(matrix32)
+        ):
+            raise ConfigurationError(
+                "transform must contain sixteen float32-packable values"
+            )
+        matrix32.flags.writeable = False
+        instance = object.__new__(cls)
+        object.__setattr__(instance, "_matrix", matrix32)
+        return instance
+
+
+def _restore_display_transform(matrix_bytes: bytes) -> DisplayTransform:
+    return DisplayTransform(matrix_bytes=matrix_bytes)
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -938,56 +1005,6 @@ def _normalized_vector(
     scaled = tuple(item / maximum for item in vector)
     magnitude = math.sqrt(sum(item * item for item in scaled))
     return tuple(item / magnitude for item in scaled)
-
-
-def _multiply_matrix4(
-    left: Sequence[float], right: Sequence[float]
-) -> tuple[float, ...]:
-    result = [0.0] * 16
-    for column in range(4):
-        for row in range(4):
-            result[column * 4 + row] = sum(
-                left[index * 4 + row] * right[column * 4 + index]
-                for index in range(4)
-            )
-    return tuple(result)
-
-
-def _matrix_basis(matrix: Sequence[float]) -> tuple[float, ...]:
-    return (
-        matrix[0],
-        matrix[1],
-        matrix[2],
-        matrix[4],
-        matrix[5],
-        matrix[6],
-        matrix[8],
-        matrix[9],
-        matrix[10],
-    )
-
-
-def _replace_basis(
-    matrix: Sequence[float], basis: Sequence[float]
-) -> tuple[float, ...]:
-    result = list(matrix)
-    result[0:3] = basis[0:3]
-    result[4:7] = basis[3:6]
-    result[8:11] = basis[6:9]
-    return tuple(result)
-
-
-def _multiply_basis(
-    left: Sequence[float], right: Sequence[float]
-) -> tuple[float, ...]:
-    result = [0.0] * 9
-    for column in range(3):
-        for row in range(3):
-            result[column * 3 + row] = sum(
-                left[index * 3 + row] * right[column * 3 + index]
-                for index in range(3)
-            )
-    return tuple(result)
 
 
 def _axis_angle_basis(

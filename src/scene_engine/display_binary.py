@@ -10,6 +10,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, NoReturn
 
+import numpy as np
+
 from .display import (
     DISPLAY_CHECKPOINT_SCHEMA,
     DISPLAY_COMMAND_SCHEMA,
@@ -109,7 +111,7 @@ class _EncodedCheckpointNode:
     parent_name: str | None
     prefab_id: str
     flags: int
-    matrix: bytes
+    matrix: np.ndarray
     state: bytes
 
 
@@ -131,7 +133,7 @@ def encode_display_checkpoint_binary(
         maximum_json_depth=maximum_json_depth,
     )
 
-    chunks: list[bytes] = [
+    chunks: list[bytes | np.ndarray] = [
         _COMMON_HEADER.pack(
             DISPLAY_BINARY_CHECKPOINT_MAGIC,
             DISPLAY_BINARY_VERSION,
@@ -305,7 +307,7 @@ def encode_display_command_stream_binary(
     if len(commands) > _MAXIMUM_U32:
         raise ConfigurationError("display command count exceeds uint32")
 
-    chunks: list[bytes] = [
+    chunks: list[bytes | np.ndarray] = [
         _COMMON_HEADER.pack(
             DISPLAY_BINARY_COMMAND_STREAM_MAGIC,
             DISPLAY_BINARY_VERSION,
@@ -735,10 +737,10 @@ def _node_flags(visible: Any, transform_mode: Any) -> int:
     return int(visible) | (_NODE_FLAG_LIVE if transform_mode == "live" else 0)
 
 
-def _encode_matrix(transform: DisplayTransform) -> bytes:
+def _encode_matrix(transform: DisplayTransform) -> np.ndarray:
     if not isinstance(transform, DisplayTransform):
         raise ConfigurationError("Display transform must be DisplayTransform")
-    return transform.matrix_bytes
+    return transform._matrix_buffer()
 
 
 def _encode_string(value: Any, field: str, *, maximum_bytes: int) -> bytes:

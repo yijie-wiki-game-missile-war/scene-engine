@@ -7,7 +7,7 @@ Scene Engine 的测试验证当前产品定义、架构所有权和技术合同�
 
 ## 整体与性能测试分类
 
-新增的整体与性能测试分为两大类；两类都沿生产边界验证正确性，性能时间先作为观测数据，不改变项目只有两条
+整体与性能测试分为三类；三类都沿生产边界验证正确性，性能时间先作为观测数据，不改变项目只有两条
 全量测试命令的完成标准。
 
 ### 1. 显示引擎功能与性能
@@ -31,6 +31,19 @@ checkpoint、commit、command、ACK、pending/in-flight 和最终状态一致性
 
 默认门禁只执行 32 roots 的确定性跨语言 smoke；更多 roots、commits、update ratio 和 roundtrip/windowed profile
 通过显式 benchmark runner 运行。
+
+### 3. Python Matrix4 操作与常驻成本
+
+这一类直接测量 Python `DisplayTransform` 的唯一只读 NumPy Matrix4 owner。默认门禁中的 `test_display.py` 和
+`test_display_binary.py` 验证数组 shape、little-endian float32 dtype、列主序、只读性、输入隔离、公开 accessor、
+便利操作与 exact 64-byte 编码；显式 `scripts/benchmark_python_display_transform.py` runner 观测构造、组合、平移、
+旋转、缩放、点/向量及逆转换、公开 accessor、命令编码、新进程启动路径和批量常驻内存。
+
+runner 接受 `--iterations`、`--repeats`、`--encode-commands`、`--encode-repeats` 和 `--resident-count`。它只向
+stdout 输出 JSON，其中包括 `environment`、各 `operations` 的 best/p50/p95、encoding payload 与时延、fresh-process
+startup、tracemalloc resident 和 correctness。启动项包括子进程创建、根包 import、identity 构造和公开 accessor；
+内存项是 warm process 中、包含 resident list 的可追踪分配，不是 RSS。该数据用于给当前实现建立可复现的本机性能
+报告，不设置跨机器硬阈值，也不替代默认正确性测试或全量门禁。
 
 ## 测试方法
 
@@ -62,8 +75,10 @@ Python 与 JavaScript 共享的协议、Display 记录、目录身份和 packet 
 条件变成默认门禁。资源现场测试在进程内实际执行创建、故障注入、重建和销毁，并以最终所有权计数归零作为
 断言。
 
-性能 runner 必须同时报告结构、cursor、最终状态、健康和释放正确性。p50、p95、p99、maximum、吞吐与内存数据
-现阶段用于观察和建立基线；在没有固定硬件、运行环境和经确认的基线前，不设置跨机器绝对时间硬阈值。
+性能 runner 必须报告与自身范围对应的 correctness。状态与通讯 runner 检查结构、cursor、最终状态、健康和释放；
+Python Matrix4 runner 检查矩阵位模式、组合/逆转换、编码 cursor 和常驻 owner，并把 tracing 释放后的 delta 作为观测
+字段。p50、p95、p99、maximum、吞吐与内存数据现阶段用于观察和建立基线；在没有固定硬件、运行环境和经确认的
+基线前，不设置跨机器绝对时间硬阈值。
 
 ### 类型兼容测试
 
@@ -95,8 +110,8 @@ npm test --workspace @scene-engine/renderer-three
 
 局部测试只用于缩短反馈时间，不能代替完整测试。
 
-默认全量门禁只运行小规模确定性 smoke，不自动执行 10,000、30,000、50,000 规模 runner 或真实 Chrome/WebGL
-runner。需要规模或浏览器时间数据时，按[测试项目](tests/README.md)中的命令显式运行。
+默认全量门禁只运行小规模确定性 smoke，不自动执行 Python Matrix4 benchmark、10,000、30,000、50,000 规模
+runner 或真实 Chrome/WebGL runner。需要性能或规模数据时，按[测试项目](tests/README.md)中的命令显式运行。
 
 ## 完成标准
 

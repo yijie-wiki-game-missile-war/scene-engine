@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import copy
 import math
+import pickle
 import struct
 
+import numpy as np
 import pytest
 
 from scene_engine.display import (
@@ -289,12 +292,93 @@ def test_matrix_bytes_are_retained_exactly_without_semantic_validation() -> None
     raw = struct.pack("<16I", *raw_bits)
     value = DisplayTransform(matrix_bytes=raw)
 
-    assert value.matrix_bytes is raw
+    assert value.matrix_bytes == raw
     assert struct.unpack("<16I", value.matrix_bytes) == raw_bits
     assert math.isnan(value.matrix[0])
     assert value.matrix[1] == 0.0
     assert math.copysign(1.0, value.matrix[1]) == -1.0
     assert math.isinf(value.matrix[2])
+
+
+def test_matrix_has_one_owned_readonly_fortran_float32_representation() -> None:
+    source = [float(index) for index in range(16)]
+    value = DisplayTransform.from_matrix(source)
+    source[0] = 99.0
+
+    assert DisplayTransform.__slots__ == ("_matrix",)
+    assert isinstance(value._matrix, np.ndarray)
+    assert value._matrix.shape == (4, 4)
+    assert value._matrix.dtype == np.dtype("<f4")
+    assert value._matrix.flags.f_contiguous
+    assert not value._matrix.flags.c_contiguous
+    assert value._matrix.flags.owndata
+    assert not value._matrix.flags.writeable
+    assert value._matrix.base is None
+    assert value.matrix[0] == 0.0
+
+    with pytest.raises(ValueError, match="read-only"):
+        value._matrix[0, 0] = 1.0
+
+    buffer = value._matrix_buffer()
+    assert isinstance(buffer, np.ndarray)
+    assert buffer.shape == (4, 4)
+    assert buffer.flags.c_contiguous
+    assert not buffer.flags.writeable
+    assert np.shares_memory(buffer, value._matrix)
+    assert buffer.nbytes == 64
+    assert buffer.tobytes() == value.matrix_bytes
+    with pytest.raises(ValueError, match="read-only"):
+        buffer[0, 0] = 0
+
+
+def test_transform_equality_and_hash_compare_all_float32_bits() -> None:
+    nan_a = struct.pack(
+        "<16I",
+        0x7FC01234,
+        0x80000000,
+        *([0] * 14),
+    )
+    same_nan_a = bytes(bytearray(nan_a))
+    nan_b = struct.pack(
+        "<16I",
+        0x7FC05678,
+        0x80000000,
+        *([0] * 14),
+    )
+    positive_zero = struct.pack(
+        "<16I",
+        0x7FC01234,
+        0x00000000,
+        *([0] * 14),
+    )
+    first = DisplayTransform(matrix_bytes=nan_a)
+    same = DisplayTransform(matrix_bytes=same_nan_a)
+    different_nan = DisplayTransform(matrix_bytes=nan_b)
+    different_zero = DisplayTransform(matrix_bytes=positive_zero)
+
+    assert first == same
+    assert hash(first) == hash(same)
+    assert len({first, same}) == 1
+    assert first != different_nan
+    assert first != different_zero
+    assert first != nan_a
+
+
+def test_transform_copy_and_pickle_preserve_readonly_owned_storage() -> None:
+    raw = struct.pack("<16I", 0x7FC01234, 0x80000000, *range(14))
+    value = DisplayTransform(matrix_bytes=raw)
+
+    assert copy.copy(value) is value
+    assert copy.deepcopy(value) is value
+
+    restored = pickle.loads(pickle.dumps(value))
+    assert restored == value
+    assert restored.matrix_bytes == raw
+    assert restored._matrix.shape == (4, 4)
+    assert restored._matrix.flags.f_contiguous
+    assert restored._matrix.flags.owndata
+    assert not restored._matrix.flags.writeable
+    assert restored._matrix.base is None
 
 
 def test_matrix_only_rejects_invalid_storage_shape_or_unrepresentable_values() -> None:
@@ -328,6 +412,19 @@ def test_matrix_only_rejects_invalid_storage_shape_or_unrepresentable_values() -
     conversion_overflow[0] = 10**10_000
     with pytest.raises(ConfigurationError, match="float32"):
         DisplayTransform.from_matrix(conversion_overflow)
+
+
+def test_numpy_error_policy_does_not_change_opaque_matrix_operation_semantics() -> None:
+    nonfinite = list(DisplayTransform.identity().matrix)
+    nonfinite[0] = math.inf
+    value = DisplayTransform.from_matrix(nonfinite)
+
+    with np.errstate(all="raise"):
+        composed = value.composed(DisplayTransform.identity())
+        rotated = value.rotated_self((0.0, 1.0, 0.0), 0.25)
+
+    assert isinstance(composed, DisplayTransform)
+    assert isinstance(rotated, DisplayTransform)
 
 
 def test_transform_from_trs_builds_a_literal_binary32_matrix() -> None:

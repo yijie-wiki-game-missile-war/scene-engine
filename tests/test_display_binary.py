@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import struct
 
+import numpy as np
 import pytest
 
 import scene_engine.display_binary as display_binary_module
@@ -190,7 +191,7 @@ def test_binary_matrix_round_trip_preserves_shear_and_float32_bits() -> None:
     assert encode_display_checkpoint_binary(decoded, 7).bytes == encoded.bytes
 
 
-def test_typed_stream_encoder_reuses_the_transform_matrix_bytes() -> None:
+def test_typed_stream_encoder_reads_the_resident_transform_buffer() -> None:
     transform = DisplayTransform.from_matrix(POSE)
     command = DisplayCommand.set_transform("py/root", transform)
     stream, cursor = encode_display_command_stream(
@@ -200,7 +201,12 @@ def test_typed_stream_encoder_reuses_the_transform_matrix_bytes() -> None:
     )
 
     assert command.fields["transform"] is transform
-    assert display_binary_module._encode_matrix(transform) is transform.matrix_bytes
+    matrix_buffer = display_binary_module._encode_matrix(transform)
+    assert isinstance(matrix_buffer, np.ndarray)
+    assert matrix_buffer.flags.c_contiguous
+    assert not matrix_buffer.flags.writeable
+    assert matrix_buffer.nbytes == 64
+    assert matrix_buffer.tobytes() == transform.matrix_bytes
     encoded = encode_display_command_stream_binary(stream, 9, cursor)
     decoded = decode_display_command_stream_binary(encoded.bytes, 9, cursor)
     assert decoded["commands"][0]["transform"] == pytest.approx(POSE, abs=1e-6)
@@ -218,7 +224,7 @@ def test_typed_stream_encoder_transmits_opaque_matrix_bits_exactly() -> None:
 
     encoded = encode_display_command_stream_binary(stream, 1, cursor)
 
-    assert display_binary_module._encode_matrix(transform) is raw
+    assert bytes(display_binary_module._encode_matrix(transform)) == raw
     assert encoded.bytes.endswith(raw)
 
 
