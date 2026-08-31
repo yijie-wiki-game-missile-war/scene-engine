@@ -52,14 +52,14 @@ test('AuthorityMatrixPool stages one owned sparse batch and consumes rows in com
     code: 'display-authority-matrix-pool-unclaimed',
   });
   pool.claim(3);
-  pool.consume(0);
+  pool.consumeMany(new Uint32Array([0]));
   pool.assertSettled();
   assert.deepEqual(matrixPosition(Array.from(pool.matrix(0))), [4, 5, 6]);
   assert.deepEqual(Array.from(pool.matrix(3)), IDENTITY);
   assert.notStrictEqual(pool.matrix(0).buffer, checkpointOwner.buffer);
 
   pool.applyBatch({ poolSize: 4, ...matrixBatch([]) });
-  assert.throws(() => pool.consume(0), {
+  assert.throws(() => pool.consumeMany(new Uint32Array([0])), {
     code: 'display-authority-transform-batch-unavailable',
   }, 'settling clears only the prior batch\'s touched row indices');
   pool.assertSettled();
@@ -85,6 +85,31 @@ test('AuthorityMatrixPool rejects malformed batches before changing its live own
     matrices: new Float32Array([...IDENTITY, ...IDENTITY]),
   }), { code: 'display-authority-transform-batch-invalid' });
   assert.deepEqual(Array.from(pool.matrix(0)), before);
+});
+
+test('AuthorityMatrixPool consumeMany preflights the whole batch before any row mutation', () => {
+  const pool = new AuthorityMatrixPool();
+  pool.install({
+    poolSize: 2,
+    matrices: matrixPool(2, [[0, IDENTITY], [1, IDENTITY]]),
+  });
+  pool.claim(0);
+  pool.claim(1);
+  pool.assertSettled();
+  const moved0 = matrixTransform({ position: [4, 0, 0] });
+  const moved1 = matrixTransform({ position: [8, 0, 0] });
+  pool.applyBatch({ poolSize: 2, ...matrixBatch([[0, moved0], [1, moved1]]) });
+
+  assert.throws(() => pool.consumeMany(new Uint32Array([0, 2])), {
+    code: 'display-authority-transform-batch-unavailable',
+  });
+  assert.deepEqual(Array.from(pool.matrix(0)), IDENTITY);
+  assert.deepEqual(Array.from(pool.matrix(1)), IDENTITY);
+
+  pool.consumeMany(new Uint32Array([0, 1]));
+  pool.assertSettled();
+  assert.deepEqual(Array.from(pool.matrix(0)), moved0);
+  assert.deepEqual(Array.from(pool.matrix(1)), moved1);
 });
 
 test('AuthorityMatrixPool separates logical size from geometric backing capacity', () => {
@@ -188,7 +213,7 @@ test('ID authority roots dynamically read one pool across growth and use numeric
     runtime.authority.applyNodeTransformBatch({ poolSize: 4, ...batch });
     assert.deepEqual(matrixPosition(root.localTransform), [0, 0, 0],
       'staging must not expose a transform before its command');
-    runtime.authority.setNodeTransform({ nodeId: 0 });
+    runtime.authority.setNodeTransforms({ nodeIds: batch.nodeIds.subarray(0, 1) });
     runtime.authority.createNode(createCommand(3));
   }, { sourceTickDelta: 1, commandCount: 2 });
 
@@ -243,7 +268,7 @@ test('Prefab replacement rebinds the replacement authority root to the same matr
   const moved = matrixTransform({ position: [12, 0, 0] });
   commitAuthority(runtime, () => {
     runtime.authority.applyNodeTransformBatch({ poolSize: 1, ...matrixBatch([[0, moved]]) });
-    runtime.authority.setNodeTransform({ nodeId: 0 });
+    runtime.authority.setNodeTransforms({ nodeIds: new Uint32Array([0]) });
   });
   assert.deepEqual(matrixPosition(after.localTransform), [12, 0, 0]);
 });

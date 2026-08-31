@@ -18,6 +18,8 @@ import sys
 import time
 from typing import Any, Iterable
 
+import numpy as np
+
 from scene_engine import (
     DisplayCatalogIdentity,
     DisplayCommand,
@@ -71,6 +73,7 @@ class CommunicationWorld:
         if node_ids != tuple(range(self.roots)):
             raise RuntimeError("communication MatrixPool allocated unexpected Node IDs")
         self.position_checksum = 0
+        self.x_positions = np.zeros(self.roots, dtype=np.int64)
 
 
 class CommunicationProgram:
@@ -96,17 +99,28 @@ class CommunicationProgram:
 
     def step(self, world: CommunicationWorld, context: Any) -> MutationResult:
         start = ((context.commit.source_tick - 1) * self.updates_per_commit) % self.roots
-        indices = tuple(
-            (start + ordinal) % self.roots
-            for ordinal in range(self.updates_per_commit)
+        indices = (
+            start + np.arange(self.updates_per_commit, dtype=np.uint64)
+        ) % self.roots
+        node_ids = np.asarray(indices, dtype="<u4")
+        matrix_rows = np.zeros((len(node_ids), 4, 4), dtype="<f4")
+        matrix_rows[:, 0, 0] = 1.0
+        matrix_rows[:, 1, 1] = 1.0
+        matrix_rows[:, 2, 2] = 1.0
+        matrix_rows[:, 3, 3] = 1.0
+        matrix_rows[:, 3, 0] = float(context.commit.source_tick)
+        matrix_rows[:, 3, 1] = node_ids
+        matrix_rows[:, 3, 2] = (
+            node_ids.astype(np.uint64) + context.commit.source_tick
+        ) % 17
+        integer_ids = node_ids.astype(np.intp, copy=False)
+        world.position_checksum += int(
+            np.sum(context.commit.source_tick - world.x_positions[integer_ids])
         )
-        for index in indices:
-            old_x = int(world.matrix_pool.transform(index).matrix[12])
-            position = updated_position(index, context.commit.source_tick)
-            world.matrix_pool.set(index, display_transform(position))
-            world.position_checksum += int(position[0]) - old_x
+        world.x_positions[integer_ids] = context.commit.source_tick
+        world.matrix_pool.set_batch(node_ids, matrix_rows)
         world.total_updates += len(indices)
-        return MutationResult.changed(indices)
+        return MutationResult.changed(node_ids)
 
     def handle_input(self, world: CommunicationWorld, request: Any, context: Any) -> MutationResult:
         return MutationResult.rejected("communication-input-disabled")
@@ -136,7 +150,7 @@ class CommunicationProgram:
     def build_commit(
         self, world: CommunicationWorld, mutation: MutationResult, context: Any
     ) -> ProductCommit:
-        indices = tuple(mutation.commit_context)
+        node_ids = mutation.commit_context
         return ProductCommit(
             WORLD_CODEC,
             {
@@ -161,10 +175,7 @@ class CommunicationProgram:
                 ],
             },
             world.matrix_pool,
-            tuple(
-                DisplayCommand.set_transform(index)
-                for index in indices
-            ),
+            (DisplayCommand.set_transform_batch(node_ids),),
         )
 
 
@@ -411,7 +422,7 @@ def run_benchmark(
                 sample_flow(runtime, flow_peaks)
             while acknowledged < target:
                 commit_seq = acknowledged + 1
-                last_command_seq = commit_seq * updates_per_commit
+                last_command_seq = commit_seq
                 ack, ack_end = receive_ack(
                     peer=peer,
                     runtime=runtime,
@@ -449,7 +460,8 @@ def run_benchmark(
         )
         engine_commit_bytes = sum(transport.packet_lengths[1:])
         ack_commit_bytes = sum(ack_lengths[1:])
-        total_commands = commits * updates_per_commit
+        total_logical_commands = commits
+        total_transform_rows = commits * updates_per_commit
         correctness = {
             "peerReportContract": (
                 peer_report["schema"] == PEER_REPORT_SCHEMA
@@ -468,14 +480,15 @@ def run_benchmark(
             ),
             "pythonSessionAckCursor": (
                 final_session.last_acked_seq == commits
-                and final_session.last_acked_command_seq == total_commands
+                and final_session.last_acked_command_seq == total_logical_commands
                 and final_session.in_flight_count == 0
                 and final_session.pending_count == 0
             ),
             "javascriptClientCursor": (
                 peer_report["finalCommit"]["commitSeq"] == commits
                 and peer_report["finalCommit"]["sourceTick"] == commits
-                and peer_report["finalCommit"]["lastCommandSeq"] == total_commands
+                and peer_report["finalCommit"]["lastCommandSeq"]
+                == total_logical_commands
             ),
             "finalWorldState": peer_report["finalWorldState"] == world_snapshot(world),
             "finalDisplayTransforms": (
@@ -486,7 +499,7 @@ def run_benchmark(
                 peer_report["displaySummary"]["cursor"]["commitSeq"] == commits
                 and peer_report["displaySummary"]["cursor"]["sourceTick"] == commits
                 and peer_report["displaySummary"]["cursor"]["lastCommandSeq"]
-                == total_commands
+                == total_logical_commands
                 and peer_report["displaySummary"]["nodeCount"] == roots + 3
                 and peer_report["displaySummary"]["health"] == "ready"
             ),
@@ -523,7 +536,8 @@ def run_benchmark(
                 "roundTripMs": round(checkpoint_round_trip_ns / 1_000_000, 6),
             },
             "commits": {
-                "totalCommands": total_commands,
+                "logicalCommands": total_logical_commands,
+                "totalTransformRows": total_transform_rows,
                 "engineBytes": engine_commit_bytes,
                 "ackBytes": ack_commit_bytes,
                 "pythonTickToTransport": timing_summary(
@@ -549,7 +563,12 @@ def run_benchmark(
                 "engineAndAckBytesPerSecond": round(
                     (engine_commit_bytes + ack_commit_bytes) / elapsed_seconds, 3
                 ),
-                "displayCommandsPerSecond": round(total_commands / elapsed_seconds, 3),
+                "logicalCommandsPerSecond": round(
+                    total_logical_commands / elapsed_seconds, 3
+                ),
+                "transformRowsPerSecond": round(
+                    total_transform_rows / elapsed_seconds, 3
+                ),
                 "commitsPerSecond": round(commits / elapsed_seconds, 3),
             },
             "flowControl": {

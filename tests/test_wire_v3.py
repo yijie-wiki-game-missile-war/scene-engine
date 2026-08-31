@@ -97,7 +97,7 @@ def test_wire_v3_checkpoint_contains_world_and_binary_display_baseline_only() ->
     assert raw[4] == WIRE_MAJOR_VERSION == 3
     assert packet.kind is PacketKind.CHECKPOINT
     assert packet.header["schema"] == WIRE_SCHEMA == "scene-engine-wire@3"
-    assert packet.header["display_codec"] == DISPLAY_CODEC == "scene-engine-display-node@6"
+    assert packet.header["display_codec"] == DISPLAY_CODEC == "scene-engine-display-node@7"
     assert [item.kind for item in packet.attachments] == [
         AttachmentKind.WORLD_SNAPSHOT,
         AttachmentKind.DISPLAY_CHECKPOINT,
@@ -136,8 +136,8 @@ def test_frozen_wire_v3_golden_packets_round_trip_exact_bytes() -> None:
     } == identity
 
 
-def test_frozen_display_v6_corpus_validates_and_malformed_records_fail() -> None:
-    root = FIXTURES / "display-v6"
+def test_frozen_display_v7_corpus_validates_and_malformed_records_fail() -> None:
+    root = FIXTURES / "display-v7"
     checkpoint_value = json.loads((root / "checkpoint.json").read_text())
     command_value = json.loads((root / "command-tick.json").read_text())
     nodes = validate_display_checkpoint(checkpoint_value)
@@ -213,7 +213,7 @@ def test_validated_stream_fast_path_is_byte_exact_and_plain_data_stays_fail_clos
         base_command_seq=0,
         source_tick=1,
         matrix_pool=pool,
-        commands=(DisplayCommand.set_transform(0),),
+        commands=(DisplayCommand.set_transform_batch((0,)),),
     )
     plain_stream = stream.to_record()
 

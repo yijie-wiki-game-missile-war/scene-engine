@@ -43,7 +43,8 @@ def test_32_roots_cross_python_js_wire_and_ack_with_final_display_state() -> Non
         "profile": "roundtrip",
         "ticksPerSecond": 60,
     }
-    assert report["commits"]["totalCommands"] == 48
+    assert report["commits"]["logicalCommands"] == 6
+    assert report["commits"]["totalTransformRows"] == 48
     assert report["commits"]["pythonTickToAck"]["samples"] == 6
     assert report["commits"]["pythonTickToTransport"]["samples"] == 6
     assert report["commits"]["lengthFrameToAck"]["samples"] == 6
@@ -65,7 +66,7 @@ def test_32_roots_cross_python_js_wire_and_ack_with_final_display_state() -> Non
     assert peer["enginePacketCount"] == 7
     assert peer["transformDigest"]["rootCount"] == 32
     assert peer["finalCommit"]["commitSeq"] == 6
-    assert peer["finalCommit"]["lastCommandSeq"] == 48
+    assert peer["finalCommit"]["lastCommandSeq"] == 6
     assert peer["noRenderWork"] == {
         "catalogResourceCount": 0,
         "frameRequests": 7,
@@ -129,7 +130,7 @@ def test_benchmark_cli_prints_one_json_report_to_stdout_only() -> None:
     assert set(report["commits"]["pythonTickToTransport"]) == timing_fields
     assert report["commits"]["pythonTickToTransport"]["p50Ms"] > 0
     assert report["throughput"]["engineAndAckBytesPerSecond"] > 0
-    assert report["throughput"]["displayCommandsPerSecond"] > 0
+    assert report["throughput"]["logicalCommandsPerSecond"] > 0
     assert completed.stderr == ""
 
 
@@ -161,15 +162,16 @@ def test_benchmark_world_reuses_resident_matrix_pool_without_publication_rebuild
         world,
         SimpleNamespace(commit=SimpleNamespace(source_tick=1)),
     )
-    assert calls == [(1.0, 0.0, 1.0)]
+    assert calls == []
     current = world.matrix_pool.matrices
     assert not np.array_equal(current[0].view("<u4"), initial[0].view("<u4"))
     assert np.array_equal(current[1:].view("<u4"), initial[1:].view("<u4"))
 
     commit = program.build_commit(world, mutation, None)
-    assert calls == [(1.0, 0.0, 1.0)]
+    assert calls == []
     assert commit.display_matrix_pool is world.matrix_pool
-    assert commit.display_commands[0].node_id == 0
+    assert commit.display_commands[0].node_id is None
+    assert commit.display_commands[0].node_ids.tolist() == [0]
     assert "transform" not in commit.display_commands[0].fields
 
 

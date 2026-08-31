@@ -60,7 +60,7 @@ test('root export surface remains the exact client allowlist', () => {
 
 test('client package and Display codec versions are the frozen matrix-native release', async () => {
   const packageJson = JSON.parse(await readFile(new URL('../package.json', import.meta.url)));
-  assert.equal(packageJson.version, '0.13.0');
+  assert.equal(packageJson.version, '0.14.0');
   assert.throws(() => encodePacket('engine.checkpoint', {
     schema: 'scene-engine-wire@3',
     type: 'engine.checkpoint',
@@ -80,7 +80,7 @@ test('wire v3 fixture has binary display checkpoint and ACK command cursor', asy
   const raw = new Uint8Array(await readFile(`${FIXTURES}/checkpoint.bin`));
   const decoded = readEnginePacket(raw);
   assert.equal(decoded.header.schema, 'scene-engine-wire@3');
-  assert.equal(decoded.header.display_codec, 'scene-engine-display-node@6');
+  assert.equal(decoded.header.display_codec, 'scene-engine-display-node@7');
   assert.deepEqual(decoded.attachments.map(({ kind, encoding }) => [kind, encoding]), [
     ['world_snapshot', 'json'],
     ['display_checkpoint', 'raw'],
@@ -174,7 +174,7 @@ test('applies canonical Python wire@3 fixtures through exact Authority payloads'
   assert.deepEqual(sessions[0].log.map(([kind]) => kind), [
     'installScene', 'installNodeMatrixPool', 'createNode', 'createNode', 'createNode',
     'activate', 'start', 'summary',
-    'begin', 'applyNodeTransformBatch', 'createNode', 'setNodeTransform',
+    'begin', 'applyNodeTransformBatch', 'createNode', 'setNodeTransforms',
     'setNodeParent', 'setNodeVisible',
     'setNodeState', 'replaceNodePrefab', 'removeNode', 'seal', 'summary',
     'begin', 'applyNodeTransformBatch', 'seal', 'summary',
@@ -374,7 +374,10 @@ test('checkpoint and commit observers receive only immutable summary payloads af
 
   const checkpoint = client.applyPacket(checkpointPacket());
   const commit = client.applyPacket(commitPacket({
-    commands: [command('node-set-transform', 1, 1, { matrix: transform(2) })],
+    commands: [command('node-set-transform-batch', 1, 1, {
+      node_ids: new Uint32Array([0]),
+      matrices: transform(2),
+    })],
   }));
 
   assert.ok(checkpoint.ackPacket instanceof Uint8Array);
@@ -427,8 +430,9 @@ test('10,000 commits take summaries without materializing DisplayView', () => {
       sourceTick: commitSeq,
       worldRevision: commitSeq,
       baseCommandSeq: commitSeq - 1,
-      commands: [command('node-set-transform', commitSeq, commitSeq, {
-        matrix: transform(commitSeq),
+      commands: [command('node-set-transform-batch', commitSeq, commitSeq, {
+        node_ids: new Uint32Array([0]),
+        matrices: transform(commitSeq),
       })],
     }));
   }
@@ -478,7 +482,10 @@ test('commit stages one contiguous tensor then applies ID commands in order befo
       visible: true,
       state: { mode: 'new' },
     }),
-    command('node-set-transform', 2, 1, { matrix: transform(3) }),
+    command('node-set-transform-batch', 2, 1, {
+      node_ids: new Uint32Array([0]),
+      matrices: transform(3),
+    }),
     command('node-set-parent', 3, 1, { parent_node_id: 1 }),
     command('node-set-visible', 4, 1, { visible: false }),
     command('node-set-state', 5, 1, { state: { mode: 'active' } }),
@@ -492,7 +499,7 @@ test('commit stages one contiguous tensor then applies ID commands in order befo
   assert.equal(ack.header.last_command_seq, 7);
   assert.equal(client.currentCommit().lastCommandSeq, 7);
   assert.deepEqual(sessions[0].log.slice(6).map(([kind]) => kind), [
-    'begin', 'applyNodeTransformBatch', 'createNode', 'setNodeTransform',
+    'begin', 'applyNodeTransformBatch', 'createNode', 'setNodeTransforms',
     'setNodeParent', 'setNodeVisible',
     'setNodeState', 'replaceNodePrefab', 'removeNode', 'seal', 'summary',
   ]);
@@ -500,10 +507,34 @@ test('commit stages one contiguous tensor then applies ID commands in order befo
   assert.deepEqual([...batch.nodeIds], [0, 1]);
   assert.deepEqual([...batch.matrices.slice(0, 16)], [...transform(3)]);
   assert.deepEqual([...batch.matrices.slice(16)], [...transform(2)]);
-  const transformRecord = sessions[0].log.find(([kind]) => kind === 'setNodeTransform')[1];
-  assert.deepEqual(transformRecord, { nodeId: 0 });
-  assert.deepEqual(Object.keys(transformRecord), ['nodeId']);
+  const transformRecord = sessions[0].log.find(([kind]) => kind === 'setNodeTransforms')[1];
+  assert.deepEqual([...transformRecord.nodeIds], [0]);
+  assert.deepEqual(Object.keys(transformRecord), ['nodeIds']);
   assert.equal(Object.isFrozen(transformRecord), true);
+});
+
+test('one sparse transform batch stays one ordered Authority call', () => {
+  const { factory, sessions } = createMockDisplayFactory();
+  const client = new SceneEngineClient({ createDisplaySession: factory });
+  client.applyPacket(checkpointPacket({
+    nodes: [baselineNode(0), baselineNode(1), baselineNode(2)],
+    matrixPoolSize: 3,
+  }));
+  client.applyPacket(commitPacket({
+    matrixPoolSize: 3,
+    commands: [command('node-set-transform-batch', 1, 1, {
+      node_ids: new Uint32Array([0, 2]),
+      matrices: new Float32Array([...transform(4), ...transform(8)]),
+    })],
+  }));
+
+  const calls = sessions[0].log.filter(([kind]) => kind === 'setNodeTransforms');
+  assert.equal(calls.length, 1);
+  assert.deepEqual([...calls[0][1].nodeIds], [0, 2]);
+  const begin = sessions[0].log.findIndex(([kind]) => kind === 'begin');
+  assert.deepEqual(sessions[0].log.slice(begin, begin + 4).map(([kind]) => kind), [
+    'begin', 'applyNodeTransformBatch', 'setNodeTransforms', 'seal',
+  ]);
 });
 
 test('empty command stream still seals and ACKs while preserving command cursor', () => {

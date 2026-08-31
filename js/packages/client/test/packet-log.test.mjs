@@ -39,7 +39,7 @@ test('validates packet-log@3 command cursor and replays through sole Authority p
   assert.deepEqual(sessions[0].log.map(([kind]) => kind), [
     'installScene', 'installNodeMatrixPool', 'createNode', 'createNode', 'createNode',
     'activate', 'start', 'summary',
-    'begin', 'applyNodeTransformBatch', 'createNode', 'setNodeTransform',
+    'begin', 'applyNodeTransformBatch', 'createNode', 'setNodeTransforms',
     'setNodeParent', 'setNodeVisible',
     'setNodeState', 'replaceNodePrefab', 'removeNode', 'seal', 'summary',
     'begin', 'applyNodeTransformBatch', 'seal', 'summary',

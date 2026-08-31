@@ -1,6 +1,6 @@
 # Current architecture
 
-Scene Engine 0.15 owns one deterministic publication and browser-projection boundary:
+Scene Engine 0.16 owns one deterministic publication and browser-projection boundary:
 
 ```text
 mutable product World
@@ -8,9 +8,9 @@ mutable product World
   -> ProductCheckpoint / ProductCommit
   -> scene-engine-wire@3 exact packet bytes
   -> recorder + sessions
-  -> SceneEngineClient 0.13
+  -> SceneEngineClient 0.14
        -> immutable WorldState + cumulative ACK + O(1) DisplaySummary
-       -> DisplayRuntime 0.12 AuthorityPort
+       -> DisplayRuntime 0.13 AuthorityPort
             -> one NodeIndex / one NodeGraph / one Component scheduler / one RAF
             -> one private flat Prefab materialization ledger
             -> RenderSystem
@@ -38,7 +38,8 @@ it is not a second hierarchy or a public child-Prefab object model.
 
 ## Product and catalog boundary
 
-Python publishes only complete authority roots and later single-target mutations. It owns each root's stream-stable numeric ID,
+Python publishes only complete authority roots and later structural/state mutations plus one vector-targeted Transform batch per
+commit. It owns each root's stream-stable numeric ID,
 existence, parent ID, row in one resident NumPy matrix pool, visibility, exact `prefabId` and complete authority state. It never
 publishes a `py/` name, URL, model, texture, material, light, camera or Prefab-local path. Display deterministically maps an
 authority ID to its internal canonical name `py/<id>`; authored Scene/Prefab paths and renderer `(nodeName,componentKey)` keys
@@ -79,8 +80,8 @@ For a commit, Client:
 
 1. validates the whole packet, World candidate, ID tables, matrix tensor and command stream;
 2. opens the exact Display commit gate;
-3. stages the one dirty tensor and synchronously applies ordered ID-targeted Authority operations; create/set-transform consumes
-   its staged row at the original sequence position, preserving nested-Prefab resolver visibility and materialization order;
+3. stages the one dirty tensor and synchronously applies ordered Authority operations; one Transform batch atomically consumes
+   the existing-row ID prefix at its sequence position, while create commands claim the new-row suffix;
 4. seals the cursor;
 5. publishes WorldState and cursors;
 6. reads `runtime.summary()` and encodes cumulative ACK;

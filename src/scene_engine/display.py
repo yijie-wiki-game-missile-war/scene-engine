@@ -1,8 +1,8 @@
 """Display Node/Component publication records for the matrix-native contract.
 
-The product publishes a complete checkpoint baseline and, after that, only
-single-target logical commands.  Engine owns the command sequence and source
-tick fields that are added at wire-encoding time.
+The product publishes a complete checkpoint baseline and, after that, closed
+logical commands.  Engine owns the command sequence and source tick fields
+that are added at wire-encoding time.
 """
 
 from __future__ import annotations
@@ -21,10 +21,10 @@ from .errors import ConfigurationError
 from .json_tree import validate_json_value
 
 
-DISPLAY_CODEC = "scene-engine-display-node@6"
-DISPLAY_CHECKPOINT_SCHEMA = "scene-engine-display-checkpoint@6"
-DISPLAY_COMMAND_STREAM_SCHEMA = "scene-engine-display-command-stream@6"
-DISPLAY_COMMAND_SCHEMA = "scene-engine-node-command@6"
+DISPLAY_CODEC = "scene-engine-display-node@7"
+DISPLAY_CHECKPOINT_SCHEMA = "scene-engine-display-checkpoint@7"
+DISPLAY_COMMAND_STREAM_SCHEMA = "scene-engine-display-command-stream@7"
+DISPLAY_COMMAND_SCHEMA = "scene-engine-node-command@7"
 MAXIMUM_NODE_ID = 0xFFFFFFFE
 NULL_NODE_ID = 0xFFFFFFFF
 MAXIMUM_PREFAB_ID_BYTES = 192
@@ -40,7 +40,7 @@ _IDENTITY_MATRIX4_F32.flags.writeable = False
 _COMMAND_KINDS = frozenset(
     {
         "node-create",
-        "node-set-transform",
+        "node-set-transform-batch",
         "node-set-parent",
         "node-set-visible",
         "node-set-state",
@@ -510,6 +510,34 @@ class DisplayMatrixPool:
         np.copyto(self._matrices[index], normalized._matrix_buffer())
         self._touch(index)
 
+    def set_batch(self, node_ids: Any, matrices: Any) -> None:
+        """Replace multiple live rows atomically after validating the full batch."""
+
+        ids = _ordered_batch_node_ids(node_ids, sort=False)
+        if (
+            not isinstance(matrices, np.ndarray)
+            or matrices.shape != (len(ids), 4, 4)
+            or matrices.dtype != np.dtype("<f4")
+            or not matrices.flags.c_contiguous
+        ):
+            raise ConfigurationError(
+                "matrices must be a contiguous <f4 tensor with shape "
+                f"({len(ids)}, 4, 4)"
+            )
+        indices = ids.astype(np.intp, copy=False)
+        if len(ids) and int(ids.max()) >= self._size:
+            raise ConfigurationError("node_id is not allocated in the matrix pool")
+        if len(ids) and np.any(self._retired[indices]):
+            raise ConfigurationError("node_id is retired")
+
+        dirty = {int(node_id) for node_id in ids}
+        next_dirty = self._dirty_ids | dirty
+        next_version = self._version + 1
+        self._matrices.view("<u4")[indices] = matrices.view("<u4")
+        self._versions[indices] = next_version
+        self._version = next_version
+        self._dirty_ids = next_dirty
+
     def retire(self, node_id: int) -> None:
         """Permanently retire one row, writing an exact all-zero tombstone."""
 
@@ -607,16 +635,15 @@ class DisplayMatrixPool:
         expected_node_ids: Sequence[int],
         publication_updates: Sequence[tuple[int, bool]],
     ) -> tuple[np.ndarray, np.ndarray, _MatrixPoolPublishToken]:
-        expected = tuple(expected_node_ids)
+        expected = np.asarray(expected_node_ids, dtype="<u4", order="C")
         if len(self._dirty_ids) != len(expected) or any(
-            node_id not in self._dirty_ids for node_id in expected
+            int(node_id) not in self._dirty_ids for node_id in expected
         ):
             raise ConfigurationError(
-                "dirty matrix Node IDs must exactly match create/set-transform commands"
+                "dirty matrix Node IDs must exactly match create/transform batch targets"
             )
-        mutable_node_ids = np.asarray(expected, dtype="<u4")
-        matrices_bytes = self._matrices[mutable_node_ids].tobytes(order="C")
-        node_ids = np.frombuffer(mutable_node_ids.tobytes(), dtype="<u4")
+        matrices_bytes = self._matrices[expected].tobytes(order="C")
+        node_ids = np.frombuffer(expected.tobytes(), dtype="<u4")
         matrices = np.frombuffer(matrices_bytes, dtype="<f4").reshape(
             (len(expected), 4, 4)
         )
@@ -663,47 +690,53 @@ class DisplayMatrixPool:
             raise ConfigurationError(
                 "display matrix pool changed after its packet snapshot was sealed"
             )
-        for node_id, version in zip(dirty_node_ids, dirty_versions, strict=True):
-            index = int(node_id)
-            if index < self._size and self._versions[index] == version:
-                self._dirty_ids.discard(index)
-        for node_id, value, version in zip(
-            publication_node_ids,
-            publication_values,
-            publication_versions,
-            strict=True,
-        ):
-            index = int(node_id)
-            if index < self._size and self._versions[index] == version:
-                self._published[index] = bool(value)
-                if value:
-                    self._pending_created_ids.discard(index)
-                else:
-                    self._pending_retired_ids.discard(index)
-        # Individual ``discard`` calls leave a large, empty hash table behind.
-        # Release that transient publication bookkeeping once a sealed packet
-        # has drained it so the resident cost returns to the NumPy-backed pool.
-        if not self._dirty_ids:
-            self._dirty_ids.clear()
-        if not self._pending_created_ids:
-            self._pending_created_ids.clear()
-        if not self._pending_retired_ids:
-            self._pending_retired_ids.clear()
+        # A seal snapshots the complete dirty/create/remove sets.  The global
+        # generation check above proves that none of those rows changed after
+        # sealing, so confirmation can drain the batch without per-ID version
+        # checks or hash-table discards.
+        self._dirty_ids.clear()
+        if len(publication_node_ids):
+            self._published[publication_node_ids] = publication_values
+        self._pending_created_ids.clear()
+        self._pending_retired_ids.clear()
 
     def _validate_command_lifecycle(
         self, commands: Sequence["DisplayCommand"]
-    ) -> tuple[tuple[tuple[int, bool], ...], tuple[int, ...], int]:
+    ) -> tuple[tuple[tuple[int, bool], ...], np.ndarray, int]:
         active: dict[int, bool] = {}
         updates: list[tuple[int, bool]] = []
         create_targets: set[int] = set()
-        matrix_targets: set[int] = set()
         remove_targets: set[int] = set()
+        transform_batch_ids: np.ndarray | None = None
         maximum_json_depth = 0
 
         def is_active(node_id: int) -> bool:
             return active.get(node_id, bool(self._published[node_id]))
 
+        transform_batch_seen = False
         for command in commands:
+            if command.kind == "node-set-transform-batch":
+                if transform_batch_seen:
+                    raise ConfigurationError(
+                        "display command stream may contain at most one transform batch"
+                    )
+                transform_batch_seen = True
+                assert command.node_ids is not None
+                transform_batch_ids = command.node_ids
+                if int(transform_batch_ids[-1]) >= self._size:
+                    raise ConfigurationError(
+                        "node_id is not allocated in the matrix pool"
+                    )
+                indices = transform_batch_ids.astype(np.intp, copy=False)
+                if bool(
+                    np.any(~self._published[indices])
+                    or np.any(self._retired[indices])
+                ):
+                    raise ConfigurationError(
+                        "node-set-transform-batch targets a Node ID that is not active"
+                    )
+                continue
+            assert command.node_id is not None
             node_id = self._require_allocated(command.node_id)
             if command.kind == "node-create":
                 if node_id not in self._pending_created_ids or is_active(node_id):
@@ -717,7 +750,6 @@ class DisplayMatrixPool:
                         raise ConfigurationError("node-create parent is not active")
                 active[node_id] = True
                 create_targets.add(node_id)
-                matrix_targets.add(node_id)
                 maximum_json_depth = max(
                     maximum_json_depth,
                     _maximum_json_depth(command.fields["state"]),
@@ -741,13 +773,7 @@ class DisplayMatrixPool:
                 raise ConfigurationError(
                     f"{command.kind} targets a retired Node ID"
                 )
-            if command.kind == "node-set-transform":
-                if node_id in matrix_targets:
-                    raise ConfigurationError(
-                        "create/set-transform commands must target each Node ID at most once"
-                    )
-                matrix_targets.add(node_id)
-            elif command.kind == "node-set-parent":
+            if command.kind == "node-set-parent":
                 parent = command.fields["parent_node_id"]
                 if parent is not None:
                     parent = self._require_allocated(parent, "parent_node_id")
@@ -766,7 +792,14 @@ class DisplayMatrixPool:
             raise ConfigurationError(
                 "node-remove commands must exactly match just-retired Node IDs"
             )
-        return tuple(updates), tuple(sorted(matrix_targets)), maximum_json_depth
+        created = np.asarray(sorted(create_targets), dtype="<u4")
+        if transform_batch_ids is None:
+            expected_dirty = created
+        elif len(created):
+            expected_dirty = np.concatenate((transform_batch_ids, created))
+        else:
+            expected_dirty = transform_batch_ids
+        return tuple(updates), expected_dirty, maximum_json_depth
 
 
 def _display_transform(
@@ -827,17 +860,32 @@ class DisplayNode:
         }
 
 
-@dataclass(frozen=True, slots=True, init=False)
+@dataclass(frozen=True, slots=True, init=False, eq=False)
 class DisplayCommand:
-    """One closed logical mutation targeting a stream-stable uint32 Node ID."""
+    """One closed logical mutation targeting stream-stable uint32 Node IDs."""
 
     kind: str
-    node_id: int
+    node_id: int | None
+    node_ids: np.ndarray | None
     fields: Mapping[str, Any]
 
     def __init__(self, *_args: Any, **_kwargs: Any) -> None:
         raise ConfigurationError(
             "DisplayCommand must be created with a named constructor"
+        )
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, DisplayCommand):
+            return NotImplemented
+        if self.node_ids is None or other.node_ids is None:
+            node_ids_equal = self.node_ids is other.node_ids
+        else:
+            node_ids_equal = bool(np.array_equal(self.node_ids, other.node_ids))
+        return (
+            self.kind == other.kind
+            and self.node_id == other.node_id
+            and node_ids_equal
+            and self.fields == other.fields
         )
 
     @classmethod
@@ -855,8 +903,8 @@ class DisplayCommand:
         )
 
     @classmethod
-    def set_transform(cls, node_id: int) -> "DisplayCommand":
-        return _new_display_command(kind="node-set-transform", node_id=node_id)
+    def set_transform_batch(cls, node_ids: Any) -> "DisplayCommand":
+        return _new_display_transform_batch_command(node_ids)
 
     @classmethod
     def set_parent(
@@ -898,14 +946,17 @@ class DisplayCommand:
     def to_record(self, *, command_seq: int, source_tick: int) -> dict[str, Any]:
         _safe_integer(command_seq, "command_seq")
         _safe_integer(source_tick, "source_tick")
-        return {
+        common = {
             "schema": DISPLAY_COMMAND_SCHEMA,
             "command_seq": command_seq,
             "source_tick": source_tick,
             "kind": self.kind,
-            "node_id": self.node_id,
-            **_thaw(self.fields),
         }
+        if self.kind == "node-set-transform-batch":
+            assert self.node_ids is not None
+            return {**common, "node_ids": self.node_ids.tolist()}
+        assert self.node_id is not None
+        return {**common, "node_id": self.node_id, **_thaw(self.fields)}
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -985,6 +1036,16 @@ class ValidatedDisplayCommandStream:
     def confirm_published(self) -> None:
         self._publish_token.confirm()
 
+    @property
+    def transform_batch_matrices(self) -> np.ndarray | None:
+        """Return the batch's aligned read-only matrix view without another copy."""
+
+        for command in self.commands:
+            if command.kind == "node-set-transform-batch":
+                assert command.node_ids is not None
+                return self.dirty_matrices[: len(command.node_ids)]
+        return None
+
     def to_record(self) -> dict[str, Any]:
         return {
             "schema": DISPLAY_COMMAND_STREAM_SCHEMA,
@@ -1040,7 +1101,18 @@ def _new_display_command(
     command = object.__new__(DisplayCommand)
     object.__setattr__(command, "kind", kind)
     object.__setattr__(command, "node_id", normalized_node_id)
+    object.__setattr__(command, "node_ids", None)
     object.__setattr__(command, "fields", _freeze(normalized))
+    return command
+
+
+def _new_display_transform_batch_command(node_ids: Any) -> DisplayCommand:
+    normalized = _ordered_batch_node_ids(node_ids, sort=True)
+    command = object.__new__(DisplayCommand)
+    object.__setattr__(command, "kind", "node-set-transform-batch")
+    object.__setattr__(command, "node_id", None)
+    object.__setattr__(command, "node_ids", normalized)
+    object.__setattr__(command, "fields", MappingProxyType({}))
     return command
 
 
@@ -1220,17 +1292,21 @@ def validate_display_command_stream(
 
 
 def _command_from_record(value: Any) -> DisplayCommand:
-    common = {"schema", "command_seq", "source_tick", "kind", "node_id"}
-    if not isinstance(value, dict) or not common.issubset(value):
+    metadata = {"schema", "command_seq", "source_tick", "kind"}
+    if not isinstance(value, dict) or not metadata.issubset(value):
         raise ConfigurationError("display command record fields are invalid")
     if value["schema"] != DISPLAY_COMMAND_SCHEMA:
         raise ConfigurationError("display command schema is invalid")
     _safe_integer(value["command_seq"], "command_seq")
     _safe_integer(value["source_tick"], "source_tick")
     kind = value["kind"]
+    if kind == "node-set-transform-batch":
+        if set(value) != metadata | {"node_ids"}:
+            raise ConfigurationError("display command record fields are invalid")
+        return _new_display_transform_batch_command(value["node_ids"])
+    common = metadata | {"node_id"}
     expected_by_kind = {
         "node-create": {"parent_node_id", "prefab_id", "transform_mode", "visible", "state"},
-        "node-set-transform": set(),
         "node-set-parent": {"parent_node_id"},
         "node-set-visible": {"visible"},
         "node-set-state": {"state"},
@@ -1292,10 +1368,6 @@ def _normalize_command_fields(
             "visible": node.visible,
             "state": node.state,
         }
-    if kind == "node-set-transform":
-        if actual:
-            raise ConfigurationError("node-set-transform fields are invalid")
-        return {}
     if kind == "node-set-parent":
         if actual != {"parent_node_id"}:
             raise ConfigurationError("node-set-parent fields are invalid")
@@ -1427,14 +1499,18 @@ def _validate_baseline_pool(
 
 
 def _matrix_command_targets(commands: Sequence[DisplayCommand]) -> tuple[int, ...]:
-    targets = tuple(
-        command.node_id
-        for command in commands
-        if command.kind in {"node-create", "node-set-transform"}
-    )
+    mutable: list[int] = []
+    for command in commands:
+        if command.kind == "node-set-transform-batch":
+            assert command.node_ids is not None
+            mutable.extend(int(node_id) for node_id in command.node_ids)
+        elif command.kind == "node-create":
+            assert command.node_id is not None
+            mutable.append(command.node_id)
+    targets = tuple(mutable)
     if len(set(targets)) != len(targets):
         raise ConfigurationError(
-            "create/set-transform commands must target each Node ID at most once"
+            "create/transform batch targets must be unique"
         )
     return tuple(sorted(targets))
 
@@ -1444,6 +1520,14 @@ def _validate_command_pool_ids(
 ) -> None:
     _pool_size(pool_size)
     for command in commands:
+        if command.kind == "node-set-transform-batch":
+            assert command.node_ids is not None
+            if len(command.node_ids) and int(command.node_ids[-1]) >= pool_size:
+                raise ConfigurationError(
+                    "display transform batch Node ID is outside matrix_pool_size"
+                )
+            continue
+        assert command.node_id is not None
         if command.node_id >= pool_size:
             raise ConfigurationError("display command Node ID is outside matrix_pool_size")
         if command.kind in {"node-create", "node-set-parent"}:
@@ -1475,13 +1559,47 @@ def _validate_dirty_batch(
     if len(node_ids) and int(node_ids[-1]) >= pool_size:
         raise ConfigurationError("dirty_node_id is outside matrix_pool_size")
     _validate_matrix_tensor(matrices, len(node_ids), "dirty_matrices")
+    batches = [
+        command for command in commands if command.kind == "node-set-transform-batch"
+    ]
+    if len(batches) > 1:
+        raise ConfigurationError(
+            "display command stream may contain at most one transform batch"
+        )
+    batch_count = 0
+    if batches:
+        batch_ids = batches[0].node_ids
+        assert batch_ids is not None
+        batch_count = len(batch_ids)
+        if batch_count > len(node_ids) or not np.array_equal(
+            batch_ids, node_ids[:batch_count]
+        ):
+            raise ConfigurationError(
+                "transform batch Node IDs must equal the dirty Node ID prefix"
+            )
+    create_targets = tuple(
+        sorted(
+            command.node_id
+            for command in commands
+            if command.kind == "node-create" and command.node_id is not None
+        )
+    )
+    if len(create_targets) != len(node_ids) - batch_count or any(
+        target != int(node_id)
+        for target, node_id in zip(
+            create_targets, node_ids[batch_count:], strict=True
+        )
+    ):
+        raise ConfigurationError(
+            "dirty Node IDs after the transform batch must exactly match create commands"
+        )
     targets = _matrix_command_targets(commands)
     if len(targets) != len(node_ids) or any(
         target != int(node_id)
         for target, node_id in zip(targets, node_ids, strict=True)
     ):
         raise ConfigurationError(
-            "dirty matrix Node IDs must exactly match create/set-transform commands"
+            "dirty matrix Node IDs must exactly match create/transform batch targets"
         )
 
 
@@ -1697,6 +1815,40 @@ def _command_json_depth(command: DisplayCommand) -> int:
     if command.kind in {"node-create", "node-set-state", "node-replace-prefab"}:
         return _maximum_json_depth(command.fields["state"])
     return 0
+
+
+def _ordered_batch_node_ids(value: Any, *, sort: bool) -> np.ndarray:
+    if isinstance(value, np.ndarray):
+        if value.ndim != 1 or value.dtype.kind not in {"i", "u"}:
+            raise ConfigurationError(
+                "transform batch node_ids must be a one-dimensional integer array"
+            )
+        if not len(value):
+            raise ConfigurationError("transform batch node_ids must not be empty")
+        if value.dtype.kind == "i" and bool(np.any(value < 0)):
+            raise ConfigurationError("node_id must be a uint32 Node ID")
+        if int(value.max()) > MAXIMUM_NODE_ID:
+            raise ConfigurationError("node_id must be a uint32 Node ID")
+        mutable = np.array(value, dtype="<u4", order="C", copy=True)
+    elif isinstance(value, Sequence) and not isinstance(
+        value, (str, bytes, bytearray, memoryview)
+    ):
+        raw = list(value)
+        if not raw:
+            raise ConfigurationError("transform batch node_ids must not be empty")
+        mutable = np.asarray(
+            [_node_id(item, "node_id") for item in raw], dtype="<u4"
+        )
+    else:
+        raise ConfigurationError("transform batch node_ids must be a sequence")
+    if sort:
+        mutable.sort()
+        ordered = mutable
+    else:
+        ordered = np.sort(mutable)
+    if len(ordered) > 1 and bool(np.any(ordered[1:] == ordered[:-1])):
+        raise ConfigurationError("transform batch node_ids must be unique")
+    return np.frombuffer(mutable.tobytes(), dtype="<u4")
 
 
 def _maximum_json_depth(value: Any) -> int:

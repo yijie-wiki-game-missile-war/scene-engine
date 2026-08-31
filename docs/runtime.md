@@ -70,21 +70,27 @@ identity = DisplayCatalogIdentity.from_record(record)
 ```
 
 One `DisplayMatrixPool` is resident for the whole stream. `append(transform)` allocates the next stable authority `node_id`;
-`set(node_id, transform)` changes that row and marks it dirty; `retire(node_id)` writes an all-positive-zero tombstone that is
+`set(node_id, transform)` changes one row, `set_batch(node_ids, matrices)` validates then writes an aligned NumPy batch, and
+`retire(node_id)` writes an all-positive-zero tombstone that is
 never reused in the same stream. The same pool object must be supplied by every checkpoint and commit. Its NumPy backing tensor
 has shape `(n,4,4)`, dtype `<f4`, and axes `[node,column,row]`, making every row the exact contiguous column-major wire matrix.
 After the initial checkpoint, append/create and retire/remove are paired publication transitions: a new ID cannot be mutated as
 an existing Node, a live ID cannot be removed before its row is retired, and an unpublished ID cannot be retired. Dirty IDs are
 tracked directly, so sealing a sparse `m`-row update does not scan the full `n`-row pool.
 
+`set_batch` preserves the caller's ID/row alignment even when IDs are not ordered. `set_transform_batch` owns a sorted,
+read-only `<u4` copy of those IDs; sealing uses that vector to gather the corresponding pool rows once into the aligned
+read-only `(m,4,4)` tensor. It does not construct, serialize or confirm one command per row.
+
 Checkpoint nodes are complete parent-first authority roots. Product code supplies stable `node_id`/`parent_id`, exact
 registered `prefab_id`, transform mode, visibility and complete authority state; the Node obtains its local Matrix4 from the
 pool row with the same ID. The browser Client remains the first matrix-semantic acceptance gate.
-After checkpoint it publishes only single-target commands created through named constructors:
+After checkpoint it publishes one vector-targeted Transform command plus single-target structural/state commands through named
+constructors:
 
 ```python
 DisplayCommand.create_node(node)
-DisplayCommand.set_transform(node_id)
+DisplayCommand.set_transform_batch(node_ids)
 DisplayCommand.set_parent(node_id, parent_id)
 DisplayCommand.set_visible(node_id, visible)
 DisplayCommand.set_state(node_id, complete_state)
@@ -95,16 +101,17 @@ DisplayCommand.remove(node_id)
 Generic `DisplayCommand(kind=..., **fields)` construction is intentionally unavailable. Engine owns `command_seq`,
 `source_tick`, stream/commit/revision and encoded bytes.
 
-Every command target is a checked `uint32` pool row. A create or set-transform command must correspond exactly to one dirty
-pool row; dirty IDs are unique and encoded in increasing order with their `(m,4,4)` tensor. Missing/extra dirty rows, duplicate
-matrix-bearing targets, a retired target for any non-remove command, a second removal, or a parent outside the active set
+Every scalar command target and every Transform-batch ID is a checked `uint32` pool row. A commit has at most one non-empty
+Transform batch; it occupies one `command_seq` regardless of row count. Its sorted existing-row IDs plus create targets must
+correspond exactly to the sorted dirty IDs and aligned `(m,4,4)` tensor. Missing/extra dirty rows, overlap with create targets,
+a second batch, a retired target for any non-remove command, a second removal, or a parent outside the active set
 fails before publication. Successful packet encode
 clears only the rows captured by that packet; an encoding failure does not silently lose dirty state.
 
 ## Nested Prefab projection
 
-Nested Prefabs are entirely inside `@scene-engine/display@0.12.0` and Prefab definition schema
-`scene-engine-prefab-definition@4`. They do not change `scene-engine-wire@3`, `scene-engine-display-node@6`,
+Nested Prefabs are entirely inside `@scene-engine/display@0.13.0` and Prefab definition schema
+`scene-engine-prefab-definition@4`. They do not change `scene-engine-wire@3`, `scene-engine-display-node@7`,
 `scene-engine-packet-log@3`, checkpoint records, Display commands or ACK cursors.
 
 Python still creates and controls only the outer `py/` authority root. `set_state` sends one complete outer state. Display calls

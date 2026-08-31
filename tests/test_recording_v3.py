@@ -4,6 +4,7 @@ import hashlib
 import json
 import struct
 
+import numpy as np
 import pytest
 import scene_engine.wire as wire_module
 
@@ -102,7 +103,17 @@ def commit(
     cause: str = "tick",
 ) -> bytes:
     pool = DisplayMatrixPool()
-    maximum_node_id = max((command.node_id for command in commands), default=0)
+    targeted_node_ids = [
+        node_id
+        for command in commands
+        for node_id in (
+            tuple(int(value) for value in command.node_ids)
+            if command.node_ids is not None
+            else (command.node_id,)
+        )
+        if node_id is not None
+    ]
+    maximum_node_id = max(targeted_node_ids, default=0)
     created_node_ids = {
         command.node_id for command in commands if command.kind == "node-create"
     }
@@ -133,6 +144,10 @@ def commit(
     for command in commands:
         if command.kind == "node-remove":
             pool.retire(command.node_id)
+        elif command.kind == "node-set-transform-batch":
+            assert command.node_ids is not None
+            rows = np.ascontiguousarray(pool.matrices[command.node_ids], dtype="<f4")
+            pool.set_batch(command.node_ids, rows)
     display, cursor = encode_display_command_stream(
         base_command_seq=base_command_seq,
         source_tick=source_tick,
@@ -234,6 +249,24 @@ def test_recording_reuses_each_packet_display_decode_for_index_and_lifecycle(
     decode_calls = 0
     assert len(rebuild_packet_index(physical(initial, tick))) == 2
     assert decode_calls == 2
+
+
+def test_recording_tracks_every_transform_batch_target_as_active() -> None:
+    initial = checkpoint(matrix_pool_size=2, active_node_ids=(0, 1))
+    update = commit(
+        commit_seq=1,
+        source_tick=1,
+        world_revision=1,
+        base_command_seq=0,
+        commands=(DisplayCommand.set_transform_batch((1, 0)),),
+    )
+
+    entries = rebuild_packet_index(physical(initial, update))
+    assert entries[-1].last_command_seq == 1
+
+    tombstoned_initial = checkpoint(matrix_pool_size=2, active_node_ids=(0,))
+    with pytest.raises(RecordingError, match="transform batch target is not active"):
+        rebuild_packet_index(physical(tombstoned_initial, update))
 
 
 def test_writer_leaves_incomplete_marker_until_seal(tmp_path) -> None:
@@ -351,7 +384,7 @@ def test_packet_log_rejects_sparse_uint32_pool_growth_without_suffix_allocation(
         world_codec="world@1",
         world_patch={"schema": "scene-engine-json-tree@1", "changes": []},
         display_commands={
-            "schema": "scene-engine-display-command-stream@6",
+            "schema": "scene-engine-display-command-stream@7",
             "base_command_seq": 0,
             "last_command_seq": 0,
             "matrix_pool_size": 0xFFFFFFFF,

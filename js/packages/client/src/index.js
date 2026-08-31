@@ -14,7 +14,6 @@ import {
 
 const AUTHORITY_METHOD = Object.freeze({
   'node-create': 'createNode',
-  'node-set-transform': 'setNodeTransform',
   'node-set-parent': 'setNodeParent',
   'node-set-visible': 'setNodeVisible',
   'node-set-state': 'setNodeState',
@@ -243,6 +242,14 @@ export class SceneEngineClient {
       );
       let removedNodeIds = null;
       for (const command of stream.commands) {
+        if (command.kind === 'node-set-transform-batch') {
+          callAuthority(
+            session.authorityPort,
+            'setNodeTransforms',
+            transformBatchPayload(command),
+          );
+          continue;
+        }
         callAuthority(
           session.authorityPort,
           AUTHORITY_METHOD[command.kind],
@@ -462,6 +469,7 @@ function createSession(value) {
   requireMethods(value.authorityPort, [
     'installNodeMatrixPool',
     'applyNodeTransformBatch',
+    'setNodeTransforms',
     ...Object.values(AUTHORITY_METHOD),
   ], 'authority-port-invalid');
   requireMethods(value.commitGate, ['begin', 'seal', 'fail'], 'display-commit-gate-invalid');
@@ -509,8 +517,6 @@ function authorityPayload(command) {
   switch (command.kind) {
     case 'node-create':
       return authorityNodePayload(command);
-    case 'node-set-transform':
-      return Object.freeze({ nodeId: command.nodeId });
     case 'node-set-parent':
       return Object.freeze({ nodeId: command.nodeId, parentNodeId: command.parentNodeId });
     case 'node-set-visible':
@@ -553,6 +559,12 @@ function commandMatrixBatchPayload(stream) {
     poolSize: stream.matrixPoolSize,
     nodeIds: stream.dirtyNodeIds,
     matrices: takeOwnedDisplayMatrixTensor(stream.dirtyMatrices),
+  });
+}
+
+function transformBatchPayload(command) {
+  return Object.freeze({
+    nodeIds: command.nodeIds,
   });
 }
 

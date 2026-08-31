@@ -283,8 +283,8 @@ test('real DisplayRuntime returns no ACK for command or world-overflow commit fa
   let overflowOutcome = noOverflowOutcome;
   assert.throws(() => {
     overflowOutcome = overflowClient.applyPacket(commitPacket({
-      commands: [command('node-set-transform', 1, 1, {
-        node_id: 0, matrix: hugeRootScale,
+      commands: [command('node-set-transform-batch', 1, 1, {
+        node_ids: new Uint32Array([0]), matrices: hugeRootScale,
       })],
       matrixPoolSize: nodes.length,
     }));

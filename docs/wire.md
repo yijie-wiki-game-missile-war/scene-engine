@@ -31,7 +31,7 @@ Exact layouts:
 - ACK/error: no attachments.
 
 Checkpoint and commit headers carry `stream_id`, `commit_seq`, `source_tick`, `world_revision`, `last_command_seq`, `world_codec`
-and `display_codec=scene-engine-display-node@6`. Commit adds cause and causation ID. ACK is cumulative over stream, commit and
+and `display_codec=scene-engine-display-node@7`. Commit adds cause and causation ID. ACK is cumulative over stream, commit and
 last command cursor.
 
 The Display checkpoint contains:
@@ -52,9 +52,9 @@ Prefab/Resource/Component and authority-state schema definitions, writes a build
 values. Wire transports the identities; it does not invent or recompute product catalog content.
 
 The command stream contains a base cursor, source-tick seal, the resulting matrix-pool size, one sorted dirty-ID vector, its
-aligned matrix tensor and strict `scene-engine-node-command@6` records. Sequence is the
-base plus one-based record order, last cursor is base plus count and the sealed source tick must equal the packet header. Every command has one target and is
-create, transform, reparent, visibility, complete state replacement, exact Prefab replacement or remove.
+aligned matrix tensor and strict `scene-engine-node-command@7` records. Sequence is the base plus one-based record order, last
+cursor is base plus count and the sealed source tick must equal the packet header. Structural/state commands have one target;
+one optional Transform-batch command has an arbitrary sorted ID vector and occupies one sequence regardless of its row count.
 
 An authority `node_id` is a little-endian `u32` matrix-pool row in the range `0..0xfffffffe`; `0xffffffff` is reserved solely
 for a null parent. IDs are stable for the lifetime of one stream. The pool allocates monotonically, never reuses a removed ID,
@@ -64,7 +64,7 @@ browser-only concern.
 
 ## Binary Display payloads
 
-Both raw Display payloads begin with a four-byte kind magic (`SDCP` checkpoint or `SDCS` command stream), payload version `3`,
+Both raw Display payloads begin with a four-byte kind magic (`SDCP` checkpoint or `SDCS` command stream), payload version `4`,
 scalar code `1` (`float32`) and zero `u16` flags. Strings are fatal UTF-8 prefixed by `u16` byte length and cannot use length
 `0xffff`. State remains canonical finite/safe-integer JSON prefixed by a `u32`
 byte length. SHA-256 identities are transported as their 32 raw bytes. Python's structural decoder rejects unknown scalar
@@ -83,11 +83,12 @@ Command stream then stores `base_command_seq` and `source_tick` as `u64`, follow
 `dirty_count * 16 * f32` matrix tensor in the same row order. `0 <= dirty_count <= pool_size_after`; a fully dirty pool where
 `dirty_count == pool_size_after` is legal. One SDCS payload has a fixed maximum of `65,536` commands; this is a codec invariant,
 not an `EngineLimits` option, and both encoders and decoders reject a larger count before traversing or allocating command
-records. Command records follow the tensor. Each starts with one opcode byte followed by a target `node_id`:
+records. Command records follow the tensor. Scalar records start with one opcode byte followed by a target `node_id`; opcode 2
+instead carries only a batch-row count because its IDs and matrices already occupy the global dirty blocks:
 
 ```text
 1 create          node_id, parent_id, Prefab ID, flags byte, state
-2 set-transform   node_id
+2 set-transforms  transform_count
 3 set-parent      node_id, parent_id
 4 set-visible     node_id, u8 boolean (0 or 1)
 5 set-state       node_id, state
@@ -95,10 +96,14 @@ records. Command records follow the tensor. Each starts with one opcode byte fol
 7 remove          node_id
 ```
 
-The dirty-ID set must equal exactly the set of create and set-transform targets in that command stream; each such ID may occur
-only once. This keeps every logical command
-in its original sequence position while moving its 64-byte value into the single tensor. Safe-integer cursor bounds and exact
-packet-header cursor/tick agreement remain mandatory.
+At most one non-empty Transform batch is legal. Its targets are exactly the first `transform_count` dirty IDs; remaining dirty
+IDs must exactly equal the create targets. Existing IDs precede newly appended create IDs, so the globally sorted table forms
+this partition without transmitting a second ID vector. The two target sets may not overlap. The entire batch remains at one
+logical sequence position and increments the cursor once. Safe-integer cursor bounds and exact packet-header cursor/tick
+agreement remain mandatory.
+
+The semantic `node-set-transform-batch` record exposes those targets as `node_ids`; only the binary record reduces that field to
+`transform_count`, because the exact IDs are already the dirty-table prefix.
 
 Within a stream, `pool_size_after` never shrinks. If it grows from `n` to `n+k`, every new suffix ID `n..n+k-1` must appear in
 the dirty table and in a create command in that commit. A create cannot target an older ID, and a removed/tombstoned ID can
@@ -128,13 +133,14 @@ The JavaScript Client is the first semantic acceptance gate. It copies each chec
 `Float32Array`, converts negative zero to positive zero and validates every active/dirty row for finite values, the exact affine
 row (`m[3]=m[7]=m[11]=0`, `m[15]=1`) and a strictly positive upper-left 3x3 determinant. This admits right-handed affine shear
 and rejects reflections and singular matrices before Authority mutation or ACK. Display repeats the same checks defensively,
-stages an incremental tensor once; create/set-transform consumes its row by ID at the command's sequence position, and each
+stages an incremental tensor once; one set-transforms operation atomically consumes the existing-row prefix at the command's
+sequence position, while create records claim new-row suffix rows, and each
 authority Node reads its local row without TRS decomposition. float16 and the old TRS object shape are not part of the wire
 contract.
 
 World patch identity is `scene-engine-json-tree@1`; operations are `set`, `unset` and `append`. All paths and values are validated
 before mutation. Raw packet bytes are immutable after first encode, and packet logs never decode/re-encode them. Cross-language
-fixtures live under `fixtures/wire-v3`, `fixtures/display-v6`, `fixtures/display-catalog-v2` and the Client fixture directories.
+fixtures live under `fixtures/wire-v3`, `fixtures/display-v7`, `fixtures/display-catalog-v2` and the Client fixture directories.
 `scripts/generate_fixtures.py` is their sole writer; the Client package's JavaScript generator delegates to it. The canonical
 cross-language corpus includes a sheared affine matrix and the Client asserts its packaged Wire files are byte-identical to the
 root corpus.

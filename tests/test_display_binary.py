@@ -110,8 +110,8 @@ def checkpoint(*, state: dict | None = None) -> dict:
 
 def command_stream() -> dict:
     variants = [
-        ("node-create", 0, {"parent_node_id": None, "prefab_id": "world/root", "transform_mode": "live", "visible": True, "state": {"created": True}}),
-        ("node-set-transform", 2, {}),
+        ("node-create", 2, {"parent_node_id": None, "prefab_id": "world/root", "transform_mode": "live", "visible": True, "state": {"created": True}}),
+        ("node-set-transform-batch", 2, {"node_ids": [0]}),
         ("node-set-parent", 3, {"parent_node_id": 0}),
         ("node-set-visible", 4, {"visible": False}),
         ("node-set-state", 5, {"state": {"items": [1, 2]}}),
@@ -127,14 +127,20 @@ def command_stream() -> dict:
         "dirty_node_ids": [0, 2],
         "dirty_matrices": [_tensor_row(POSE), _tensor_row(IDENTITY)],
         "commands": [
-            {
+            ({
+                "schema": DISPLAY_COMMAND_SCHEMA,
+                "command_seq": base + index,
+                "source_tick": 20,
+                "kind": kind,
+                **fields,
+            } if kind == "node-set-transform-batch" else {
                 "schema": DISPLAY_COMMAND_SCHEMA,
                 "command_seq": base + index,
                 "source_tick": 20,
                 "kind": kind,
                 "node_id": node_id,
                 **fields,
-            }
+            })
             for index, (kind, node_id, fields) in enumerate(variants, 1)
         ],
     }
@@ -147,7 +153,7 @@ def test_binary_checkpoint_round_trips_full_pool_and_sparse_node_records() -> No
     assert encoded.last_command_seq == 7
     assert bytes(encoded) == encoded.bytes
     assert encoded.bytes[:4] == DISPLAY_BINARY_CHECKPOINT_MAGIC
-    assert encoded.bytes[4] == DISPLAY_BINARY_VERSION == 3
+    assert encoded.bytes[4] == DISPLAY_BINARY_VERSION == 4
     assert encoded.bytes[5] == DISPLAY_BINARY_SCALAR_FLOAT32
     assert struct.unpack_from("<QII", encoded.bytes, 8) == (7, 3, 2)
     assert struct.unpack_from("<16f", encoded.bytes, 24) == pytest.approx(POSE)
@@ -210,7 +216,7 @@ def test_binary_command_stream_round_trips_batch_then_all_command_opcodes() -> N
         decoded["dirty_matrices"], dtype="<f4", shape=(2, 4, 4)
     )
     assert [record["kind"] for record in decoded["commands"]] == [
-        "node-create", "node-set-transform", "node-set-parent",
+        "node-create", "node-set-transform-batch", "node-set-parent",
         "node-set-visible", "node-set-state", "node-replace-prefab", "node-remove",
     ]
     assert not any("transform" in record for record in decoded["commands"])
@@ -263,13 +269,18 @@ def test_typed_stream_gathers_pool_rows_without_inline_matrix() -> None:
         base_command_seq=0,
         source_tick=1,
         matrix_pool=pool,
-        commands=(DisplayCommand.set_transform(node_id),),
+        commands=(DisplayCommand.set_transform_batch((node_id,)),),
     )
 
     encoded = encode_display_command_stream_binary(stream, 1, cursor)
     assert encoded.bytes[40:104] == raw
+    assert encoded.bytes[104:] == struct.pack("<BI", 2, 1)
     decoded = decode_display_command_stream_binary(encoded.bytes, 1, cursor)
     assert "transform" not in decoded["commands"][0]
+    decoded_batch_ids = _assert_immutable_c_array(
+        decoded["commands"][0]["node_ids"], dtype="<u4", shape=(1,)
+    )
+    assert np.shares_memory(decoded_batch_ids, decoded["dirty_node_ids"])
     dirty_matrices = _assert_immutable_c_array(
         decoded["dirty_matrices"], dtype="<f4", shape=(1, 4, 4)
     )
@@ -278,6 +289,12 @@ def test_typed_stream_gathers_pool_rows_without_inline_matrix() -> None:
     )
     assert dirty_matrices.tobytes() == raw
     assert encode_display_command_stream_binary(decoded, 1, cursor).bytes == encoded.bytes
+
+    for invalid_count in (0, 2):
+        malformed = bytearray(encoded.bytes)
+        struct.pack_into("<I", malformed, 105, invalid_count)
+        with pytest.raises(WireError, match="transform batch count"):
+            decode_display_command_stream_binary(malformed, 1, cursor)
 
 
 def test_empty_command_batch_round_trips_validated_record_and_binary() -> None:

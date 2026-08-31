@@ -48,7 +48,7 @@ test('Display runtime scale CLI reports deterministic structure and complete dis
   assert.equal(report.fixture.backend.bindingCount, 13);
   assert.equal(report.fixture.backend.batchCount, 1);
   assert.equal(report.fixture.backend.instanceCount, 12);
-  assert.deepEqual(report.finalCursor, { commitSeq: 2, sourceTick: 2, lastCommandSeq: 6 });
+  assert.deepEqual(report.finalCursor, { commitSeq: 2, sourceTick: 2, lastCommandSeq: 2 });
   assert.equal(report.timings.commit.samples, 2);
   assert.equal(report.timings.frame.samples, 2);
   assert.equal(report.memory.map((entry) => entry.stage).join(','),

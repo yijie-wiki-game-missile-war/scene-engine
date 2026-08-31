@@ -221,9 +221,12 @@ def _encoding_benchmark(
         ),
     )
     baseline.confirm_published()
-    for node_id, transform in zip(node_ids, transforms, strict=True):
-        matrix_pool.set(node_id, transform)
-    commands = tuple(DisplayCommand.set_transform(node_id) for node_id in node_ids)
+    batch_node_ids = np.asarray(node_ids, dtype="<u4")
+    matrix_rows = np.frombuffer(
+        b"".join(transform.matrix_bytes for transform in transforms), dtype="<f4"
+    ).reshape((command_count, 4, 4))
+    matrix_pool.set_batch(batch_node_ids, matrix_rows)
+    commands = (DisplayCommand.set_transform_batch(batch_node_ids),)
 
     def encode_once() -> tuple[Any, Any]:
         stream, cursor = encode_display_command_stream(
@@ -253,11 +256,11 @@ def _encoding_benchmark(
         samples_ms.append(elapsed_ns / 1_000_000)
         payload_stable = payload_stable and encoded.bytes == reference_payload
 
-    per_command_ns = [sample * 1_000_000 / command_count for sample in samples_ms]
+    per_row_ns = [sample * 1_000_000 / command_count for sample in samples_ms]
     decoded = decode_display_command_stream_binary(
         encoded.bytes,
         expected_source_tick=SOURCE_TICK,
-        expected_last_command_seq=command_count,
+        expected_last_command_seq=1,
     )
     decoded_dirty = np.asarray(decoded["dirty_matrices"], dtype="<f4", order="C")
     decoded_dirty_node_ids = decoded["dirty_node_ids"]
@@ -267,10 +270,13 @@ def _encoding_benchmark(
         "binaryMetadata": (
             encoded.source_tick == SOURCE_TICK
             and encoded.base_command_seq == 0
-            and encoded.last_command_seq == command_count
+            and encoded.last_command_seq == 1
         ),
         "binaryPayloadStableAcrossRepeats": payload_stable,
-        "decodedCommandCount": len(decoded["commands"]) == command_count,
+        "decodedCommandCount": len(decoded["commands"]) == 1,
+        "decodedBatchNodeIds": np.array_equal(
+            decoded["commands"][0]["node_ids"], batch_node_ids
+        ),
         "decodedDirtyNodeIds": np.array_equal(decoded_dirty_node_ids, node_ids),
         "decodedArraysReadOnlyContiguous": (
             isinstance(decoded_dirty_node_ids, np.ndarray)
@@ -285,7 +291,7 @@ def _encoding_benchmark(
         "decodedDirtyTensorShape": decoded_dirty.shape == (command_count, 4, 4),
         "decodedCursor": (
             decoded["base_command_seq"] == 0
-            and decoded["last_command_seq"] == command_count
+            and decoded["last_command_seq"] == 1
         ),
         "firstMatrixBits": dirty_payload_bytes[:64] == transforms[0].matrix_bytes,
         "lastMatrixBits": dirty_payload_bytes[-64:] == transforms[-1].matrix_bytes,
@@ -298,16 +304,17 @@ def _encoding_benchmark(
     }
     timings = {
         "millisecondsPerPayload": _summary(samples_ms, digits=6),
-        "nanosecondsPerCommand": _summary(per_command_ns),
+        "nanosecondsPerTransformRow": _summary(per_row_ns),
     }
     payload = {
         "kind": encoded.kind,
-        "commands": command_count,
+        "logicalCommands": 1,
+        "transformRows": command_count,
         "matrixPoolSize": matrix_pool.size,
         "dirtyNodeIds": len(stream.dirty_node_ids),
         "dirtyMatrixBytes": stream.dirty_matrices.nbytes,
         "bytes": len(encoded.bytes),
-        "bytesPerCommand": round(len(encoded.bytes) / command_count, 3),
+        "bytesPerTransformRow": round(len(encoded.bytes) / command_count, 3),
         "baseCommandSeq": encoded.base_command_seq,
         "lastCommandSeq": encoded.last_command_seq,
         "sourceTick": encoded.source_tick,
@@ -541,7 +548,7 @@ def run_benchmark(
         "parameters": {
             "iterations": iterations,
             "repeats": repeats,
-            "encodeCommands": encode_commands,
+            "encodeTransformRows": encode_commands,
             "encodeRepeats": encode_repeats,
             "residentCount": resident_count,
         },
@@ -551,7 +558,7 @@ def run_benchmark(
                 "operations": "nanoseconds per public API call",
                 "coldStart": "milliseconds per fresh Python process",
                 "encodingPayload": "milliseconds per semantic + SDCS encode",
-                "encodingCommand": "nanoseconds per encoded command",
+                "encodingTransformRow": "nanoseconds per transform row",
             },
             "scope": {
                 "operations": "public call plus Python loop/callable dispatch",
@@ -560,7 +567,7 @@ def run_benchmark(
                     "one MatrixPool append, and public access"
                 ),
                 "encoding": (
-                    "prebuilt ID commands and one resident MatrixPool through "
+                    "one prebuilt ID batch and one resident MatrixPool through "
                     "dirty gather, semantic sealing, and the production SDCS encoder"
                 ),
             },

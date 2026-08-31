@@ -30,7 +30,7 @@ from .json_tree import MAXIMUM_SAFE_INTEGER, validate_json_value
 
 DISPLAY_BINARY_CHECKPOINT_MAGIC = b"SDCP"
 DISPLAY_BINARY_COMMAND_STREAM_MAGIC = b"SDCS"
-DISPLAY_BINARY_VERSION = 3
+DISPLAY_BINARY_VERSION = 4
 DISPLAY_BINARY_SCALAR_FLOAT32 = 1
 
 DISPLAY_CHECKPOINT_KIND = "display_checkpoint"
@@ -54,7 +54,7 @@ _NODE_FLAGS = _NODE_FLAG_VISIBLE | _NODE_FLAG_LIVE
 
 _OPCODE_BY_KIND = {
     "node-create": 1,
-    "node-set-transform": 2,
+    "node-set-transform-batch": 2,
     "node-set-parent": 3,
     "node-set-visible": 4,
     "node-set-state": 5,
@@ -338,6 +338,11 @@ def encode_display_command_stream_binary(
     for command in commands:
         kind = command.kind
         chunks.append(_U8.pack(_OPCODE_BY_KIND[kind]))
+        if kind == "node-set-transform-batch":
+            assert command.node_ids is not None
+            chunks.append(_U32.pack(len(command.node_ids)))
+            continue
+        assert command.node_id is not None
         chunks.append(_U32.pack(command.node_id))
         fields = command.fields
         if kind == "node-create":
@@ -446,22 +451,34 @@ def decode_display_command_stream_binary(
         reader.fail("command count exceeds the remaining payload")
 
     records: list[dict[str, Any]] = []
+    transform_count = 0
+    transform_batch_seen = False
     for ordinal in range(command_count):
         opcode = reader.u8("command opcode")
         kind = _KIND_BY_OPCODE.get(opcode)
         if kind is None:
             reader.fail("command opcode is unknown")
-        node_id = reader.node_id("command Node ID")
-        if node_id >= matrix_pool_size:
-            reader.fail("command Node ID is outside matrix pool size")
         sequence = base_command_seq + ordinal + 1
-        common = {
+        metadata = {
             "schema": DISPLAY_COMMAND_SCHEMA,
             "command_seq": sequence,
             "source_tick": source_tick,
             "kind": kind,
-            "node_id": node_id,
         }
+        if kind == "node-set-transform-batch":
+            if transform_batch_seen:
+                reader.fail("command stream contains more than one transform batch")
+            transform_batch_seen = True
+            transform_count = reader.u32("transform batch count")
+            if transform_count == 0 or transform_count > dirty_count:
+                reader.fail("transform batch count is invalid")
+            node_ids = dirty_node_ids[:transform_count]
+            records.append({**metadata, "node_ids": node_ids})
+            continue
+        node_id = reader.node_id("command Node ID")
+        if node_id >= matrix_pool_size:
+            reader.fail("command Node ID is outside matrix pool size")
+        common = {**metadata, "node_id": node_id}
         if kind == "node-create":
             parent_raw = reader.u32("parent Node ID")
             parent_node_id = (
@@ -494,9 +511,6 @@ def decode_display_command_stream_binary(
             node_record = node.to_record()
             node_record.pop("node_id")
             records.append({**common, **node_record})
-        elif kind == "node-set-transform":
-            _validated_command_call(DisplayCommand.set_transform, node_id)
-            records.append(common)
         elif kind == "node-set-parent":
             parent_raw = reader.u32("parent Node ID")
             parent_node_id = (
@@ -537,23 +551,23 @@ def decode_display_command_stream_binary(
         else:
             _validated_command_call(DisplayCommand.remove, node_id)
             records.append(common)
-    matrix_targets = sorted(
+    create_targets = sorted(
         record["node_id"]
         for record in records
-        if record["kind"] in {"node-create", "node-set-transform"}
+        if record["kind"] == "node-create"
     )
     if (
-        len(matrix_targets) != len(set(matrix_targets))
-        or len(matrix_targets) != dirty_count
+        len(create_targets) != len(set(create_targets))
+        or transform_count + len(create_targets) != dirty_count
         or any(
             target != int(dirty_node_id)
             for target, dirty_node_id in zip(
-                matrix_targets, dirty_node_ids, strict=True
+                create_targets, dirty_node_ids[transform_count:], strict=True
             )
         )
     ):
         reader.fail(
-            "dirty Node IDs do not exactly match create/set-transform commands"
+            "dirty Node IDs do not exactly match transform batch/create commands"
         )
     reader.finish()
 

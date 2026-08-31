@@ -123,7 +123,9 @@ test('DisplayRuntime drives geometry, nested Prefabs, authority activity, animat
         rotationXyzw: [0, 0, halfTurn, halfTurn],
         scale: [2, 3, 4],
       });
-      commitAuthority(runtime, () => runtime.authority.setNodeTransform({ nodeId: MOVER_ID }), {
+      commitAuthority(runtime, () => runtime.authority.setNodeTransforms({
+        nodeIds: new Uint32Array([MOVER_ID]),
+      }), {
         matrixRows: [[MOVER_ID, moved]],
       });
       let view = runtime.currentView();

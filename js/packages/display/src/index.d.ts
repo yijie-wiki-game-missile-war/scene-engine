@@ -405,11 +405,15 @@ export interface NodeTransformBatchRecord extends NodeMatrixPoolRecord {
   readonly nodeIds: Uint32Array;
 }
 
+export interface NodeTransformTargetsRecord {
+  readonly nodeIds: Uint32Array;
+}
+
 export interface AuthorityPort {
   installNodeMatrixPool(command: NodeMatrixPoolRecord): undefined;
   applyNodeTransformBatch(command: NodeTransformBatchRecord): undefined;
+  setNodeTransforms(command: NodeTransformTargetsRecord): undefined;
   createNode(command: AuthorityNodeRecord): number;
-  setNodeTransform(command: { readonly nodeId: number }): undefined;
   setNodeParent(command: { readonly nodeId: number; readonly parentNodeId: number | null }): undefined;
   setNodeVisible(command: { readonly nodeId: number; readonly visible: boolean }): undefined;
   setNodeState(command: { readonly nodeId: number; readonly state: JSONRecord }): undefined;
@@ -555,7 +559,7 @@ export class BillboardComponent extends BehaviourComponent { static readonly typ
 export class LookAtComponent extends BehaviourComponent { static readonly typeId: 'behavior.look-at@1'; static readonly tickPhase: 'before-render'; static readonly drivesTransform: true; }
 
 export const TICKS_PER_SECOND: 60;
-export const DISPLAY_RUNTIME_SCHEMA: 'scene-engine-display-node@6';
+export const DISPLAY_RUNTIME_SCHEMA: 'scene-engine-display-node@7';
 export const DISPLAY_SUMMARY_SCHEMA: 'scene-engine-display-summary@1';
 export const DISPLAY_CATALOG_MANIFEST_SCHEMA: 'scene-engine-display-catalog-manifest@2';
 export const SCENE_DEFINITION_SCHEMA: 'scene-engine-scene-definition@2';

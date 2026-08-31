@@ -50,8 +50,8 @@ test('Authority create uses one Node graph and initial mode rejects later transf
   ), { sourceTickDelta: 1 });
   assert.equal(runtime.currentView().getNode('prefab/py/0/body').parentName, 'py/0');
   assert.equal(runtime.currentView().getAuthorityOwner('prefab/py/0/body'), 'py/0');
-  expectAuthorityFailure(runtime, () => runtime.authority.setNodeTransform({
-    nodeId: 0, transform: matrixTransform({ position: [1, 0, 0] }),
+  expectAuthorityFailure(runtime, () => runtime.authority.setNodeTransforms({
+    nodeIds: [0], matrices: matrixTransform({ position: [1, 0, 0] }),
   }), 'display-authority-transform-initial');
   assert.deepEqual(matrixPosition(runtime.currentView().getNode('py/0').localTransform), [0, 0, 0]);
 });
@@ -63,8 +63,8 @@ test('Authority rejects a transform command for an initial-only node before muta
     runtime.authority.createNode(createCommand(1, 'target.test.item', null, 'initial'));
   }, { sourceTickDelta: 1, commandCount: 2 });
 
-  expectAuthorityFailure(runtime, () => runtime.authority.setNodeTransform({
-    nodeId: 1, transform: matrixTransform({ position: [1, 0, 0] }),
+  expectAuthorityFailure(runtime, () => runtime.authority.setNodeTransforms({
+    nodeIds: [1], matrices: matrixTransform({ position: [1, 0, 0] }),
   }), 'display-authority-transform-initial');
   assert.deepEqual(runtime.currentView().getNode('py/1').localTransform, IDENTITY);
 });
@@ -76,13 +76,41 @@ test('malformed test transform batch leaves the Node and revision unchanged', as
   });
   const before = runtime.summary();
 
-  expectAuthorityFailure(runtime, () => runtime.authority.setNodeTransform({
-    nodeId: 0, transform: {
+  expectAuthorityFailure(runtime, () => runtime.authority.setNodeTransforms({
+    nodeIds: [0], matrices: {
       position: [0, 0, 0], rotationXyzw: [0, 0, 0, 1], scale: [1, 1, 1],
     },
   }), 'display-authority-transform-batch-invalid');
   assert.deepEqual(runtime.currentView().getNode('py/0').localTransform, IDENTITY);
   assert.equal(runtime.summary().revision, before.revision);
+});
+
+test('Authority applies one sparse transform batch with one mutation revision', async (t) => {
+  const { runtime } = await createHarness(); t.after(() => runtime.dispose());
+  commitAuthority(runtime, () => {
+    runtime.authority.createNode(createCommand(0));
+    runtime.authority.createNode(createCommand(1));
+    runtime.authority.createNode(createCommand(2));
+  }, { commandCount: 3 });
+  const before = runtime.summary().revision;
+  let afterMutation;
+
+  commitAuthority(runtime, () => {
+    runtime.authority.setNodeTransforms({
+      nodeIds: [0, 2],
+      matrices: new Float32Array([
+        ...matrixTransform({ position: [4, 0, 0] }),
+        ...matrixTransform({ position: [8, 0, 0] }),
+      ]),
+    });
+    afterMutation = runtime.summary().revision;
+  });
+
+  assert.equal(afterMutation, before + 1);
+  assert.equal(runtime.summary().revision, before + 2, 'seal adds the transaction revision');
+  assert.deepEqual(matrixPosition(runtime.currentView().getNode('py/0').localTransform), [4, 0, 0]);
+  assert.deepEqual(matrixPosition(runtime.currentView().getNode('py/1').localTransform), [0, 0, 0]);
+  assert.deepEqual(matrixPosition(runtime.currentView().getNode('py/2').localTransform), [8, 0, 0]);
 });
 
 test('derived world overflow fails seal before the ACK cursor advances', async (t) => {
@@ -102,9 +130,9 @@ test('derived world overflow fails seal before the ACK cursor advances', async (
   const acknowledged = runtime.summary().cursor;
   const cursor = nextCursor(runtime);
   runtime.commitGate.begin(cursor);
-  runtime.authority.setNodeTransform({
-    nodeId: 0,
-    transform: matrixTransform({ scale: [1e10, 1e10, 1e10] }),
+  runtime.authority.setNodeTransforms({
+    nodeIds: [0],
+    matrices: matrixTransform({ scale: [1e10, 1e10, 1e10] }),
   });
   let error = null;
   try { runtime.commitGate.seal(cursor); } catch (caught) { error = caught; }
@@ -1080,8 +1108,8 @@ test('sprite projection uses its fixed ancestor footpoint across authority moves
     return card.patch.panelAnchorWorld;
   };
   const initial = assertProjection();
-  commitAuthority(runtime, () => runtime.authority.setNodeTransform({
-    nodeId: 0, transform: matrixTransform({ position: [9, 2, -3] }),
+  commitAuthority(runtime, () => runtime.authority.setNodeTransforms({
+    nodeIds: [0], matrices: matrixTransform({ position: [9, 2, -3] }),
   }), { sourceTickDelta: 1 });
   frames.step();
   const moved = assertProjection();

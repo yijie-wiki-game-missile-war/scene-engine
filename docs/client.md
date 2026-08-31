@@ -1,6 +1,6 @@
-# JavaScript Client 0.13
+# JavaScript Client 0.14
 
-`@scene-engine/client@0.13.0` is the only browser packet decoder, immutable WorldState owner, cumulative ACK barrier and Display
+`@scene-engine/client@0.14.0` is the only browser packet decoder, immutable WorldState owner, cumulative ACK barrier and Display
 session bridge. Its root exports:
 
 ```text
@@ -24,7 +24,7 @@ runtime
   catalogIdentity / installScene / activate / start / summary / currentView
 authorityPort
   installNodeMatrixPool / applyNodeTransformBatch
-  createNode / setNodeTransform / setNodeParent / setNodeVisible / setNodeState / replaceNodePrefab / removeNode
+  createNode / setNodeTransforms / setNodeParent / setNodeVisible / setNodeState / replaceNodePrefab / removeNode
 commitGate
   begin / seal / fail
 dispose
@@ -72,7 +72,7 @@ the command list; the fixed protocol bound is deliberately not configurable thro
 ```text
 commitGate.begin(cursor)
   -> one applyNodeTransformBatch call to stage the sorted dirty IDs and contiguous matrix tensor
-  -> ordered AuthorityPort calls by nodeId; create/set-transform consumes its staged row at that sequence position
+  -> ordered AuthorityPort calls; one setNodeTransforms consumes the existing-row ID prefix atomically, while create consumes suffix rows
 commitGate.seal(cursor)
   -> publish WorldState and cursors
   -> runtime.summary()
@@ -115,5 +115,5 @@ The Client reads a checkpoint `(n,4,4)` tensor or commit `(m,4,4)` dirty tensor 
 first semantic acceptance gate for Python's opaque float32 payload. It validates each active/dirty row's finite
 affine/right-handed contract, canonicalizes negative zero, and transfers the tensor to Authority without TRS decomposition.
 Packet storage is never aliased: mutating or releasing the input packet after `applyPacket` cannot alter the installed matrix
-pool. A commit transfers one pool batch; create/set-transform consumes rows by ID without placing matrix bytes back in command
+pool. A commit transfers one pool batch; create/set-transform-batch consumes rows by ID without placing matrix bytes back in command
 objects, so command-observable order remains unchanged.

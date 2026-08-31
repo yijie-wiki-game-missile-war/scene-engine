@@ -6,12 +6,12 @@ fallback runtime.
 ## Release tuple
 
 ```text
-scene-engine Python                 0.15.0
-@scene-engine/client               0.13.0
-@scene-engine/display              0.12.0
+scene-engine Python                 0.16.0
+@scene-engine/client               0.14.0
+@scene-engine/display              0.13.0
 @scene-engine/renderer-three       0.12.0
 wire                               scene-engine-wire@3
-display                            scene-engine-display-node@6
+display                            scene-engine-display-node@7
 scene definition                   scene-engine-scene-definition@2
 prefab definition                  scene-engine-prefab-definition@4
 catalog manifest                   scene-engine-display-catalog-manifest@2
@@ -86,7 +86,7 @@ Product and display-authoring code does not need to hand-write sixteen values. P
 pose = DisplayTransform.from_trs(position=(10, 0, 2), scale=(2, 2, 2))
 pose = pose.translated_self((0, 0, 4)).rotated_parent((0, 1, 0), math.pi / 2)
 pool.set(ship_id, pose)
-command = DisplayCommand.set_transform(ship_id)
+command = DisplayCommand.set_transform_batch((ship_id,))
 ```
 
 ```js
@@ -312,20 +312,25 @@ their Prefab-local paths and cannot address them through `prefab/...` names. `se
 the registered synchronous resolvers derive all nested desired instances and child complete states inside the same Display
 operation.
 
-The Authority surface installs one full matrix pool for a checkpoint, applies one dirty batch per commit, and otherwise contains
-only ID-targeted operations:
+The Authority surface installs one full matrix pool for a checkpoint, stages one dirty matrix block per commit and consumes all
+existing-row updates through one vector-targeted command. Structural/state operations remain single-ID calls:
 
 ```text
 installNodeMatrixPool
 applyNodeTransformBatch
 createNode
-setNodeTransform
+setNodeTransforms
 setNodeParent
 setNodeVisible
 setNodeState
 replaceNodePrefab
 removeNode
 ```
+
+`setNodeTransforms` receives one strictly increasing `Uint32Array` and consumes all of its staged rows atomically at that
+command's sequence position. Validation of every target completes before any row is copied or Node is marked dirty; the whole
+batch invokes the mutation hook once. New rows are not part of this call: their staged suffix rows are claimed by the ordered
+`createNode` records.
 
 `null` parent means `sys/authority-root`; a non-null parent ID must be an existing authority root. `setNodeState` is complete replacement,
 not merge patch, including when it causes nested add/remove/replace operations.
@@ -409,8 +414,9 @@ A checkpoint carries Scene name, three catalog hashes, command cursor, the compl
 metadata. Client creates a fresh session, verifies catalog identity, installs the Scene and pool, bootstraps roots by ID,
 activates and starts it, then swaps the session.
 
-A commit closes the draw gate, stages the one dirty matrix batch and applies every command in order; create/set-transform
-consumes its row at that command's sequence position. It then flushes transforms and seals the exact cursor. JavaScript run-to-completion
+A commit closes the draw gate, stages the one dirty matrix block and applies every command in order. One set-transforms command
+atomically consumes the existing-row prefix at its sequence position; create commands claim new-row suffix rows. It then flushes
+transforms and seals the exact cursor. JavaScript run-to-completion
 prevents RAF from observing a partial transaction. The seal is not cross-command rollback; any command failure invalidates the
 whole projection and emits no ACK.
 

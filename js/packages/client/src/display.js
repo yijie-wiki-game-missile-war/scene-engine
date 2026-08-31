@@ -1,12 +1,12 @@
 import { encodeJSON, parseCanonicalJSON } from './wire.js';
 
-export const DISPLAY_CHECKPOINT_SCHEMA = 'scene-engine-display-checkpoint@6';
-export const DISPLAY_COMMAND_STREAM_SCHEMA = 'scene-engine-display-command-stream@6';
-export const NODE_COMMAND_SCHEMA = 'scene-engine-node-command@6';
+export const DISPLAY_CHECKPOINT_SCHEMA = 'scene-engine-display-checkpoint@7';
+export const DISPLAY_COMMAND_STREAM_SCHEMA = 'scene-engine-display-command-stream@7';
+export const NODE_COMMAND_SCHEMA = 'scene-engine-node-command@7';
 
 const CHECKPOINT_MAGIC = 'SDCP';
 const COMMAND_STREAM_MAGIC = 'SDCS';
-const BINARY_VERSION = 3;
+const BINARY_VERSION = 4;
 const FLOAT32_SCALAR = 1;
 const NULL_PARENT_INDEX = 0xffffffff;
 const NULL_STRING_LENGTH = 0xffff;
@@ -17,7 +17,7 @@ const MAXIMUM_COMMANDS_PER_PAYLOAD = 65_536;
 
 const OPCODE_BY_KIND = Object.freeze({
   'node-create': 1,
-  'node-set-transform': 2,
+  'node-set-transform-batch': 2,
   'node-set-parent': 3,
   'node-set-visible': 4,
   'node-set-state': 5,
@@ -39,19 +39,20 @@ const LITTLE_ENDIAN = new Uint8Array(new Uint16Array([1]).buffer)[0] === 1;
 const BASELINE_FIELDS = new Set([
   'node_id', 'parent_node_id', 'prefab_id', 'transform_mode', 'visible', 'state',
 ]);
-const COMMAND_BASE_FIELDS = ['schema', 'command_seq', 'source_tick', 'kind', 'node_id'];
+const COMMAND_COMMON_FIELDS = ['schema', 'command_seq', 'source_tick', 'kind'];
+const NODE_COMMAND_BASE_FIELDS = [...COMMAND_COMMON_FIELDS, 'node_id'];
 const COMMAND_FIELDS = Object.freeze({
   'node-create': new Set([
-    ...COMMAND_BASE_FIELDS, 'parent_node_id', 'prefab_id', 'transform_mode', 'visible', 'state',
+    ...NODE_COMMAND_BASE_FIELDS, 'parent_node_id', 'prefab_id', 'transform_mode', 'visible', 'state',
   ]),
-  'node-set-transform': new Set(COMMAND_BASE_FIELDS),
-  'node-set-parent': new Set([...COMMAND_BASE_FIELDS, 'parent_node_id']),
-  'node-set-visible': new Set([...COMMAND_BASE_FIELDS, 'visible']),
-  'node-set-state': new Set([...COMMAND_BASE_FIELDS, 'state']),
+  'node-set-transform-batch': new Set([...COMMAND_COMMON_FIELDS, 'node_ids']),
+  'node-set-parent': new Set([...NODE_COMMAND_BASE_FIELDS, 'parent_node_id']),
+  'node-set-visible': new Set([...NODE_COMMAND_BASE_FIELDS, 'visible']),
+  'node-set-state': new Set([...NODE_COMMAND_BASE_FIELDS, 'state']),
   'node-replace-prefab': new Set([
-    ...COMMAND_BASE_FIELDS, 'prefab_id', 'state',
+    ...NODE_COMMAND_BASE_FIELDS, 'prefab_id', 'state',
   ]),
-  'node-remove': new Set(COMMAND_BASE_FIELDS),
+  'node-remove': new Set(NODE_COMMAND_BASE_FIELDS),
 });
 
 export class DisplayRecordError extends Error {
@@ -178,6 +179,7 @@ export function parseDisplayCommandStream(value, {
       sourceTick,
       maximumJsonDepth,
       matrixPoolSize,
+      dirtyNodeIds,
     ));
   }
   validateDirtyMatrixTargets(commands, dirtyNodeIds);
@@ -313,18 +315,36 @@ function normalizeBaselineNodes(values, matrixPoolSize) {
   });
 }
 
-function readCommand(reader, commandSeq, sourceTick, maximumJsonDepth, matrixPoolSize) {
+function readCommand(
+  reader,
+  commandSeq,
+  sourceTick,
+  maximumJsonDepth,
+  matrixPoolSize,
+  dirtyNodeIds,
+) {
   const opcode = reader.u8('display-command-kind-invalid');
   const kind = KIND_BY_OPCODE[opcode];
   if (kind === undefined) fail('display-command-kind-invalid');
-  const id = reader.nodeId(matrixPoolSize, 'display-node-id-invalid');
   const common = {
     schema: NODE_COMMAND_SCHEMA,
     commandSeq,
     sourceTick,
     kind,
-    nodeId: id,
   };
+  if (kind === 'node-set-transform-batch') {
+    const transformCount = reader.u32('display-transform-batch-count-invalid');
+    if (transformCount === 0 || transformCount > dirtyNodeIds.length) {
+      fail('display-transform-batch-count-invalid');
+    }
+    return Object.freeze({
+      ...common,
+      nodeIds: dirtyNodeIds.subarray(0, transformCount),
+      transformCount,
+    });
+  }
+  const id = reader.nodeId(matrixPoolSize, 'display-node-id-invalid');
+  const nodeCommon = { ...common, nodeId: id };
   switch (kind) {
     case 'node-create': {
       const parentId = reader.nullableNodeId(matrixPoolSize, 'display-parent-node-id-invalid');
@@ -333,7 +353,7 @@ function readCommand(reader, commandSeq, sourceTick, maximumJsonDepth, matrixPoo
       const flags = reader.u8('display-command-flags-invalid');
       if ((flags & ~0x03) !== 0) fail('display-command-flags-invalid');
       return Object.freeze({
-        ...common,
+        ...nodeCommon,
         parentNodeId: parentId,
         prefabId: prefab,
         transformMode: (flags & 0x02) === 0 ? 'initial' : 'live',
@@ -341,8 +361,6 @@ function readCommand(reader, commandSeq, sourceTick, maximumJsonDepth, matrixPoo
         state: reader.state(maximumJsonDepth),
       });
     }
-    case 'node-set-transform':
-      return Object.freeze(common);
     case 'node-set-parent': {
       const parentId = reader.nullableNodeId(
         matrixPoolSize,
@@ -350,25 +368,25 @@ function readCommand(reader, commandSeq, sourceTick, maximumJsonDepth, matrixPoo
       );
       if (parentId === id) fail('display-parent-node-id-invalid');
       return Object.freeze({
-        ...common,
+        ...nodeCommon,
         parentNodeId: parentId,
       });
     }
     case 'node-set-visible': {
       const visible = reader.u8('display-node-visible-invalid');
       if (visible > 1) fail('display-node-visible-invalid');
-      return Object.freeze({ ...common, visible: visible === 1 });
+      return Object.freeze({ ...nodeCommon, visible: visible === 1 });
     }
     case 'node-set-state':
-      return Object.freeze({ ...common, state: reader.state(maximumJsonDepth) });
+      return Object.freeze({ ...nodeCommon, state: reader.state(maximumJsonDepth) });
     case 'node-replace-prefab':
       return Object.freeze({
-        ...common,
+        ...nodeCommon,
         prefabId: prefabId(reader.string('display-prefab-id-invalid')),
         state: reader.state(maximumJsonDepth),
       });
     case 'node-remove':
-      return Object.freeze(common);
+      return Object.freeze(nodeCommon);
     default:
       fail('display-command-kind-invalid');
   }
@@ -376,6 +394,10 @@ function readCommand(reader, commandSeq, sourceTick, maximumJsonDepth, matrixPoo
 
 function writeCommand(writer, command) {
   writer.u8(OPCODE_BY_KIND[command.kind]);
+  if (command.kind === 'node-set-transform-batch') {
+    writer.u32(command.transformCount);
+    return;
+  }
   writer.u32(command.nodeId);
   switch (command.kind) {
     case 'node-create':
@@ -383,8 +405,6 @@ function writeCommand(writer, command) {
       writer.string(command.prefabId);
       writer.u8((command.visible ? 0x01 : 0) | (command.transformMode === 'live' ? 0x02 : 0));
       writer.state(command.state);
-      break;
-    case 'node-set-transform':
       break;
     case 'node-set-parent':
       writer.u32(command.parentNodeId === null ? NULL_PARENT_INDEX : command.parentNodeId);
@@ -440,6 +460,13 @@ function normalizeCommand(value, expectedSequence, sourceTick, matrixPoolSize) {
     commandSeq: expectedSequence,
     sourceTick,
     kind: value.kind,
+  };
+  if (value.kind === 'node-set-transform-batch') {
+    const nodeIds = normalizeTransformNodeIds(value.node_ids, matrixPoolSize);
+    return Object.freeze({ ...common, nodeIds, transformCount: nodeIds.length });
+  }
+  const nodeCommon = {
+    ...common,
     nodeId: boundedNodeId(value.node_id, matrixPoolSize, 'display-node-id-invalid'),
   };
   switch (value.kind) {
@@ -449,9 +476,9 @@ function normalizeCommand(value, expectedSequence, sourceTick, matrixPoolSize) {
         matrixPoolSize,
         'display-parent-node-id-invalid',
       );
-      if (parentNodeId === common.nodeId) fail('display-parent-node-id-invalid');
+      if (parentNodeId === nodeCommon.nodeId) fail('display-parent-node-id-invalid');
       return Object.freeze({
-        ...common,
+        ...nodeCommon,
         parentNodeId,
         prefabId: prefabId(value.prefab_id),
         transformMode: transformMode(value.transform_mode),
@@ -459,35 +486,33 @@ function normalizeCommand(value, expectedSequence, sourceTick, matrixPoolSize) {
         state: normalizeState(value.state),
       });
     }
-    case 'node-set-transform':
-      return Object.freeze(common);
     case 'node-set-parent': {
       const parentNodeId = nullableBoundedNodeId(
         value.parent_node_id,
         matrixPoolSize,
         'display-parent-node-id-invalid',
       );
-      if (parentNodeId === common.nodeId) fail('display-parent-node-id-invalid');
+      if (parentNodeId === nodeCommon.nodeId) fail('display-parent-node-id-invalid');
       return Object.freeze({
-        ...common,
+        ...nodeCommon,
         parentNodeId,
       });
     }
     case 'node-set-visible':
       return Object.freeze({
-        ...common,
+        ...nodeCommon,
         visible: boolean(value.visible, 'display-node-visible-invalid'),
       });
     case 'node-set-state':
-      return Object.freeze({ ...common, state: normalizeState(value.state) });
+      return Object.freeze({ ...nodeCommon, state: normalizeState(value.state) });
     case 'node-replace-prefab':
       return Object.freeze({
-        ...common,
+        ...nodeCommon,
         prefabId: prefabId(value.prefab_id),
         state: normalizeState(value.state),
       });
     case 'node-remove':
-      return Object.freeze(common);
+      return Object.freeze(nodeCommon);
     default:
       fail('display-command-kind-invalid');
   }
@@ -545,20 +570,47 @@ function validateCheckpointMatrixPool(value, matrixPoolSize, activeNodeIds) {
 }
 
 function validateDirtyMatrixTargets(commands, dirtyNodeIds) {
-  const remaining = new Set(dirtyNodeIds);
-  let targetCount = 0;
+  let transformCount = 0;
+  let batchSeen = false;
   for (const command of commands) {
-    if (command.kind !== 'node-create' && command.kind !== 'node-set-transform') continue;
-    targetCount += 1;
-    if (!remaining.delete(command.nodeId)) {
+    if (command.kind !== 'node-set-transform-batch') continue;
+    if (batchSeen) fail('display-transform-batch-duplicate');
+    batchSeen = true;
+    transformCount = command.nodeIds.length;
+    if (transformCount > dirtyNodeIds.length) {
+      fail('display-transform-batch-count-invalid');
+    }
+    for (let index = 0; index < transformCount; index += 1) {
+      if (command.nodeIds[index] !== dirtyNodeIds[index]) {
+        fail('display-transform-dirty-target-mismatch');
+      }
+    }
+  }
+  const remainingCreates = new Set(dirtyNodeIds.subarray(transformCount));
+  for (const command of commands) {
+    if (command.kind !== 'node-create') continue;
+    if (!remainingCreates.delete(command.nodeId)) {
       fail(dirtyNodeIds.includes(command.nodeId)
         ? 'display-transform-target-duplicate'
         : 'display-transform-dirty-target-mismatch');
     }
   }
-  if (targetCount !== dirtyNodeIds.length || remaining.size !== 0) {
+  if (remainingCreates.size !== 0) {
     fail('display-transform-dirty-target-mismatch');
   }
+}
+
+function normalizeTransformNodeIds(value, matrixPoolSize) {
+  if (!(value instanceof Uint32Array) || value.length === 0) {
+    fail('display-transform-batch-ids-invalid');
+  }
+  let previous = -1;
+  for (const id of value) {
+    boundedNodeId(id, matrixPoolSize, 'display-transform-batch-id-invalid');
+    if (id <= previous) fail('display-transform-batch-id-order-invalid');
+    previous = id;
+  }
+  return value;
 }
 
 function normalizeState(value) {

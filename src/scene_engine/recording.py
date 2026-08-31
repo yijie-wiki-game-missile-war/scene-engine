@@ -542,6 +542,15 @@ def _advance_matrix_pool_state(
     active_node_ids = set(previous.active_node_ids)
     for command in commands:
         kind = command["kind"]
+        if kind == "node-set-transform-batch":
+            if any(
+                int(node_id) not in active_node_ids
+                for node_id in command["node_ids"]
+            ):
+                raise RecordingError(
+                    "packet log transform batch target is not active"
+                )
+            continue
         node_id = command["node_id"]
         if kind == "node-create":
             if node_id < previous.pool_size or node_id in active_node_ids:

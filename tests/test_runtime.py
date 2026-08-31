@@ -123,7 +123,7 @@ class Program:
         )
         display_commands = (
             (
-                DisplayCommand.set_transform(self.display_node_id),
+                DisplayCommand.set_transform_batch((self.display_node_id,)),
                 DisplayCommand.set_state(
                     self.display_node_id, {"tick": world.tick, "value": world.value}
                 ),
@@ -337,7 +337,7 @@ def test_tick_and_changed_input_have_one_commit_cursor_and_display_seal() -> Non
     assert command_stream["base_command_seq"] == 0
     assert command_stream["last_command_seq"] == tick.header["last_command_seq"] == 2
     assert [record["kind"] for record in command_stream["commands"]] == [
-        "node-set-transform",
+        "node-set-transform-batch",
         "node-set-state",
     ]
     acknowledge(runtime, transport, "a")
@@ -934,7 +934,7 @@ def test_failed_commit_packet_encode_keeps_matrix_row_dirty(monkeypatch) -> None
         source_tick=1,
         matrix_pool=program.display_matrix_pool,
         commands=(
-            DisplayCommand.set_transform(program.display_node_id),
+            DisplayCommand.set_transform_batch((program.display_node_id,)),
             DisplayCommand.set_state(program.display_node_id, {}),
         ),
     )

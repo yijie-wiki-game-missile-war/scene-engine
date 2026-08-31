@@ -623,7 +623,7 @@ function applyTick(runtime, fixture, options, state) {
     const cursor = {
       commitSeq: nextCommitSeq,
       sourceTick: nextCommitSeq,
-      lastCommandSeq: state.lastCommandSeq + updateCount,
+      lastCommandSeq: state.lastCommandSeq + (updateCount === 0 ? 0 : 1),
     };
     runtime.commitGate.begin(cursor);
     try {
@@ -642,13 +642,17 @@ function applyTick(runtime, fixture, options, state) {
         nodeIds: new Uint32Array(sorted.map(({ nodeId }) => nodeId)),
         matrices,
       });
-      for (const { nodeId } of updates) runtime.authority.setNodeTransform({ nodeId });
+      if (sorted.length !== 0) {
+        runtime.authority.setNodeTransforms({
+          nodeIds: new Uint32Array(sorted.map(({ nodeId }) => nodeId)),
+        });
+      }
       runtime.commitGate.seal(cursor);
     } catch (error) {
       runtime.commitGate.fail(error);
       throw error;
     }
-    state.lastCommandSeq += updateCount;
+    if (updateCount !== 0) state.lastCommandSeq += 1;
   }
   state.logicalUpdates += updateCount;
   state.commitSeq = nextCommitSeq;

@@ -70,13 +70,11 @@ function createNumericAuthorityTestAdapter(authority) {
       authority._assertMatrixPoolSettled();
       return result;
     },
-    setNodeTransform(command) {
-      const { transform, ...record } = command;
-      if (transform === undefined) {
-        throw new Error('test setNodeTransform requires a matrix');
-      }
-      stage(record.nodeId, transform, poolSize);
-      const result = authority.setNodeTransform(record);
+    setNodeTransforms(command) {
+      const nodeIds = new Uint32Array(command.nodeIds);
+      const matrices = ownedMatrixTensor(command.matrices);
+      authority.applyNodeTransformBatch({ poolSize, nodeIds, matrices });
+      const result = authority.setNodeTransforms({ nodeIds });
       authority._assertMatrixPoolSettled();
       return result;
     },

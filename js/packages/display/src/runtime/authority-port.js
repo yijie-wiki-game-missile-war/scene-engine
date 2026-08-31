@@ -114,14 +114,24 @@ export class AuthorityPort {
     }
   }
 
-  setNodeTransform(command) {
+  setNodeTransforms(command) {
     this._assertMutable?.();
-    const record = exactKeys(command, ['nodeId'], [], 'display-authority-command-invalid');
-    const nodeId = authorityNodeId(record.nodeId);
-    const { node, authority } = this._requireAuthority(nodeId);
-    if (authority.transformMode !== 'live') fail('display-authority-transform-initial');
-    this._matrixPool.consume(nodeId);
-    node._markAuthorityTransformChanged(this._matrixPool, nodeId);
+    const record = exactKeys(command, ['nodeIds'], [], 'display-authority-command-invalid');
+    if (!(record.nodeIds instanceof Uint32Array) || record.nodeIds.length === 0) {
+      fail('display-authority-transform-batch-invalid');
+    }
+    const entries = [];
+    for (const nodeId of record.nodeIds) {
+      const entry = this._requireAuthority(authorityNodeId(nodeId));
+      if (entry.authority.transformMode !== 'live') {
+        fail('display-authority-transform-initial');
+      }
+      entries.push(entry);
+    }
+    this._matrixPool.consumeMany(record.nodeIds);
+    for (const { node, nodeId } of entries) {
+      node._markAuthorityTransformChanged(this._matrixPool, nodeId);
+    }
     this._onMutation?.();
   }
 

@@ -67,7 +67,7 @@ export function checkpointPacket({
       kind: 'display_checkpoint',
       encoding: 'raw',
       value: encodeDisplayCheckpoint({
-        schema: 'scene-engine-display-checkpoint@6',
+        schema: 'scene-engine-display-checkpoint@7',
         scene_name: 'main',
         scene_catalog_hash: sceneCatalogHash,
         prefab_catalog_hash: prefabCatalogHash,
@@ -82,14 +82,17 @@ export function checkpointPacket({
 }
 
 export function command(kind, commandSeq, sourceTick, fields = {}) {
-  return {
-    schema: 'scene-engine-node-command@6',
+  const common = {
+    schema: 'scene-engine-node-command@7',
     command_seq: commandSeq,
     source_tick: sourceTick,
     kind,
-    node_id: fields.node_id ?? fields.nodeId ?? 0,
-    ...fields,
   };
+  if (kind === 'node-set-transform-batch') {
+    const ids = fields.node_ids ?? fields.nodeIds ?? new Uint32Array();
+    return { ...common, ...fields, node_ids: ids };
+  }
+  return { ...common, node_id: fields.node_id ?? fields.nodeId ?? 0, ...fields };
 }
 
 function commandMatrix(commandValue) {
@@ -97,7 +100,13 @@ function commandMatrix(commandValue) {
 }
 
 function transportCommand(commandValue) {
-  const { matrix: _matrix, nodeId: _nodeId, ...record } = commandValue;
+  const {
+    matrix: _matrix,
+    matrices: _matrices,
+    nodeId: _nodeId,
+    nodeIds: _nodeIds,
+    ...record
+  } = commandValue;
   return record;
 }
 
@@ -108,12 +117,21 @@ function matrixBatch(commands, suppliedIds, suppliedMatrices) {
     }
     return { nodeIds: suppliedIds, matrices: suppliedMatrices };
   }
-  const matrixCommands = commands.filter(({ kind }) => (
-    kind === 'node-create' || kind === 'node-set-transform'
-  )).sort((left, right) => left.node_id - right.node_id);
-  const nodeIds = new Uint32Array(matrixCommands.map(({ node_id: id }) => id));
+  const batchCommands = commands.filter(({ kind }) => kind === 'node-set-transform-batch');
+  if (batchCommands.length > 1) throw new Error('only one transform batch is permitted');
+  const transformEntries = batchCommands.length === 0
+    ? []
+    : [...(batchCommands[0].node_ids ?? batchCommands[0].nodeIds)].map((nodeId, index) => [
+      nodeId,
+      batchCommands[0].matrices.subarray(index * 16, (index + 1) * 16),
+    ]);
+  const createEntries = commands.filter(({ kind }) => kind === 'node-create')
+    .sort((left, right) => left.node_id - right.node_id)
+    .map((entry) => [entry.node_id, commandMatrix(entry)]);
+  const matrixCommands = [...transformEntries, ...createEntries];
+  const nodeIds = new Uint32Array(matrixCommands.map(([nodeId]) => nodeId));
   const matrices = new Float32Array(nodeIds.length * 16);
-  matrixCommands.forEach((entry, index) => matrices.set(commandMatrix(entry), index * 16));
+  matrixCommands.forEach(([, matrixValue], index) => matrices.set(matrixValue, index * 16));
   return { nodeIds, matrices };
 }
 
@@ -124,7 +142,8 @@ export function commitPacket({
   baseCommandSeq = 0,
   commands = [],
   matrixPoolSize = Math.max(1, ...commands.flatMap((entry) => [
-    entry.node_id + 1,
+    ...(Number.isSafeInteger(entry.node_id) ? [entry.node_id + 1] : []),
+    ...[...(entry.node_ids ?? entry.nodeIds ?? [])].map((nodeId) => nodeId + 1),
     entry.parent_node_id === null || entry.parent_node_id === undefined
       ? 0 : entry.parent_node_id + 1,
   ])),
@@ -160,7 +179,7 @@ export function commitPacket({
       kind: 'display_command_stream',
       encoding: 'raw',
       value: encodeDisplayCommandStream({
-        schema: 'scene-engine-display-command-stream@6',
+        schema: 'scene-engine-display-command-stream@7',
         base_command_seq: baseCommandSeq,
         last_command_seq: lastCommandSeq,
         matrix_pool_size: matrixPoolSize,
@@ -190,12 +209,12 @@ export function createMockDisplayFactory({ failMethod = null, asyncMethod = null
     const authorityPort = {
       installNodeMatrixPool: (value) => invoke('installNodeMatrixPool', value),
       applyNodeTransformBatch: (value) => invoke('applyNodeTransformBatch', value),
+      setNodeTransforms: (value) => invoke('setNodeTransforms', value),
       createNode(value) {
         const result = invoke('createNode', value);
         if (result === undefined) nodes.add(value.nodeId);
         return result;
       },
-      setNodeTransform: (value) => invoke('setNodeTransform', value),
       setNodeParent: (value) => invoke('setNodeParent', value),
       setNodeVisible: (value) => invoke('setNodeVisible', value),
       setNodeState: (value) => invoke('setNodeState', value),

@@ -130,11 +130,15 @@ export interface NodeTransformBatchRecord extends NodeMatrixPoolRecord {
   readonly nodeIds: Uint32Array;
 }
 
+export interface NodeTransformTargetsRecord {
+  readonly nodeIds: Uint32Array;
+}
+
 export interface DisplayAuthorityPort {
   installNodeMatrixPool(command: NodeMatrixPoolRecord): undefined;
   applyNodeTransformBatch(command: NodeTransformBatchRecord): undefined;
+  setNodeTransforms(command: NodeTransformTargetsRecord): undefined;
   createNode(command: AuthorityNodeRecord): number;
-  setNodeTransform(command: { readonly nodeId: number }): undefined;
   setNodeParent(command: { readonly nodeId: number; readonly parentNodeId: number | null }): undefined;
   setNodeVisible(command: { readonly nodeId: number; readonly visible: boolean }): undefined;
   setNodeState(command: { readonly nodeId: number; readonly state: JSONRecord }): undefined;

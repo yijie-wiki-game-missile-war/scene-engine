@@ -29,7 +29,7 @@ The JavaScript reader validates fields, hashes, byte counts, packet framing, ful
 and manifest cursors using the same decoder as live.
 
 Packet-log schema is `@3`: it records opaque Wire v3 bytes and does not interpret Transform layout. Current logs carry
-`display_codec=scene-engine-display-node@6` and SDCP/SDCS payload v3 in those exact packets; an old Display codec fails at
+`display_codec=scene-engine-display-node@7` and SDCP/SDCS payload v4 in those exact packets; an old Display codec fails at
 the normal Wire/Client boundary rather than being migrated during Replay.
 
 Linear Replay creates one `SceneEngineClient`, applies the initial checkpoint, and applies subsequent commits in order while

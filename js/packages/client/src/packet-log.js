@@ -189,6 +189,14 @@ function advanceMatrixPoolState(previous, packetKind, payload) {
       activeNodeIds.add(command.nodeId);
       continue;
     }
+    if (command.kind === 'node-set-transform-batch') {
+      for (const nodeId of command.nodeIds) {
+        if (!activeNodeIds.has(nodeId)) {
+          fail('packet-log-matrix-pool-lifecycle-invalid');
+        }
+      }
+      continue;
+    }
     if (!activeNodeIds.has(command.nodeId)) {
       fail('packet-log-matrix-pool-lifecycle-invalid');
     }

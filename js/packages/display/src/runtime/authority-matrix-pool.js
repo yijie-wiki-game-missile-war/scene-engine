@@ -187,11 +187,23 @@ export class AuthorityMatrixPool {
     this._activeIds.add(id);
   }
 
-  consume(nodeId) {
+  consumeMany(nodeIds) {
     this._requireInstalled();
-    const id = authorityNodeId(nodeId);
-    if (!this._activeIds.has(id)) fail('display-authority-matrix-node-invalid');
-    this._consumeStaged(id);
+    if (!(nodeIds instanceof Uint32Array) || nodeIds.length === 0) {
+      fail('display-authority-transform-batch-invalid');
+    }
+    for (let index = 0; index < nodeIds.length; index += 1) {
+      const id = authorityNodeId(nodeIds[index]);
+      const encodedIndex = this._stagedRows[id] ?? 0;
+      if (!this._activeIds.has(id)
+          || encodedIndex !== index + 1
+          || this._stagedIds?.[index] !== id) {
+        fail('display-authority-transform-batch-unavailable');
+      }
+    }
+    for (let index = 0; index < nodeIds.length; index += 1) {
+      this._consumeStaged(nodeIds[index]);
+    }
   }
 
   release(nodeId) {

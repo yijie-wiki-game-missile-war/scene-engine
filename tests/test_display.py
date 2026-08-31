@@ -184,6 +184,95 @@ def test_matrix_pool_public_snapshot_cannot_bypass_dirty_tracking() -> None:
     assert stream.dirty_node_ids.tolist() == []
 
 
+def test_matrix_pool_set_batch_preserves_id_row_alignment_and_exact_bits() -> None:
+    pool = DisplayMatrixPool()
+    node_ids = tuple(pool.append(transform(float(index))) for index in range(3))
+    baseline = encode_display_checkpoint(
+        scene_name="main",
+        catalog=DisplayCatalogIdentity(HASH_A, HASH_B, HASH_C),
+        last_command_seq=0,
+        matrix_pool=pool,
+        nodes=tuple(node(node_id) for node_id in node_ids),
+    )
+    baseline.confirm_published()
+
+    source_ids = np.asarray([2, 0], dtype="<u4")
+    bits = np.arange(32, dtype="<u4").reshape((2, 4, 4))
+    bits[0, 0, 0] = 0x7F801234
+    bits[1, 0, 0] = 0x80000000
+    matrices = bits.view("<f4")
+    expected_for_two = matrices[0].tobytes()
+    expected_for_zero = matrices[1].tobytes()
+    generation = pool._mutation_generation
+
+    pool.set_batch(source_ids, matrices)
+
+    assert pool._mutation_generation == generation + 1
+    assert pool._versions[0] == pool._versions[2] == generation + 1
+    matrices.view("<u4").fill(0)
+    assert pool.transform(2).matrix_bytes == expected_for_two
+    assert pool.transform(0).matrix_bytes == expected_for_zero
+
+    command = DisplayCommand.set_transform_batch(source_ids)
+    stream, cursor = encode_display_command_stream(
+        base_command_seq=0,
+        source_tick=1,
+        matrix_pool=pool,
+        commands=(command,),
+    )
+    assert cursor == 1
+    assert command.node_ids.tolist() == [0, 2]
+    assert stream.dirty_node_ids.tolist() == [0, 2]
+    assert stream.dirty_matrices[0].tobytes() == expected_for_zero
+    assert stream.dirty_matrices[1].tobytes() == expected_for_two
+    assert stream.transform_batch_matrices is not None
+    assert np.shares_memory(stream.transform_batch_matrices, stream.dirty_matrices)
+
+
+def test_matrix_pool_set_batch_validates_everything_before_mutation() -> None:
+    pool = DisplayMatrixPool()
+    node_ids = tuple(pool.append(transform(float(index))) for index in range(2))
+    baseline = encode_display_checkpoint(
+        scene_name="main",
+        catalog=DisplayCatalogIdentity(HASH_A, HASH_B, HASH_C),
+        last_command_seq=0,
+        matrix_pool=pool,
+        nodes=tuple(node(node_id) for node_id in node_ids),
+    )
+    baseline.confirm_published()
+    matrices = np.zeros((2, 4, 4), dtype="<f4")
+
+    before = pool.matrices
+    generation = pool._mutation_generation
+    versions = pool._versions.copy()
+    dirty = set(pool._dirty_ids)
+    for invalid_ids, invalid_matrices in (
+        ([0, 2], matrices),
+        ([0, 0], matrices),
+        ([0, 1], matrices.astype("<f8")),
+        ([0, 1], matrices[:, :, ::-1]),
+        ([], np.empty((0, 4, 4), dtype="<f4")),
+    ):
+        with pytest.raises(ConfigurationError):
+            pool.set_batch(invalid_ids, invalid_matrices)
+        assert np.array_equal(pool.matrices.view("<u4"), before.view("<u4"))
+        assert pool._mutation_generation == generation
+        assert np.array_equal(pool._versions, versions)
+        assert pool._dirty_ids == dirty
+
+    pool.retire(0)
+    before = pool.matrices
+    generation = pool._mutation_generation
+    versions = pool._versions.copy()
+    dirty = set(pool._dirty_ids)
+    with pytest.raises(ConfigurationError, match="retired"):
+        pool.set_batch([1, 0], matrices)
+    assert np.array_equal(pool.matrices.view("<u4"), before.view("<u4"))
+    assert pool._mutation_generation == generation
+    assert np.array_equal(pool._versions, versions)
+    assert pool._dirty_ids == dirty
+
+
 def test_command_stream_assigns_sequences_and_gathers_sorted_dirty_rows() -> None:
     pool = DisplayMatrixPool()
     existing_id = pool.append(transform())
@@ -199,7 +288,7 @@ def test_command_stream_assigns_sequences_and_gathers_sorted_dirty_rows() -> Non
     pool.set(existing_id, transform(9.0))
     commands = (
         DisplayCommand.create_node(node(created_id, parent_node_id=existing_id)),
-        DisplayCommand.set_transform(existing_id),
+        DisplayCommand.set_transform_batch((existing_id,)),
         DisplayCommand.set_state(created_id, {"animation": {"state": "move"}}),
     )
     result, cursor = encode_display_command_stream(
@@ -219,7 +308,9 @@ def test_command_stream_assigns_sequences_and_gathers_sorted_dirty_rows() -> Non
     assert [item["command_seq"] for item in records] == [8, 9, 10]
     assert {item["source_tick"] for item in records} == {60}
     assert all(item["schema"] == DISPLAY_COMMAND_SCHEMA for item in records)
-    assert [item["node_id"] for item in records] == [created_id, existing_id, created_id]
+    assert records[0]["node_id"] == created_id
+    assert records[1]["node_ids"] == [existing_id]
+    assert records[2]["node_id"] == created_id
     assert not any("transform" in item for item in records)
     assert result.maximum_json_depth == 2
     encode_display_command_stream_binary(
@@ -234,6 +325,24 @@ def test_command_stream_assigns_sequences_and_gathers_sorted_dirty_rows() -> Non
             expected_source_tick=60,
             expected_last_command_seq=cursor,
             maximum_json_depth=1,
+        )
+
+    malformed_prefix = result.to_record()
+    malformed_prefix["commands"][1]["node_ids"] = [created_id]
+    with pytest.raises(ConfigurationError, match="dirty Node ID prefix"):
+        validate_display_command_stream(
+            malformed_prefix,
+            expected_source_tick=60,
+            expected_last_command_seq=cursor,
+        )
+
+    malformed_suffix = result.to_record()
+    malformed_suffix["commands"][1]["node_ids"] = [existing_id, created_id]
+    with pytest.raises(ConfigurationError, match="exactly match create commands"):
+        validate_display_command_stream(
+            malformed_suffix,
+            expected_source_tick=60,
+            expected_last_command_seq=cursor,
         )
 
 
@@ -254,7 +363,7 @@ def test_command_lifecycle_rejects_uncreated_set_transform_and_duplicate_remove(
             base_command_seq=0,
             source_tick=1,
             matrix_pool=pool,
-            commands=(DisplayCommand.set_transform(pending_id),),
+            commands=(DisplayCommand.set_transform_batch((pending_id,)),),
         )
 
     pool.retire(existing_id)
@@ -274,10 +383,39 @@ def test_command_lifecycle_rejects_uncreated_set_transform_and_duplicate_remove(
         )
 
 
+def test_command_stream_rejects_more_than_one_transform_batch() -> None:
+    pool = DisplayMatrixPool()
+    node_ids = tuple(pool.append(transform(float(index))) for index in range(2))
+    baseline = encode_display_checkpoint(
+        scene_name="main",
+        catalog=DisplayCatalogIdentity(HASH_A, HASH_B, HASH_C),
+        last_command_seq=0,
+        matrix_pool=pool,
+        nodes=tuple(node(node_id) for node_id in node_ids),
+    )
+    baseline.confirm_published()
+    matrices = np.repeat(np.eye(4, dtype="<f4")[None, :, :], 2, axis=0)
+    pool.set_batch(
+        np.asarray(node_ids, dtype="<u4"),
+        matrices,
+    )
+
+    with pytest.raises(ConfigurationError, match="at most one"):
+        encode_display_command_stream(
+            base_command_seq=0,
+            source_tick=1,
+            matrix_pool=pool,
+            commands=(
+                DisplayCommand.set_transform_batch((0,)),
+                DisplayCommand.set_transform_batch((1,)),
+            ),
+        )
+
+
 def test_mutation_command_construction_uses_uint32_node_ids() -> None:
     target = 17
     commands = (
-        DisplayCommand.set_transform(target),
+        DisplayCommand.set_transform_batch((target,)),
         DisplayCommand.set_parent(target, None),
         DisplayCommand.set_visible(target, False),
         DisplayCommand.set_state(target, {}),
@@ -285,9 +423,35 @@ def test_mutation_command_construction_uses_uint32_node_ids() -> None:
         DisplayCommand.remove(target),
     )
 
-    assert {command.node_id for command in commands} == {target}
+    assert commands[0].node_id is None
+    assert commands[0].node_ids.tolist() == [target]
+    assert {command.node_id for command in commands[1:]} == {target}
     with pytest.raises(ConfigurationError, match="uint32"):
         DisplayCommand.remove([])  # type: ignore[arg-type]
+
+
+def test_transform_batch_constructor_sorts_copies_and_freezes_node_ids() -> None:
+    source = np.asarray([5, 1, 3], dtype=">u4")
+    command = DisplayCommand.set_transform_batch(source)
+    source.fill(0)
+
+    assert command.node_id is None
+    assert command.node_ids is not None
+    assert command.node_ids.tolist() == [1, 3, 5]
+    assert command.node_ids.dtype == np.dtype("<u4")
+    assert command.node_ids.flags.c_contiguous
+    assert not command.node_ids.flags.writeable
+    assert not np.shares_memory(command.node_ids, source)
+    assert command == DisplayCommand.set_transform_batch([3, 5, 1])
+    assert command.to_record(command_seq=7, source_tick=9)["node_ids"] == [1, 3, 5]
+    with pytest.raises(ValueError, match="read-only"):
+        command.node_ids[0] = 0
+    for invalid in ([], [1, 1], [-1], [0xFFFFFFFF], [1.5]):
+        with pytest.raises(ConfigurationError):
+            DisplayCommand.set_transform_batch(invalid)
+    with pytest.raises(ConfigurationError, match="one-dimensional integer"):
+        DisplayCommand.set_transform_batch(np.asarray([1.0], dtype="<f4"))
+    assert not hasattr(DisplayCommand, "set_transform")
 
 
 def test_empty_command_stream_keeps_cursor_but_still_forms_a_commit_seal() -> None:
@@ -447,7 +611,7 @@ def test_stale_publish_token_cannot_clear_a_newer_pool_mutation() -> None:
         base_command_seq=0,
         source_tick=1,
         matrix_pool=pool,
-        commands=(DisplayCommand.set_transform(node_id),),
+        commands=(DisplayCommand.set_transform_batch((node_id,)),),
     )
     pool.set(node_id, transform(2.0))
 
@@ -457,7 +621,7 @@ def test_stale_publish_token_cannot_clear_a_newer_pool_mutation() -> None:
         base_command_seq=0,
         source_tick=1,
         matrix_pool=pool,
-        commands=(DisplayCommand.set_transform(node_id),),
+        commands=(DisplayCommand.set_transform_batch((node_id,)),),
     )
     assert retry.dirty_matrices[0].tobytes() == transform(2.0).matrix_bytes
 

@@ -77,14 +77,15 @@ function checkpoint({
 }
 
 function command(kind, commandSeq, fields = {}) {
-  return {
+  const common = {
     schema: NODE_COMMAND_SCHEMA,
     command_seq: commandSeq,
     source_tick: 12,
     kind,
-    node_id: fields.node_id ?? 0,
-    ...fields,
   };
+  return kind === 'node-set-transform-batch'
+    ? { ...common, ...fields, node_ids: fields.node_ids }
+    : { ...common, node_id: fields.node_id ?? 0, ...fields };
 }
 
 function stream(commands, {
@@ -130,12 +131,15 @@ function parsedCommandToRecord(value) {
     command_seq: value.commandSeq,
     source_tick: value.sourceTick,
     kind: value.kind,
-    node_id: value.nodeId,
   };
+  if (value.kind === 'node-set-transform-batch') {
+    return { ...common, node_ids: value.nodeIds };
+  }
+  const nodeCommon = { ...common, node_id: value.nodeId };
   switch (value.kind) {
     case 'node-create':
       return {
-        ...common,
+        ...nodeCommon,
         parent_node_id: value.parentNodeId,
         prefab_id: value.prefabId,
         transform_mode: value.transformMode,
@@ -143,16 +147,15 @@ function parsedCommandToRecord(value) {
         state: value.state,
       };
     case 'node-set-parent':
-      return { ...common, parent_node_id: value.parentNodeId };
+      return { ...nodeCommon, parent_node_id: value.parentNodeId };
     case 'node-set-visible':
-      return { ...common, visible: value.visible };
+      return { ...nodeCommon, visible: value.visible };
     case 'node-set-state':
-      return { ...common, state: value.state };
+      return { ...nodeCommon, state: value.state };
     case 'node-replace-prefab':
-      return { ...common, prefab_id: value.prefabId, state: value.state };
-    case 'node-set-transform':
+      return { ...nodeCommon, prefab_id: value.prefabId, state: value.state };
     case 'node-remove':
-      return common;
+      return nodeCommon;
     default:
       throw new Error(`unexpected command kind: ${value.kind}`);
   }
@@ -174,7 +177,7 @@ function rawAttachment(packet, kind) {
   return packet.attachments.find((attachment) => attachment.kind === kind).value;
 }
 
-test('binary Display v3 checkpoint decodes one owned pool tensor and ID metadata', () => {
+test('binary Display v4 checkpoint decodes one owned pool tensor and ID metadata', () => {
   const source = matrixPool(3, [[0, shearMatrix(17.75)], [2, matrix(4)]]);
   const bytes = encodeDisplayCheckpoint(checkpoint({
     poolSize: 3,
@@ -182,10 +185,10 @@ test('binary Display v3 checkpoint decodes one owned pool tensor and ID metadata
     nodes: [baselineNode(0), { ...baselineNode(2, 0), transform_mode: 'initial', visible: false }],
   }));
   assert.equal(new TextDecoder().decode(bytes.subarray(0, 4)), 'SDCP');
-  assert.equal(bytes[4], 3);
+  assert.equal(bytes[4], 4);
 
   const parsed = parseDisplayCheckpoint(bytes, { header: { last_command_seq: 7 } });
-  assert.equal(parsed.schema, 'scene-engine-display-checkpoint@6');
+  assert.equal(parsed.schema, 'scene-engine-display-checkpoint@7');
   assert.equal(parsed.matrixPoolSize, 3);
   assert.ok(parsed.matrixPool instanceof Float32Array);
   assert.equal(parsed.matrixPool.length, 3 * MATRIX_LENGTH);
@@ -206,7 +209,7 @@ test('binary Display v3 checkpoint decodes one owned pool tensor and ID metadata
   assert.equal(parsed.matrixPool[0], first, 'packet mutation cannot alias the decoded tensor');
 });
 
-test('binary Display v3 command stream carries sorted dirty IDs and one contiguous tensor', () => {
+test('binary Display v4 command stream carries one transform batch before create rows', () => {
   const commands = [
     command('node-create', 8, {
       node_id: 2,
@@ -216,7 +219,7 @@ test('binary Display v3 command stream carries sorted dirty IDs and one contiguo
       visible: true,
       state: { created: true },
     }),
-    command('node-set-transform', 9, { node_id: 0 }),
+    command('node-set-transform-batch', 9, { node_ids: new Uint32Array([0]) }),
     command('node-set-parent', 10, { node_id: 0, parent_node_id: 2 }),
     command('node-set-visible', 11, { node_id: 0, visible: false }),
     command('node-set-state', 12, { node_id: 0, state: { mode: 'active' } }),
@@ -235,7 +238,7 @@ test('binary Display v3 command stream carries sorted dirty IDs and one contiguo
     baseCommandSeq: 7,
   });
 
-  assert.equal(parsed.schema, 'scene-engine-display-command-stream@6');
+  assert.equal(parsed.schema, 'scene-engine-display-command-stream@7');
   assert.deepEqual(parsed.commands.map(({ kind }) => kind), commands.map(({ kind }) => kind));
   assert.deepEqual(parsed.commands.map(({ commandSeq }) => commandSeq), [8, 9, 10, 11, 12, 13, 14]);
   assert.deepEqual([...parsed.dirtyNodeIds], [0, 2]);
@@ -243,7 +246,9 @@ test('binary Display v3 command stream carries sorted dirty IDs and one contiguo
   assert.notStrictEqual(parsed.dirtyMatrices.buffer, bytes.buffer);
   assert.equal(parsed.commands[0].parentNodeId, null);
   assert.equal(parsed.commands[2].parentNodeId, 2);
-  assert.equal('transform' in parsed.commands[1], false);
+  assert.equal(parsed.commands[1].transformCount, 1);
+  assert.deepEqual([...parsed.commands[1].nodeIds], [0]);
+  assert.equal('nodeId' in parsed.commands[1], false);
   assert.deepEqual(encodeDisplayCommandStream(parsedStreamToRecord(parsed), {
     sourceTick: 12,
   }), bytes);
@@ -290,10 +295,12 @@ test('canonical Python binary fixtures re-encode to exact Display bytes', async 
     header: commitPacketValue.header,
     baseCommandSeq: parsedCheckpoint.lastCommandSeq,
   });
-  const transformCommand = parsedStream.commands.find(({ kind }) => kind === 'node-set-transform');
-  const dirtyIndex = parsedStream.dirtyNodeIds.indexOf(transformCommand.nodeId);
-  assert.equal(parsedStream.dirtyMatrices[(dirtyIndex * MATRIX_LENGTH) + 4], 0.25);
-  assert.equal(parsedStream.dirtyMatrices[(dirtyIndex * MATRIX_LENGTH) + 12], 1.5);
+  const transformCommand = parsedStream.commands.find(
+    ({ kind }) => kind === 'node-set-transform-batch',
+  );
+  assert.equal(transformCommand.transformCount > 0, true);
+  assert.equal(parsedStream.dirtyMatrices[4], 0.25);
+  assert.equal(parsedStream.dirtyMatrices[12], 1.5);
   assert.deepEqual(encodeDisplayCommandStream(parsedStreamToRecord(parsedStream), {
     sourceTick: commitPacketValue.header.source_tick,
   }), commandBytes);
@@ -392,7 +399,9 @@ test('binary parsers reject malformed pool IDs, tensors, records, and framing', 
   assert.throws(() => parseDisplayCheckpoint(trailing, { header: { last_command_seq: 7 } }),
     (error) => error.code === 'display-checkpoint-trailing-bytes');
 
-  const transformCommand = command('node-set-transform', 8, { node_id: 0 });
+  const transformCommand = command('node-set-transform-batch', 8, {
+    node_ids: new Uint32Array([0]),
+  });
   const commandBytes = encodeDisplayCommandStream(stream([transformCommand], {
     poolSize: 1,
     dirtyNodeIds: new Uint32Array([0]),
@@ -439,6 +448,20 @@ test('binary parsers reject malformed pool IDs, tensors, records, and framing', 
     dirtyNodeIds: new Uint32Array([0, 1]),
     dirtyMatrices: new Float32Array([...matrix(1), ...matrix(2)]),
   }), { sourceTick: 12 }), (error) => error.code === 'display-transform-dirty-target-mismatch');
+  assert.throws(() => encodeDisplayCommandStream(stream([
+    command('node-set-transform-batch', 8, { node_ids: new Uint32Array([1]) }),
+  ], {
+    poolSize: 2,
+    dirtyNodeIds: new Uint32Array([0]),
+    dirtyMatrices: matrix(1),
+  }), { sourceTick: 12 }), (error) => error.code === 'display-transform-dirty-target-mismatch');
+  assert.throws(() => encodeDisplayCommandStream(stream([
+    command('node-set-transform-batch', 8, { node_ids: new Uint32Array([1, 0]) }),
+  ], {
+    poolSize: 2,
+    dirtyNodeIds: new Uint32Array([0, 1]),
+    dirtyMatrices: new Float32Array([...matrix(1), ...matrix(2)]),
+  }), { sourceTick: 12 }), (error) => error.code === 'display-transform-batch-id-order-invalid');
 
   const selfParent = command('node-set-parent', 8, {
     node_id: 0,

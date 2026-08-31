@@ -66,7 +66,7 @@ function checkpointPacket(nodes, matrixPoolSize) {
       kind: 'display_checkpoint',
       encoding: 'raw',
       value: encodeDisplayCheckpoint({
-        schema: 'scene-engine-display-checkpoint@6',
+        schema: 'scene-engine-display-checkpoint@7',
         scene_name: 'benchmark',
         ...HASHES,
         last_command_seq: 0,
@@ -87,7 +87,7 @@ function commitPacket({
   commands,
 }) {
   const records = commands.map((command, index) => ({
-    schema: 'scene-engine-node-command@6',
+    schema: 'scene-engine-node-command@7',
     command_seq: baseCommandSeq + index + 1,
     source_tick: commitSeq,
     ...command,
@@ -121,7 +121,7 @@ function commitPacket({
       kind: 'display_command_stream',
       encoding: 'raw',
       value: encodeDisplayCommandStream({
-        schema: 'scene-engine-display-command-stream@6',
+        schema: 'scene-engine-display-command-stream@7',
         base_command_seq: baseCommandSeq,
         last_command_seq: lastCommandSeq,
         matrix_pool_size: matrixPoolSize,
@@ -163,8 +163,8 @@ function createBenchmarkSessionFactory(state) {
         if (state.nodes.has(record.nodeId)) throw new Error(`benchmark duplicate: ${record.nodeId}`);
         state.nodes.set(record.nodeId, record);
       },
-      setNodeTransform(record) {
-        requireNode(record.nodeId);
+      setNodeTransforms({ nodeIds }) {
+        nodeIds.forEach((nodeId) => requireNode(nodeId));
       },
       setNodeParent(record) {
         const node = requireNode(record.nodeId);
@@ -249,10 +249,10 @@ function createScenario(name) {
       if (name === 'motion') {
         const dirtyNodeIds = new Uint32Array(nodeIds);
         return {
-          commands: nodeIds.map((nodeId) => ({
-            kind: 'node-set-transform',
-            node_id: nodeId,
-          })),
+          commands: [{
+            kind: 'node-set-transform-batch',
+            node_ids: dirtyNodeIds,
+          }],
           matrixPoolSize: nextNodeId,
           dirtyNodeIds,
           dirtyMatrices: matrixTensor(nodeIds.map((nodeId) => ({

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regenerate the frozen cross-language Scene Engine wire@3/display@6 fixtures."""
+"""Regenerate the frozen cross-language Scene Engine wire@3/display@7 fixtures."""
 
 from __future__ import annotations
 
@@ -162,7 +162,7 @@ def main() -> None:
     args = parser.parse_args()
     catalog_identity_path, catalog_identity_bytes, catalog = catalog_identity_fixture()
     wire_root = ROOT / "fixtures" / "wire-v3"
-    display_root = ROOT / "fixtures" / "display-v6"
+    display_root = ROOT / "fixtures" / "display-v7"
     tree_root = ROOT / "fixtures" / "json-tree-v1"
     package_wire_root = ROOT / "js" / "packages" / "client" / "fixtures" / "wire-v3"
     package_log = ROOT / "js" / "packages" / "client" / "fixtures" / "packet-log"
@@ -198,7 +198,7 @@ def main() -> None:
         DisplayCommand.create_node(
             node(transient_id, parent_node_id=root_id)
         ),
-        DisplayCommand.set_transform(aircraft_id),
+        DisplayCommand.set_transform_batch((aircraft_id,)),
         DisplayCommand.set_parent(aircraft_id, root_id),
         DisplayCommand.set_visible(aircraft_id, False),
         DisplayCommand.set_state(aircraft_id, {"animation": "moving"}),
