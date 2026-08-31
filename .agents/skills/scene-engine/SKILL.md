@@ -23,6 +23,7 @@ Then read only the current documents for the affected boundary:
 | Concern | Current document |
 |---|---|
 | Python runtime, scheduling, transactions, input, sessions | [Runtime and fixed 60 Hz](../../../docs/runtime.md) |
+| Node property/event product integration | [Python publication quickstart](../../../docs/runtime.md#node-property-and-event-publication-quickstart) and [Display consumption quickstart](../../../docs/display.md#property-projection-and-event-handling-quickstart) |
 | Packet schemas, limits, encoding and cross-language fixtures | [Wire protocol](../../../docs/wire.md) |
 | JavaScript decode, WorldState, ACK and Display session | [Client](../../../docs/client.md) |
 | Scene, Prefab, Resource, Component and Display lifecycle | [Display](../../../docs/display.md) |

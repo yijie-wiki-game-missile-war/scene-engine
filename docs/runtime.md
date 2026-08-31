@@ -116,6 +116,196 @@ Transform, reparent and properties, but it never enters a checkpoint. A linear R
 recorded commit; seeking to a later checkpoint does not synthesize it. Facts that must survive reconnect/seek belong in state,
 optionally with a logical start tick, rather than only in an event.
 
+### Node property and event publication quickstart
+
+The following complete `EngineProgram` excerpt publishes `coins` and `dead` as durable top-level properties and `explode` as a
+one-time visual notification. Durable values are changed in the product's canonical `World` before the mutation returns
+`changed`; both the product checkpoint and `DisplayNode.state` are rebuilt from that World. The example assumes that Scene
+`main` and Prefab `game/state` exist in the supplied Display catalog, and that the Prefab declares the `explode` event. The
+matching browser setup is in the
+[Display property and event quickstart](display.md#property-projection-and-event-handling-quickstart).
+
+```python
+from dataclasses import dataclass
+
+from scene_engine import (
+    CheckpointContext,
+    CommitContext,
+    DisplayCatalogIdentity,
+    DisplayCommand,
+    DisplayMatrixPool,
+    DisplayNode,
+    DisplayTransform,
+    EngineInput,
+    InputContext,
+    MutationResult,
+    ProductCheckpoint,
+    ProductCommit,
+    TickContext,
+    WorldCounters,
+)
+
+
+@dataclass
+class World:
+    source_tick: int = 0
+    world_revision: int = 0
+    coins: int = 0
+    dead: bool = False
+
+
+@dataclass(frozen=True)
+class DisplayDelta:
+    coins: int
+    death_started: bool
+
+
+class GameProgram:
+    WORLD_CODEC = "my-game-world@1"
+
+    def __init__(self, display_catalog: DisplayCatalogIdentity) -> None:
+        self.display_catalog = display_catalog
+        self.matrix_pool = DisplayMatrixPool()
+        self.game_node_id = self.matrix_pool.append(DisplayTransform.identity())
+
+    def read_counters(self, world: World) -> WorldCounters:
+        return WorldCounters(world.source_tick, world.world_revision)
+
+    def write_counters(self, world: World, counters: WorldCounters) -> None:
+        world.source_tick = counters.source_tick
+        world.world_revision = counters.world_revision
+
+    def step(self, world: World, context: TickContext) -> MutationResult:
+        world.coins += 1
+
+        # Illustrative only: real product rules decide when this fact changes.
+        death_started = not world.dead and context.tick == context.ticks_per_second
+        if death_started:
+            world.dead = True
+
+        return MutationResult.changed(
+            commit_context=DisplayDelta(
+                coins=world.coins,
+                death_started=death_started,
+            )
+        )
+
+    def handle_input(
+        self,
+        _world: World,
+        _request: EngineInput,
+        _context: InputContext,
+    ) -> MutationResult:
+        return MutationResult.rejected("unsupported-command")
+
+    def build_checkpoint(
+        self,
+        world: World,
+        _context: CheckpointContext,
+    ) -> ProductCheckpoint:
+        return ProductCheckpoint(
+            world_codec=self.WORLD_CODEC,
+            world_snapshot={
+                "coins": world.coins,
+                "dead": world.dead,
+                "source_tick": world.source_tick,
+                "world_revision": world.world_revision,
+            },
+            scene_name="main",
+            display_catalog=self.display_catalog,
+            display_matrix_pool=self.matrix_pool,
+            display_nodes=(
+                DisplayNode(
+                    node_id=self.game_node_id,
+                    parent_node_id=None,
+                    prefab_id="game/state",
+                    transform_mode="live",
+                    visible=True,
+                    # The complete current durable state of this authority Node.
+                    state={"coins": world.coins, "dead": world.dead},
+                ),
+            ),
+        )
+
+    def build_commit(
+        self,
+        _world: World,
+        mutation: MutationResult,
+        context: CommitContext,
+    ) -> ProductCommit:
+        delta = mutation.commit_context
+        if not isinstance(delta, DisplayDelta):
+            raise TypeError("tick commit requires DisplayDelta")
+
+        # JSON Tree paths are canonical, ordered and non-overlapping.
+        changes = [
+            {"op": "set", "path": ["coins"], "value": delta.coins},
+        ]
+        commands = [
+            DisplayCommand.set_property(
+                self.game_node_id,
+                "coins",
+                delta.coins,
+            ),
+        ]
+
+        if delta.death_started:
+            changes.append({"op": "set", "path": ["dead"], "value": True})
+            commands.extend(
+                (
+                    # The event handler observes this property update first.
+                    DisplayCommand.set_property(
+                        self.game_node_id,
+                        "dead",
+                        True,
+                    ),
+                    DisplayCommand.emit_event(
+                        self.game_node_id,
+                        "explode",
+                        {"damage": 3},
+                    ),
+                )
+            )
+
+        changes.extend(
+            (
+                {
+                    "op": "set",
+                    "path": ["source_tick"],
+                    "value": context.commit.source_tick,
+                },
+                {
+                    "op": "set",
+                    "path": ["world_revision"],
+                    "value": context.commit.world_revision,
+                },
+            )
+        )
+
+        return ProductCommit(
+            world_codec=self.WORLD_CODEC,
+            world_patch={
+                "schema": "scene-engine-json-tree@1",
+                "changes": changes,
+            },
+            # Every commit supplies the same resident pool; this commit did not dirty it.
+            display_matrix_pool=self.matrix_pool,
+            display_commands=tuple(commands),
+        )
+```
+
+This property/event-only publication does not call `matrix_pool.set(...)` and does not add
+`DisplayCommand.set_transform_batch(...)`. A commit whose only Display change is an event likewise needs only
+`emit_event(...)` in `display_commands`, but its `world_patch` must still publish every serialized `world_snapshot` field
+changed by the transaction, including counters when the product codec stores them as this example does. Only a product snapshot
+with no changed field may use an empty `scene-engine-json-tree@1` `changes` array. Its mutation result must still be `changed` so the
+event receives a real commit and command position. Never fabricate a dirty Transform for either case.
+
+For removal, first remove the key from the canonical World state and then publish `unset_property(...)`; unsetting a missing
+authority-state member fails. `set_property(..., None)` retains the member with JSON `null`. Several mutually dependent fields
+should be published with one `set_state(...)`, not a sequence of property commands. Names, JSON limits and exact encoding are
+defined by [Wire binary Display payloads](wire.md#binary-display-payloads).
+
 Every scalar command target and every Transform-batch ID is a checked `uint32` pool row. A commit has at most one non-empty
 Transform batch; it occupies one `command_seq` regardless of row count. Its sorted existing-row IDs plus create targets must
 correspond exactly to the sorted dirty IDs and aligned `(m,4,4)` tensor. Missing/extra dirty rows, overlap with create targets,

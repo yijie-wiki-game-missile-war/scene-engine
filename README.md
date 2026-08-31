@@ -75,6 +75,10 @@ Scene Engine 不负责：
 
 开发接入、API、协议、版本和验证方式由以下技术合同和测试说明维护：
 
+节点属性与事件接入可直接从 [Python 发布 quickstart](docs/runtime.md#node-property-and-event-publication-quickstart)
+和 [Display 投影与事件处理 quickstart](docs/display.md#property-projection-and-event-handling-quickstart) 开始；精确编码和
+限制仍以 [Wire 协议](docs/wire.md#binary-display-payloads) 为准。
+
 - [架构与所有权](docs/architecture.md)
 - [Runtime 与固定 60 Hz](docs/runtime.md)
 - [Client 与状态同步](docs/client.md)

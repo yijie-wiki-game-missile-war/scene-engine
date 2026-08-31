@@ -399,6 +399,126 @@ Prefab's `events` list is the public allowlist, so neither declaration alone exp
 and cannot implement handlers or subscriptions. Promise-returning handlers fail. Attach/event order is Node preorder then
 declaration order; disposal is child-before-parent then reverse declaration order.
 
+### Property projection and event handling quickstart
+
+This example is the browser half of the
+[Python publication quickstart](runtime.md#node-property-and-event-publication-quickstart). It uses only the public
+`@scene-engine/display` API and connects the four required pieces: a registered Behaviour, its Prefab attachment, the Prefab's
+public event allowlist and the resolver that projects complete authority state into Component properties.
+
+```js
+import {
+  BehaviourComponent,
+  PREFAB_DEFINITION_SCHEMA,
+  createComponentRegistry,
+  createPrefabRegistry,
+  definePrefab,
+} from '@scene-engine/display';
+
+class UnitStatusBehaviour extends BehaviourComponent {
+  static typeId = 'game.unit-status@1';
+  static eventNames = ['explode'];
+
+  constructor(options) {
+    super(options);
+    this.lastExplosion = null;
+  }
+
+  onEvent(_display, event) {
+    if (event.eventName !== 'explode') return;
+
+    // Product-specific Display-local handling belongs here and must return
+    // synchronously. Retaining the frozen record is safe for later visual ticks.
+    // With the Python command order above, this.properties.dead is already true.
+    this.lastExplosion = event;
+  }
+}
+
+const componentRegistry = createComponentRegistry();
+componentRegistry.register({
+  ComponentClass: UnitStatusBehaviour,
+  normalizeProperties(value) {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      throw new TypeError('status properties must be an object');
+    }
+    if (typeof value.dead !== 'boolean') {
+      throw new TypeError('dead must be a boolean');
+    }
+    if (!Number.isSafeInteger(value.coins) || value.coins < 0) {
+      throw new TypeError('coins must be a non-negative safe integer');
+    }
+    return { dead: value.dead, coins: value.coins };
+  },
+  resourceReferences: () => [],
+});
+
+const unitPrefab = definePrefab({
+  schema: PREFAB_DEFINITION_SCHEMA,
+  id: 'game/state',
+  revision: 1,
+  gameplayType: 'game.state',
+  events: ['explode'],
+  root: {
+    components: [
+      {
+        key: 'status',
+        type: UnitStatusBehaviour.typeId,
+        properties: { dead: false, coins: 0 },
+      },
+    ],
+    children: [],
+  },
+  resolveState(state) {
+    return {
+      components: {
+        '$root/status': {
+          dead: state.dead,
+          coins: state.coins,
+        },
+      },
+    };
+  },
+});
+
+const prefabRegistry = createPrefabRegistry([unitPrefab]);
+const authorityStateSchemas = [
+  { gameplayType: 'game.state', schemaId: 'game.state.authority', revision: 1 },
+];
+
+// Pass componentRegistry, prefabRegistry, the Scene/Resource registries and
+// authorityStateSchemas to the existing createDisplayRuntime(...) composition root.
+```
+
+`'$root/status'` addresses the `status` Component on this Prefab definition instance's root Node. A handler that starts an
+animation can use the controlled animation methods and declarations from [Display-local animator](display-animation.md); the
+event itself never carries animation progress or renderer state.
+
+These three similarly named values belong to different layers:
+
+| Value | Owner and update path | Checkpoint behavior |
+| --- | --- | --- |
+| authority property such as `dead` | Python's canonical World; `set_property` changes one top-level member of the outer complete authority state | must be rebuilt in the next `DisplayNode.state` |
+| `component.properties.dead` | Display-owned frozen Component configuration derived by `resolveState` and registry normalization | rebuilt by resolving the authority state |
+| `explode` event | one ordered Python command synchronously dispatched to subscribed Behaviours | never synthesized by a checkpoint |
+
+There is no `onPropertyChanged` callback. Each `set_property`, `unset_property` or `set_state` operation builds a complete outer
+authority-state candidate, reruns `resolveState` and reconciles its declarative Node/Component patches. Product code must not
+call `setNodeProperty` or `emitNodeEvent` directly in production; `SceneEngineClient` invokes the Authority surface inside the
+commit gate.
+
+Event delivery requires all of the following: the current outer Prefab declares the name in `events`, the Component class is
+registered and attached, the Behaviour is enabled, and its normalized `static eventNames` includes the name. Ordinary child
+Nodes belonging to that same Prefab definition participate in preorder delivery; fixed or dynamic nested Prefab records do not.
+Python cannot address a nested Prefab's event surface through its outer authority Node. A declared event with no enabled
+subscriber is a successful empty delivery.
+
+`onEvent(display, event)` receives one deeply frozen `{eventName, payload, commandSeq, sourceTick}` record and must return
+synchronously. Throwing or returning a Promise fails the commit barrier, emits no ACK and invalidates the projection. Property,
+event, Transform and reparent commands share one exact order: if a property command precedes an event, the handler observes the
+new resolved Component properties; if the event comes first, it observes the old properties. Increase the Prefab `revision`
+when resolver semantics change, and use a new versioned Component `typeId` when Behaviour, subscription or normalization
+semantics change.
+
 Component properties are deeply frozen and can change only through:
 
 ```js
