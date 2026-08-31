@@ -30,7 +30,7 @@ Then read only the current documents for the affected boundary:
 | Three bindings, loading, batching, projection and disposal | [Render runtime](../../../docs/render-runtime.md) |
 | Exact packet recording, seek and Replay | [Recording and Replay](../../../docs/recording-replay.md) |
 | Fixed-point transform encoding and coordinates | [Transform](../../../docs/transform.md) |
-| Test method and acceptance standard | [Testing](../../../docs/testing.md) |
+| Test method and completion standard | [Testing](../../../docs/testing.md) |
 | Test inventory and suites | [Test items](../../../docs/tests/README.md) |
 
 Historical reviews, migration notes, and patch reports are context only. They do not override the current documents above.
@@ -66,7 +66,7 @@ mutable product World
 ```
 
 Recording stores exact Engine packets. Replay sends those bytes through the same Client, Display, and renderer path.
-Tests, diagnostics, migration, and acceptance work must not introduce alternate state or decode paths.
+Tests, diagnostics, migration, and verification work must not introduce alternate state or decode paths.
 
 ## Public API entry points
 

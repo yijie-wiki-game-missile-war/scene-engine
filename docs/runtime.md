@@ -84,7 +84,7 @@ read-only `(m,4,4)` tensor. It does not construct, serialize or confirm one comm
 
 Checkpoint nodes are complete parent-first authority roots. Product code supplies stable `node_id`/`parent_id`, exact
 registered `prefab_id`, transform mode, visibility and complete authority state; the Node obtains its local Matrix4 from the
-pool row with the same ID. The browser Client remains the first matrix-semantic acceptance gate.
+pool row with the same ID. The browser Client remains the first matrix-semantic validation gate.
 After checkpoint it publishes one vector-targeted Transform command plus single-target structural/state commands through named
 constructors:
 

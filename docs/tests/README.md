@@ -77,7 +77,7 @@ Python 测试由 `uv run python -m pytest -q` 按 `pyproject.toml` 的 `tests/` 
 | [`batch-representation.test.mjs`](../../js/packages/renderer-three/test/batch-representation.test.mjs) | ordinary object 与 InstancedMesh 唯一表示、scene traversal 排除、dirty matrix update range、保守 batch bounds、microtask Node root 与多 batch-group 批量回收、可见性、batch 重建、资源替换、pick、capture 和 diagnostics 计数。 |
 | [`animation-port.test.mjs`](../../js/packages/renderer-three/test/animation-port.test.mjs) | 旧 renderer animation 字段拒绝、Animation Resource 不加载、animated sprite 退出静态 batch、frame 更新不 rebatch 和 eligibility transition。 |
 | [`display-integration.test.mjs`](../../js/packages/renderer-three/test/display-integration.test.mjs) | Display RenderSystem 驱动精确 Three backend port，并从声明式 binding 重建。 |
-| [`acceptance.test.mjs`](../../js/packages/renderer-three/test/acceptance.test.mjs) | 500 个真实 Three bindings 的 batching、frame sampling、backend rebuild、dispose 和最终零 resource lease。 |
+| [`backend-500-lifecycle.test.mjs`](../../js/packages/renderer-three/test/backend-500-lifecycle.test.mjs) | 500 个真实 Three bindings 的 batching、frame sampling、backend rebuild、dispose 和最终零 resource lease。 |
 | [`display-runtime-foundation.test.mjs`](../../js/packages/renderer-three/test/display-runtime-foundation.test.mjs) | 从 DisplayRuntime 到真实 Three backend 的整体基础测试：mesh/sprite/model/surface/particle、固定与动态嵌套 Prefab、Authority 增删/reparent、Matrix4、visibility、完整 state、Display-local sprite animation、backend rebuild 和零所有权释放。 |
 | [`display-runtime-scale.test.mjs`](../../js/packages/renderer-three/test/display-runtime-scale.test.mjs) | 调用 scale runner 的 12-binding deterministic smoke，检查结构、cursor、计时报告形状、backend rebuild、健康和完整 dispose；不执行大规模时间门槛。 |
 

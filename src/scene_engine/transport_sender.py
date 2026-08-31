@@ -86,7 +86,7 @@ class TransportSender:
     """Serialize bounded, non-blocking submissions onto one transport worker.
 
     ``maximum_pending_count`` and ``maximum_pending_bytes`` account for SEND
-    operations from acceptance through terminal completion, including a SEND
+    operations from admission through terminal completion, including a SEND
     currently blocked inside the transport. CLOSE operations use an independent
     reserved ``maximum_pending_control_count`` capacity.
 
@@ -290,7 +290,7 @@ class TransportSender:
         """Cancel queued epoch work and optionally schedule an immediate close.
 
         The optional forced CLOSE uses the control path, so a full SEND outbox
-        cannot reject it. It retains global acceptance order and cannot
+        cannot reject it. It retains global admission order and cannot
         interrupt a transport method that the worker has already entered.
         """
 

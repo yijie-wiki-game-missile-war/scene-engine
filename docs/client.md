@@ -40,7 +40,7 @@ of them fails closed. Cleanup is deliberately different: `dispose` and error-pat
 Client observes it only to suppress an unhandled rejection and never waits for it before replacement, failure propagation, or
 ACK handling.
 
-`applyPacket` runs to completion. Reentry from a synchronous acceptance callback is rejected, poisons the Client and emits no ACK.
+`applyPacket` runs to completion. Reentry from a synchronous host callback is rejected, poisons the Client and emits no ACK.
 Reentry attempted by the previous session's post-swap `dispose` cleanup is also rejected, but cleanup cannot roll back or poison the
 already completed replacement.
 
@@ -118,7 +118,7 @@ Replay feeds exact recorded Engine packet bytes through the same `applyPacket` a
 Node graph or Transform cache.
 
 The Client reads a checkpoint `(n,4,4)` tensor or commit `(m,4,4)` dirty tensor into exactly one owned Float32Array and is the
-first semantic acceptance gate for Python's opaque float32 payload. It validates each active/dirty row's finite
+first semantic validation gate for Python's opaque float32 payload. It validates each active/dirty row's finite
 affine/right-handed contract, canonicalizes negative zero, and transfers the tensor to Authority without TRS decomposition.
 Packet storage is never aliased: mutating or releasing the input packet after `applyPacket` cannot alter the installed matrix
 pool. A commit transfers one pool batch; create/set-transform-batch consumes rows by ID without placing matrix bytes back in command

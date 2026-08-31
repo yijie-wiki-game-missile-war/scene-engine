@@ -103,7 +103,7 @@ instead carries only a batch-row count because its IDs and matrices already occu
 Property and event names are `u16`-length fatal UTF-8 with a semantic maximum of 192 bytes. They are non-empty Unicode scalar
 sequences and reject `__proto__`, `prototype` and `constructor`. Their forbidden-code-point table is frozen by Display @8:
 Unicode 16.0 White_Space plus `Cc`/`Cf`/`Cs`/`Co`, all Unicode noncharacters, but not `Cn`. This fixed table—not the host
-runtime's Unicode database—keeps Python 3.11–3.14 and Node 20+ acceptance identical; future assignments such as U+088F remain
+runtime's Unicode database—keeps Python 3.11–3.14 and Node 20+ name admission identical; future assignments such as U+088F remain
 valid. A dot is an ordinary name character, not a path separator. `null` is a valid set-property value and is distinct from
 unset-property.
 `maximumJsonDepth` applies to the complete authority state: an opcode 8 property value therefore has a maximum body depth of
@@ -145,7 +145,7 @@ column-major numeric values to little-endian float32 and likewise does not inspe
 immutable 16-value public representation. `matrix_bytes` returns an exact temporary 64-byte serialization; it is not the
 persistent owner and callers must not rely on object identity with constructor input.
 
-The JavaScript Client is the first semantic acceptance gate. It copies each checkpoint or dirty tensor into exactly one owned
+The JavaScript Client is the first semantic validation gate. It copies each checkpoint or dirty tensor into exactly one owned
 `Float32Array`, converts negative zero to positive zero and validates every active/dirty row for finite values, the exact affine
 row (`m[3]=m[7]=m[11]=0`, `m[15]=1`) and a strictly positive upper-left 3x3 determinant. This admits right-handed affine shear
 and rejects reflections and singular matrices before Authority mutation or ACK. Display repeats the same checks defensively,

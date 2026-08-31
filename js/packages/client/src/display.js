@@ -37,7 +37,7 @@ const PREFAB_ID = /^[a-z0-9][a-z0-9._@-]*(?:\/[a-z0-9][a-z0-9._@-]*)*$/u;
 const SHA256 = /^[0-9a-f]{64}$/u;
 const DANGEROUS_NAMES = new Set(['__proto__', 'prototype', 'constructor']);
 // Protocol-fixed Unicode 16.0 White_Space + Cc/Cf/Cs/Co ranges. Cn stays
-// allowed so Node's Unicode database version cannot change wire acceptance.
+// allowed so Node's Unicode database version cannot change wire name admission.
 const FORBIDDEN_MESSAGE_CODE_POINT_RANGES = Object.freeze([
   [0x000000, 0x000020], [0x00007f, 0x0000a0], [0x0000ad, 0x0000ad],
   [0x000600, 0x000605], [0x00061c, 0x00061c], [0x0006dd, 0x0006dd],

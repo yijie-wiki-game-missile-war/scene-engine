@@ -44,7 +44,7 @@ _FORBIDDEN_MESSAGE_NAMES = frozenset(
     {"__proto__", "prototype", "constructor"}
 )
 # Protocol-fixed Unicode 16.0 White_Space + Cc/Cf/Cs/Co ranges.  Cn is
-# deliberately allowed so name acceptance cannot change with the host runtime's
+# deliberately allowed so name admission cannot change with the host runtime's
 # Unicode database.  Tightening this table requires a Display schema bump.
 _FORBIDDEN_MESSAGE_CODE_POINT_RANGES = (
     (0x000000, 0x000020),
