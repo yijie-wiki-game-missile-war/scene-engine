@@ -342,10 +342,12 @@ replacement, not merge patch, including when it causes nested add/remove/replace
 
 `setNodeProperty` and `unsetNodeProperty` first construct a complete outer-state candidate and then reuse the exact
 `setNodeState` resolver/reconcile transaction. They address only one top-level name; dots are literal and do not form a path.
-JSON `null` remains a value, while unsetting a missing member fails closed. Names are at most 192 UTF-8 bytes, contain no Unicode
-whitespace or control/format/private/unassigned characters, and reject JavaScript prototype-pollution names. The complete
-candidate remains subject to the product Prefab resolver/state contract, so a schema may reject an otherwise syntactically
-valid field.
+JSON `null` remains a value, while unsetting a missing member fails closed. Names are at most 192 UTF-8 bytes and use the
+Display @8 fixed forbidden-code-point table documented in `wire.md`; this rejects whitespace, control/format, surrogate,
+private-use and noncharacter code points plus JavaScript prototype-pollution names, while allowing `Cn` so runtime Unicode
+versions cannot disagree. The complete candidate remains subject to the product Prefab resolver/state contract, so a schema
+may reject an otherwise syntactically valid field. A property value has one fewer JSON-depth level than complete state because
+inserting the member adds the outer state-object level; this is validated before the Authority candidate is applied.
 
 `emitNodeEvent` requires the current outer Prefab to declare `eventName`. It routes only within that Prefab definition record,
 to enabled Behaviour components whose registered Component class explicitly includes the name in static `eventNames`.

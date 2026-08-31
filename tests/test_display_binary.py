@@ -382,6 +382,13 @@ def test_binary_property_json_and_event_object_fail_closed() -> None:
             maximum_json_depth=1,
         )
 
+    depth_256 = b'{"next":' * 256 + b"0" + b"}" * 256
+    too_deep_property = _replace_single_command_json(property_encoded, depth_256)
+    with pytest.raises(WireError, match="property value JSON"):
+        decode_display_command_stream_binary(
+            too_deep_property, 20, 1, maximum_json_depth=256
+        )
+
     event = encode_display_command_stream_binary(
         single_command_stream(
             "node-emit-event", {"event_name": "ready", "payload": {}}

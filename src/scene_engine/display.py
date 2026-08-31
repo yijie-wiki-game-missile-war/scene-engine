@@ -10,7 +10,6 @@ from __future__ import annotations
 import math
 import re
 import struct
-import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -18,7 +17,7 @@ from typing import Any
 
 import numpy as np
 
-from .errors import ConfigurationError
+from .errors import ConfigurationError, JsonTreeError
 from .json_tree import validate_json_value
 
 
@@ -43,6 +42,39 @@ _IDENTITY_MATRIX4_F32.flags.writeable = False
 _EMPTY_EVENT_PAYLOAD: Mapping[str, Any] = MappingProxyType({})
 _FORBIDDEN_MESSAGE_NAMES = frozenset(
     {"__proto__", "prototype", "constructor"}
+)
+# Protocol-fixed Unicode 16.0 White_Space + Cc/Cf/Cs/Co ranges.  Cn is
+# deliberately allowed so name acceptance cannot change with the host runtime's
+# Unicode database.  Tightening this table requires a Display schema bump.
+_FORBIDDEN_MESSAGE_CODE_POINT_RANGES = (
+    (0x000000, 0x000020),
+    (0x00007F, 0x0000A0),
+    (0x0000AD, 0x0000AD),
+    (0x000600, 0x000605),
+    (0x00061C, 0x00061C),
+    (0x0006DD, 0x0006DD),
+    (0x00070F, 0x00070F),
+    (0x000890, 0x000891),
+    (0x0008E2, 0x0008E2),
+    (0x001680, 0x001680),
+    (0x00180E, 0x00180E),
+    (0x002000, 0x00200F),
+    (0x002028, 0x00202F),
+    (0x00205F, 0x002064),
+    (0x002066, 0x00206F),
+    (0x003000, 0x003000),
+    (0x00D800, 0x00F8FF),
+    (0x00FEFF, 0x00FEFF),
+    (0x00FFF9, 0x00FFFB),
+    (0x0110BD, 0x0110BD),
+    (0x0110CD, 0x0110CD),
+    (0x013430, 0x01343F),
+    (0x01BCA0, 0x01BCA3),
+    (0x01D173, 0x01D17A),
+    (0x0E0001, 0x0E0001),
+    (0x0E0020, 0x0E007F),
+    (0x0F0000, 0x0FFFFD),
+    (0x100000, 0x10FFFD),
 )
 _COMMAND_KINDS = frozenset(
     {
@@ -797,7 +829,7 @@ class DisplayMatrixPool:
             elif command.kind == "node-set-property":
                 maximum_json_depth = max(
                     maximum_json_depth,
-                    _maximum_json_depth(command.fields["value"]),
+                    _maximum_json_depth(command.fields["value"]) + 1,
                 )
             elif command.kind == "node-emit-event":
                 maximum_json_depth = max(
@@ -1450,7 +1482,9 @@ def _normalize_command_fields(
             raise ConfigurationError("node-set-property fields are invalid")
         return {
             "property_name": _property_name(fields["property_name"]),
-            "value": _plain_json_value(fields["value"]),
+            # The value becomes one member below the complete authority-state
+            # root, so it owns one fewer level than a standalone JSON body.
+            "value": _plain_json_value(fields["value"], maximum_depth=255),
         }
     if kind == "node-unset-property":
         if actual != {"property_name"}:
@@ -1731,9 +1765,10 @@ def _plain_state(
     return normalized
 
 
-def _plain_json_value(value: Any) -> Any:
+def _plain_json_value(value: Any, *, maximum_depth: int = 256) -> Any:
     owned = _thaw(value)
-    validate_json_value(owned)
+    validate_json_value(owned, maximum_depth=maximum_depth)
+    _validate_json_unicode_scalars(owned)
     return _freeze(owned)
 
 
@@ -1750,15 +1785,38 @@ def _message_name(value: Any, field: str, maximum_bytes: int) -> str:
         )
     if value in _FORBIDDEN_MESSAGE_NAMES:
         raise ConfigurationError(f"{field} is forbidden")
-    if any(
-        character.isspace()
-        or unicodedata.category(character).startswith("C")
-        for character in value
-    ):
+    if any(_forbidden_message_code_point(ord(character)) for character in value):
         raise ConfigurationError(
-            f"{field} must not contain whitespace or Unicode category C characters"
+            f"{field} contains a protocol-forbidden Unicode code point"
         )
     return value
+
+
+def _forbidden_message_code_point(code_point: int) -> bool:
+    if 0xFDD0 <= code_point <= 0xFDEF or code_point & 0xFFFF in (0xFFFE, 0xFFFF):
+        return True
+    return any(
+        start <= code_point <= end
+        for start, end in _FORBIDDEN_MESSAGE_CODE_POINT_RANGES
+    )
+
+
+def _validate_json_unicode_scalars(value: Any) -> None:
+    if isinstance(value, str):
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise JsonTreeError(
+                "JSON strings and object keys must contain Unicode scalar values"
+            ) from exc
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            _validate_json_unicode_scalars(key)
+            _validate_json_unicode_scalars(item)
+    elif isinstance(value, list):
+        for item in value:
+            _validate_json_unicode_scalars(item)
 
 
 def _property_name(value: Any) -> str:
@@ -1935,7 +1993,7 @@ def _command_json_depth(command: DisplayCommand) -> int:
     if command.kind in {"node-create", "node-set-state", "node-replace-prefab"}:
         return _maximum_json_depth(command.fields["state"])
     if command.kind == "node-set-property":
-        return _maximum_json_depth(command.fields["value"])
+        return _maximum_json_depth(command.fields["value"]) + 1
     if command.kind == "node-emit-event":
         return _maximum_json_depth(command.fields["payload"])
     return 0

@@ -173,6 +173,8 @@ test('Prefab event allowlist rejects duplicates, unsafe names, whitespace, contr
     ['has space'],
     ['line\nfeed'],
     ['zero\u200bwidth'],
+    ['noncharacter\ufdd0'],
+    ['plane-noncharacter\u{1ffff}'],
     ['__proto__'],
     ['prototype'],
     ['constructor'],
@@ -190,10 +192,12 @@ test('Prefab event allowlist rejects duplicates, unsafe names, whitespace, contr
     schema: PREFAB_DEFINITION_SCHEMA,
     id: 'events/maximum',
     gameplayType: 'events.maximum',
-    events: ['x'.repeat(192), '爆炸'],
+    events: ['x'.repeat(192), '爆炸', 'unassigned\u0378', 'unicode-version-boundary\u088f'],
     root,
   });
-  assert.deepEqual(maximum.events, ['x'.repeat(192), '爆炸']);
+  assert.deepEqual(maximum.events, [
+    'unassigned\u0378', 'unicode-version-boundary\u088f', 'x'.repeat(192), '爆炸',
+  ]);
   assert.equal(Object.isFrozen(maximum.events), true);
 });
 

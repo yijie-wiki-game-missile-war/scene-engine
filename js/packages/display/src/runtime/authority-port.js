@@ -3,6 +3,7 @@ import { BehaviourComponent } from '../component/behaviour-component.js';
 import { dispatchComponentEvent } from '../component/component.js';
 import {
   cloneAndFreeze,
+  cloneAndFreezeJson,
   exactKeys,
   plainRecord,
   protocolName,
@@ -176,15 +177,17 @@ export class AuthorityPort {
     const record = exactKeys(command, ['nodeId', 'propertyName', 'value'], [],
       'display-authority-command-invalid');
     const propertyName = protocolName(record.propertyName, 'display-property-name-invalid');
+    const value = cloneAndFreezeJson(record.value, 'display-property-value-invalid', 255);
     const { authority } = this._requireAuthority(record.nodeId);
     const candidate = { ...authority.state };
     Object.defineProperty(candidate, propertyName, {
       configurable: true,
       enumerable: true,
-      value: record.value,
+      value,
       writable: true,
     });
-    return this._setNodeState(record.nodeId, candidate);
+    return this._setNodeState(record.nodeId,
+      cloneAndFreezeJson(candidate, 'display-authority-state-invalid'));
   }
 
   unsetNodeProperty(command) {
@@ -198,7 +201,8 @@ export class AuthorityPort {
     }
     const candidate = { ...authority.state };
     delete candidate[propertyName];
-    return this._setNodeState(record.nodeId, candidate);
+    return this._setNodeState(record.nodeId,
+      cloneAndFreezeJson(candidate, 'display-authority-state-invalid'));
   }
 
   emitNodeEvent(command) {
@@ -207,7 +211,7 @@ export class AuthorityPort {
       'nodeId', 'eventName', 'payload', 'commandSeq', 'sourceTick',
     ], [], 'display-authority-command-invalid');
     const eventName = protocolName(record.eventName, 'display-event-name-invalid');
-    const payload = cloneAndFreeze(
+    const payload = cloneAndFreezeJson(
       plainRecord(record.payload, 'display-event-payload-invalid'),
       'display-event-payload-invalid',
     );

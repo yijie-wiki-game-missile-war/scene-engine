@@ -35,8 +35,21 @@ const KIND_BY_OPCODE = Object.freeze(Object.fromEntries(
 const SCENE_NAME = /^[a-z0-9][a-z0-9._-]*$/u;
 const PREFAB_ID = /^[a-z0-9][a-z0-9._@-]*(?:\/[a-z0-9][a-z0-9._@-]*)*$/u;
 const SHA256 = /^[0-9a-f]{64}$/u;
-const INVALID_MESSAGE_NAME_CHARACTER = /[\p{White_Space}\p{C}]/u;
 const DANGEROUS_NAMES = new Set(['__proto__', 'prototype', 'constructor']);
+// Protocol-fixed Unicode 16.0 White_Space + Cc/Cf/Cs/Co ranges. Cn stays
+// allowed so Node's Unicode database version cannot change wire acceptance.
+const FORBIDDEN_MESSAGE_CODE_POINT_RANGES = Object.freeze([
+  [0x000000, 0x000020], [0x00007f, 0x0000a0], [0x0000ad, 0x0000ad],
+  [0x000600, 0x000605], [0x00061c, 0x00061c], [0x0006dd, 0x0006dd],
+  [0x00070f, 0x00070f], [0x000890, 0x000891], [0x0008e2, 0x0008e2],
+  [0x001680, 0x001680], [0x00180e, 0x00180e], [0x002000, 0x00200f],
+  [0x002028, 0x00202f], [0x00205f, 0x002064], [0x002066, 0x00206f],
+  [0x003000, 0x003000], [0x00d800, 0x00f8ff], [0x00feff, 0x00feff],
+  [0x00fff9, 0x00fffb], [0x0110bd, 0x0110bd], [0x0110cd, 0x0110cd],
+  [0x013430, 0x01343f], [0x01bca0, 0x01bca3], [0x01d173, 0x01d17a],
+  [0x0e0001, 0x0e0001], [0x0e0020, 0x0e007f], [0x0f0000, 0x0ffffd],
+  [0x100000, 0x10fffd],
+]);
 const ENCODER = new TextEncoder();
 const DECODER = new TextDecoder('utf-8', { fatal: true });
 const OWNED_MATRIX_TENSORS = new WeakSet();
@@ -251,7 +264,11 @@ export function encodeDisplayCheckpoint(value) {
   return writer.finish();
 }
 
-export function encodeDisplayCommandStream(value, { sourceTick: expectedSourceTick } = {}) {
+export function encodeDisplayCommandStream(value, {
+  sourceTick: expectedSourceTick,
+  maximumJsonDepth = 256,
+} = {}) {
+  jsonDepth(maximumJsonDepth);
   record(value, 'display-command-stream-invalid');
   exact(value, new Set([
     'schema', 'base_command_seq', 'last_command_seq', 'matrix_pool_size',
@@ -282,6 +299,7 @@ export function encodeDisplayCommandStream(value, { sourceTick: expectedSourceTi
     base + index + 1,
     sourceTick,
     matrixPoolSize,
+    maximumJsonDepth,
   ));
   const dirtyNodeIds = normalizeDirtyNodeIds(value.dirty_node_ids, matrixPoolSize);
   const dirtyMatrices = normalizeMatrixTensor(
@@ -396,7 +414,7 @@ function readCommand(
           'display-property-name-invalid',
         ),
         value: reader.jsonValue(
-          maximumJsonDepth,
+          maximumJsonDepth - 1,
           'display-property-value-length-invalid',
           'display-property-value-truncated',
           'display-property-value-invalid',
@@ -499,7 +517,13 @@ function normalizeBaselineNode(value, matrixPoolSize) {
   });
 }
 
-function normalizeCommand(value, expectedSequence, sourceTick, matrixPoolSize) {
+function normalizeCommand(
+  value,
+  expectedSequence,
+  sourceTick,
+  matrixPoolSize,
+  maximumJsonDepth,
+) {
   record(value, 'display-command-invalid');
   const fields = COMMAND_FIELDS[value.kind];
   if (!fields) fail('display-command-kind-invalid');
@@ -539,7 +563,7 @@ function normalizeCommand(value, expectedSequence, sourceTick, matrixPoolSize) {
         prefabId: prefabId(value.prefab_id),
         transformMode: transformMode(value.transform_mode),
         visible: boolean(value.visible, 'display-node-visible-invalid'),
-        state: normalizeState(value.state),
+        state: normalizeState(value.state, maximumJsonDepth),
       });
     }
     case 'node-set-parent': {
@@ -560,12 +584,16 @@ function normalizeCommand(value, expectedSequence, sourceTick, matrixPoolSize) {
         visible: boolean(value.visible, 'display-node-visible-invalid'),
       });
     case 'node-set-state':
-      return Object.freeze({ ...nodeCommon, state: normalizeState(value.state) });
+      return Object.freeze({
+        ...nodeCommon, state: normalizeState(value.state, maximumJsonDepth),
+      });
     case 'node-set-property':
       return Object.freeze({
         ...nodeCommon,
         propertyName: messageName(value.property_name, 'display-property-name-invalid'),
-        value: normalizeJsonValue(value.value, 'display-property-value-invalid'),
+        value: normalizeJsonValue(
+          value.value, 'display-property-value-invalid', maximumJsonDepth - 1,
+        ),
       });
     case 'node-unset-property':
       return Object.freeze({
@@ -576,13 +604,15 @@ function normalizeCommand(value, expectedSequence, sourceTick, matrixPoolSize) {
       return Object.freeze({
         ...nodeCommon,
         eventName: messageName(value.event_name, 'display-event-name-invalid'),
-        payload: normalizeJsonRecord(value.payload, 'display-event-payload-invalid'),
+        payload: normalizeJsonRecord(
+          value.payload, 'display-event-payload-invalid', maximumJsonDepth,
+        ),
       });
     case 'node-replace-prefab':
       return Object.freeze({
         ...nodeCommon,
         prefabId: prefabId(value.prefab_id),
-        state: normalizeState(value.state),
+        state: normalizeState(value.state, maximumJsonDepth),
       });
     case 'node-remove':
       return Object.freeze(nodeCommon);
@@ -686,8 +716,8 @@ function normalizeTransformNodeIds(value, matrixPoolSize) {
   return value;
 }
 
-function normalizeState(value) {
-  return normalizeJsonRecord(value, 'display-node-state-invalid');
+function normalizeState(value, maximumDepth = 256) {
+  return normalizeJsonRecord(value, 'display-node-state-invalid', maximumDepth);
 }
 
 function normalizeJsonRecord(value, code, maximumDepth = 256) {
@@ -787,8 +817,20 @@ function logicalName(value, code) {
 function messageName(value, code) {
   if (typeof value !== 'string' || value.length === 0
       || ENCODER.encode(value).byteLength > MAXIMUM_MESSAGE_NAME_BYTES
-      || INVALID_MESSAGE_NAME_CHARACTER.test(value) || DANGEROUS_NAMES.has(value)) fail(code);
+      || containsForbiddenMessageCodePoint(value) || DANGEROUS_NAMES.has(value)) fail(code);
   return value;
+}
+
+function containsForbiddenMessageCodePoint(value) {
+  for (const character of value) {
+    const codePoint = character.codePointAt(0);
+    if ((codePoint >= 0xfdd0 && codePoint <= 0xfdef)
+        || (codePoint & 0xffff) === 0xfffe || (codePoint & 0xffff) === 0xffff
+        || FORBIDDEN_MESSAGE_CODE_POINT_RANGES.some(
+          ([start, end]) => codePoint >= start && codePoint <= end,
+        )) return true;
+  }
+  return false;
 }
 
 function containsLoneSurrogate(value) {
@@ -796,7 +838,7 @@ function containsLoneSurrogate(value) {
     const code = value.charCodeAt(index);
     if (code >= 0xd800 && code <= 0xdbff) {
       const next = value.charCodeAt(index + 1);
-      if (next < 0xdc00 || next > 0xdfff) return true;
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return true;
       index += 1;
     } else if (code >= 0xdc00 && code <= 0xdfff) {
       return true;

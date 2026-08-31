@@ -399,7 +399,7 @@ def encode_display_command_stream_binary(
                 _encode_json_value(
                     fields["value"],
                     field="property value",
-                    maximum_json_depth=maximum_json_depth,
+                    maximum_json_depth=maximum_json_depth - 1,
                 )
             )
         elif kind == "node-unset-property":
@@ -581,7 +581,7 @@ def decode_display_command_stream_binary(
                 "property_name", maximum_bytes=MAXIMUM_PROPERTY_NAME_BYTES
             )
             property_value = reader.json_value(
-                "property value", maximum_json_depth=maximum_json_depth
+                "property value", maximum_json_depth=maximum_json_depth - 1
             )
             command = _validated_command_call(
                 DisplayCommand.set_property,

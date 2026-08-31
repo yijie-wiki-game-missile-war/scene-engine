@@ -21,6 +21,12 @@ function createCommand(nodeId, prefabId = 'target.test.item', parentNodeId = nul
   };
 }
 
+function nestedJsonValue(depth) {
+  let value = 0;
+  for (let index = 0; index < depth; index += 1) value = { next: value };
+  return value;
+}
+
 function nextCursor(runtime, { sourceTickDelta = 1, commandCount = 1 } = {}) {
   const previous = runtime.summary().cursor;
   return Object.freeze({
@@ -304,6 +310,56 @@ test('Authority property names share the closed wire-level validator', async (t)
   assert.deepEqual(runtime._nodeIndex.require('py/0').requireComponent('authority').state, {});
 });
 
+test('direct Authority property values reject non-canonical JSON before state mutation', async (t) => {
+  const cases = [
+    ['bigint', () => 1n],
+    ['sparse array', () => { const value = []; value.length = 1; return value; }],
+    ['dangerous key', () => JSON.parse('{"__proto__":1}')],
+    ['nonfinite number', () => Number.POSITIVE_INFINITY],
+    ['non-plain object', () => new Date(0)],
+    ['cycle', () => { const value = {}; value.self = value; return value; }],
+    ['lone surrogate', () => '\ud800'],
+    ['depth 256', () => nestedJsonValue(256)],
+  ];
+  for (const [name, createValue] of cases) {
+    await t.test(name, async (subtest) => {
+      const { runtime } = await createHarness();
+      subtest.after(() => runtime.dispose());
+      commitAuthority(runtime, () => runtime.authority.createNode(createCommand(0)));
+      expectAuthorityFailure(runtime, () => runtime.authority.setNodeProperty({
+        nodeId: 0, propertyName: 'invalid', value: createValue(),
+      }), 'display-property-value-invalid');
+      assert.deepEqual(runtime._nodeIndex.require('py/0').requireComponent('authority').state, {});
+    });
+  }
+});
+
+test('direct Authority property depth 255 fits the complete state depth limit', async (t) => {
+  const { runtime } = await createHarness();
+  t.after(() => runtime.dispose());
+  commitAuthority(runtime, () => runtime.authority.createNode(createCommand(0)));
+  commitAuthority(runtime, () => runtime.authority.setNodeProperty({
+    nodeId: 0, propertyName: 'deep', value: nestedJsonValue(255),
+  }));
+  assert.equal(Object.hasOwn(
+    runtime._nodeIndex.require('py/0').requireComponent('authority').state,
+    'deep',
+  ), true);
+});
+
+test('direct Authority unset validates the complete remaining state', async (t) => {
+  const { runtime } = await createHarness();
+  t.after(() => runtime.dispose());
+  const command = createCommand(0);
+  command.state = { legacyBigint: 1n, removable: true };
+  commitAuthority(runtime, () => runtime.authority.createNode(command));
+  expectAuthorityFailure(runtime, () => runtime.authority.unsetNodeProperty({
+    nodeId: 0, propertyName: 'removable',
+  }), 'display-authority-state-invalid');
+  assert.deepEqual(runtime._nodeIndex.require('py/0').requireComponent('authority').state,
+    { legacyBigint: 1n, removable: true });
+});
+
 test('Authority events use explicit Prefab and Behaviour allowlists, deterministic root-record routing',
   async (t) => {
     const received = [];
@@ -430,6 +486,49 @@ test('Promise-returning Authority event handlers fail the synchronous commit bar
   expectAuthorityFailure(runtime, () => runtime.authority.emitNodeEvent({
     nodeId: 0, eventName: 'event', payload: {}, commandSeq: 2, sourceTick: 1,
   }), 'display-component-async-handler');
+});
+
+test('direct Authority event payloads reject non-canonical JSON before dispatch', async (t) => {
+  const cases = [
+    ['bigint', () => ({ value: 1n })],
+    ['sparse array', () => {
+      const value = [];
+      value.length = 1;
+      return { value };
+    }],
+    ['dangerous key', () => JSON.parse('{"__proto__":1}')],
+  ];
+  for (const [name, createPayload] of cases) {
+    await t.test(name, async (subtest) => {
+      let deliveries = 0;
+      class EventProbe extends BehaviourComponent {
+        static typeId = 'test.invalid-json-event-probe@1';
+        static eventNames = ['event'];
+        onEvent() { deliveries += 1; }
+      }
+      const prefab = definePrefab({
+        schema: PREFAB_DEFINITION_SCHEMA,
+        id: 'target/invalid-json-event',
+        gameplayType: 'test.invalid-json-event',
+        events: ['event'],
+        root: { components: [{ key: 'probe', type: EventProbe.typeId }], children: [] },
+      });
+      const { runtime } = await createHarness({
+        prefabEntries: [prefab],
+        configureComponents(registry) { registry.register({ ComponentClass: EventProbe }); },
+      });
+      subtest.after(() => runtime.dispose());
+      commitAuthority(runtime, () => runtime.authority.createNode(createCommand(0, prefab.id)));
+      expectAuthorityFailure(runtime, () => runtime.authority.emitNodeEvent({
+        nodeId: 0,
+        eventName: 'event',
+        payload: createPayload(),
+        commandSeq: 2,
+        sourceTick: 1,
+      }), 'display-event-payload-invalid');
+      assert.equal(deliveries, 0);
+    });
+  }
 });
 
 test('nested renderer state fails before cursor seal or backend update', async (t) => {

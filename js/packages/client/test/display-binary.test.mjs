@@ -23,6 +23,12 @@ const PYTHON_FIXTURES = fileURLToPath(new URL('../../../../fixtures/wire-v3/', i
 const MATRIX_LENGTH = 16;
 const MATRIX_BYTES = MATRIX_LENGTH * 4;
 
+function nestedJsonValue(depth) {
+  let value = 0;
+  for (let index = 0; index < depth; index += 1) value = { next: value };
+  return value;
+}
+
 function matrix(x = 0) {
   return new Float32Array([
     1, 0, 0, 0,
@@ -308,6 +314,18 @@ test('property values cover JSONValue and message names use the shared Unicode d
     }
   }
 
+  for (const versionBoundaryName of ['unassigned\u0378', 'unicode-version-boundary\u088f']) {
+    const boundaryBytes = encodeDisplayCommandStream(stream([
+      command('node-set-property', 8, {
+        property_name: versionBoundaryName, value: true,
+      }),
+    ]), { sourceTick: 12 });
+    const boundaryParsed = parseDisplayCommandStream(boundaryBytes, {
+      header: { source_tick: 12, last_command_seq: 8 }, baseCommandSeq: 7,
+    });
+    assert.equal(boundaryParsed.commands[0].propertyName, versionBoundaryName);
+  }
+
   const maximumName = '🔥'.repeat(48);
   const bytes = encodeDisplayCommandStream(stream([
     command('node-set-property', 8, { property_name: maximumName, value: 1 }),
@@ -322,6 +340,20 @@ test('property values cover JSONValue and message names use the shared Unicode d
   assert.equal(parsed.commands[0].propertyName, maximumName);
   assert.equal(parsed.commands[1].propertyName, 'safe.__proto__');
   assert.equal(parsed.commands[2].eventName, 'visual.爆炸');
+
+  const deepestPropertyBytes = encodeDisplayCommandStream(stream([
+    command('node-set-property', 8, {
+      property_name: 'deep', value: nestedJsonValue(255),
+    }),
+  ]), { sourceTick: 12 });
+  parseDisplayCommandStream(deepestPropertyBytes, {
+    header: { source_tick: 12, last_command_seq: 8 }, baseCommandSeq: 7,
+  });
+  assert.throws(() => encodeDisplayCommandStream(stream([
+    command('node-set-property', 8, {
+      property_name: 'tooDeep', value: nestedJsonValue(256),
+    }),
+  ]), { sourceTick: 12 }), (error) => error.code === 'display-property-value-invalid');
 });
 
 test('property and event records reject invalid names and non-record event payloads', () => {
@@ -332,6 +364,8 @@ test('property and event records reject invalid names and non-record event paylo
     'format\u200dmark',
     'private\ue000use',
     'lone\ud800surrogate',
+    'noncharacter\ufdd0',
+    'plane-noncharacter\u{1ffff}',
     '__proto__',
     'prototype',
     'constructor',
@@ -355,6 +389,16 @@ test('property and event records reject invalid names and non-record event paylo
   assert.throws(() => encodeDisplayCommandStream(stream([
     command('node-set-property', 8, { property_name: 'valid', value: dangerousValue }),
   ]), { sourceTick: 12 }), (error) => error.code === 'display-property-value-invalid');
+  for (const value of ['lone\ud800', { nested: 'lone\ud800' }, { 'lone\ud800': true }]) {
+    assert.throws(() => encodeDisplayCommandStream(stream([
+      command('node-set-property', 8, { property_name: 'valid', value }),
+    ]), { sourceTick: 12 }), (error) => error.code === 'display-property-value-invalid');
+  }
+  assert.throws(() => encodeDisplayCommandStream(stream([
+    command('node-emit-event', 8, {
+      event_name: 'valid', payload: { nested: 'lone\ud800' },
+    }),
+  ]), { sourceTick: 12 }), (error) => error.code === 'display-event-payload-invalid');
 });
 
 test('binary decoder rejects invalid message names and a non-record event payload', () => {
@@ -378,8 +422,18 @@ test('binary decoder rejects invalid message names and a non-record event payloa
   assert.throws(() => parseDisplayCommandStream(nestedProperty, {
     header: { source_tick: 12, last_command_seq: 8 },
     baseCommandSeq: 7,
-    maximumJsonDepth: 1,
+    maximumJsonDepth: 2,
   }), (error) => error.code === 'json-depth-limit');
+  const oneLevelProperty = encodeDisplayCommandStream(stream([
+    command('node-set-property', 8, {
+      property_name: 'nested', value: { inner: 1 },
+    }),
+  ]), { sourceTick: 12 });
+  parseDisplayCommandStream(oneLevelProperty, {
+    header: { source_tick: 12, last_command_seq: 8 },
+    baseCommandSeq: 7,
+    maximumJsonDepth: 2,
+  });
 
   const eventBytes = encodeDisplayCommandStream(stream([
     command('node-emit-event', 8, { event_name: 'x', payload: {} }),

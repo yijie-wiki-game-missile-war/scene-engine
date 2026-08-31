@@ -64,6 +64,13 @@ def node(node_id: int, *, parent_node_id: int | None = None) -> DisplayNode:
     )
 
 
+def nested_json_value(depth: int) -> object:
+    value: object = 0
+    for _ in range(depth):
+        value = {"next": value}
+    return value
+
+
 def test_checkpoint_is_a_typed_parent_first_full_pool_snapshot() -> None:
     pool = DisplayMatrixPool()
     parent_id = pool.append(transform())
@@ -586,7 +593,7 @@ def test_property_and_event_commands_are_owned_closed_and_ordered() -> None:
         "damage": {"amount": 12},
         "critical": True,
     }
-    assert stream.maximum_json_depth == 3
+    assert stream.maximum_json_depth == 4
     assert validate_display_command_stream(
         stream.to_record(),
         expected_source_tick=60,
@@ -631,7 +638,16 @@ def test_set_property_null_is_distinct_from_unset_and_event_payload_is_object() 
 
 @pytest.mark.parametrize(
     "name",
-    ["status.health", "Health", "生命值", "combat/impact", "🔥", "界" * 64],
+    [
+        "status.health",
+        "Health",
+        "生命值",
+        "combat/impact",
+        "🔥",
+        "界" * 64,
+        "unassigned\u0378",
+        "unicode-version-boundary\u088f",
+    ],
 )
 def test_property_and_event_names_accept_unicode_without_path_semantics(
     name: str,
@@ -652,8 +668,9 @@ def test_property_and_event_names_accept_unicode_without_path_semantics(
         "zero\x00byte",
         "format\u200bmark",
         "private\ue000use",
-        "unassigned\u0378",
         "lone\ud800surrogate",
+        "noncharacter\ufdd0",
+        "plane-noncharacter\U0001ffff",
         "__proto__",
         "prototype",
         "constructor",
@@ -678,6 +695,47 @@ def test_property_and_event_names_reject_ambiguous_or_unsafe_unicode(
 def test_set_property_rejects_values_outside_json(value: object) -> None:
     with pytest.raises(JsonTreeError):
         DisplayCommand.set_property(0, "value", value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["lone\ud800", {"value": "lone\ud800"}, {"lone\ud800": "key"}],
+)
+def test_property_and_event_payloads_require_unicode_scalar_strings(
+    value: object,
+) -> None:
+    with pytest.raises(JsonTreeError, match="Unicode scalar"):
+        DisplayCommand.set_property(0, "value", value)
+    with pytest.raises(JsonTreeError, match="Unicode scalar"):
+        DisplayCommand.emit_event(0, "event", {"value": value})
+
+
+def test_property_value_depth_reserves_one_level_for_complete_state() -> None:
+    pool = DisplayMatrixPool()
+    node_id = pool.append(transform())
+    checkpoint = encode_display_checkpoint(
+        scene_name="main",
+        catalog=DisplayCatalogIdentity(HASH_A, HASH_B, HASH_C),
+        last_command_seq=0,
+        matrix_pool=pool,
+        nodes=(node(node_id),),
+    )
+    checkpoint.confirm_published()
+
+    command = DisplayCommand.set_property(
+        node_id, "deep", nested_json_value(255)
+    )
+    stream, cursor = encode_display_command_stream(
+        base_command_seq=0,
+        source_tick=1,
+        matrix_pool=pool,
+        commands=(command,),
+    )
+    assert stream.maximum_json_depth == 256
+    encode_display_command_stream_binary(stream, 1, cursor)
+
+    with pytest.raises(JsonTreeError, match="maximum_depth"):
+        DisplayCommand.set_property(node_id, "tooDeep", nested_json_value(256))
 
 
 def test_property_and_event_commands_require_an_active_node() -> None:
