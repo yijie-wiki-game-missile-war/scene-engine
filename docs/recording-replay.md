@@ -29,8 +29,13 @@ The JavaScript reader validates fields, hashes, byte counts, packet framing, ful
 and manifest cursors using the same decoder as live.
 
 Packet-log schema is `@3`: it records opaque Wire v3 bytes and does not interpret Transform layout. Current logs carry
-`display_codec=scene-engine-display-node@7` and SDCP/SDCS payload v4 in those exact packets; an old Display codec fails at
+`display_codec=scene-engine-display-node@8` and SDCP/SDCS payload v5 in those exact packets; an old Display codec fails at
 the normal Wire/Client boundary rather than being migrated during Replay.
+
+Node properties are durable authority state and must be present in a later checkpoint's complete state. Node events are
+transient SDCS commands: linear Replay dispatches each recorded event at its original command position, while a seek beginning
+from a later checkpoint does not invent events that occurred before that anchor. A lasting death/explosion phase therefore
+needs a property (optionally with its logical start tick); an event alone represents only the one-time notification.
 
 Linear Replay creates one `SceneEngineClient`, applies the initial checkpoint, and applies subsequent commits in order while
 skipping same-cursor seek anchors. Seek chooses the nearest earlier checkpoint, creates a fresh client and Display session,

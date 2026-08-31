@@ -4,6 +4,7 @@ import {
   nonemptyString,
   objectHasOwnMethod,
   plainRecord,
+  protocolNameSet,
 } from '../internal.js';
 import { fail } from '../runtime/health.js';
 import { BillboardComponent, BILLBOARD_COMPONENT_DESCRIPTOR } from '../behaviours/billboard.js';
@@ -96,22 +97,42 @@ export class ComponentRegistry {
     }
     const typeId = nonemptyString(ComponentClass.typeId, 'display-component-type-invalid');
     if (this._types.has(typeId)) fail('display-component-type-duplicate');
+    const eventNames = protocolNameSet(
+      ComponentClass.eventNames === undefined ? [] : ComponentClass.eventNames,
+      'display-component-event-names-invalid',
+    );
     for (let prototype = ComponentClass.prototype; prototype && prototype !== Component.prototype;
       prototype = Object.getPrototypeOf(prototype)) {
       const override = objectHasOwnMethod(prototype, FINAL_METHODS);
       if (override) fail('display-component-final-method-override');
     }
     if (ComponentClass.prototype instanceof RenderComponent) {
+      if (eventNames.length !== 0) fail('display-render-component-handler-forbidden');
       for (let prototype = ComponentClass.prototype; prototype && prototype !== RenderComponent.prototype;
         prototype = Object.getPrototypeOf(prototype)) {
-        if (objectHasOwnMethod(prototype, ['onAttach', 'tick', 'onDispose'])) {
+        if (objectHasOwnMethod(prototype, ['onAttach', 'tick', 'onDispose', 'onEvent'])) {
           fail('display-render-component-handler-forbidden');
+        }
+      }
+    }
+    if (!(ComponentClass.prototype instanceof BehaviourComponent)) {
+      if (eventNames.length !== 0) fail('display-component-event-handler-forbidden');
+      for (let prototype = ComponentClass.prototype;
+        prototype && prototype !== Component.prototype;
+        prototype = Object.getPrototypeOf(prototype)) {
+        if (objectHasOwnMethod(prototype, ['onEvent'])) {
+          fail('display-component-event-handler-forbidden');
         }
       }
     }
     const phase = ComponentClass.tickPhase;
     if (![null, 'update', 'before-render'].includes(phase)) fail('display-component-tick-phase-invalid');
-    this._types.set(typeId, Object.freeze({ ComponentClass, normalizeProperties, resourceReferences }));
+    this._types.set(typeId, Object.freeze({
+      ComponentClass,
+      eventNames,
+      normalizeProperties,
+      resourceReferences,
+    }));
     return this;
   }
 
@@ -124,6 +145,7 @@ export class ComponentRegistry {
       allowMultiple: descriptor.ComponentClass.allowMultiple === true,
       tickPhase: descriptor.ComponentClass.tickPhase ?? null,
       drivesTransform: descriptor.ComponentClass.drivesTransform === true,
+      eventNames: descriptor.eventNames,
     })).sort((left, right) => left.typeId < right.typeId ? -1 : left.typeId > right.typeId ? 1 : 0));
   }
   require(typeId) {

@@ -142,6 +142,19 @@ export interface DisplayAuthorityPort {
   setNodeParent(command: { readonly nodeId: number; readonly parentNodeId: number | null }): undefined;
   setNodeVisible(command: { readonly nodeId: number; readonly visible: boolean }): undefined;
   setNodeState(command: { readonly nodeId: number; readonly state: JSONRecord }): undefined;
+  setNodeProperty(command: {
+    readonly nodeId: number;
+    readonly propertyName: string;
+    readonly value: JSONValue;
+  }): undefined;
+  unsetNodeProperty(command: { readonly nodeId: number; readonly propertyName: string }): undefined;
+  emitNodeEvent(command: {
+    readonly nodeId: number;
+    readonly eventName: string;
+    readonly payload: JSONRecord;
+    readonly commandSeq: number;
+    readonly sourceTick: number;
+  }): undefined;
   replaceNodePrefab(command: { readonly nodeId: number; readonly prefabId: string; readonly state: JSONRecord }): undefined;
   removeNode(command: { readonly nodeId: number }): undefined;
 }

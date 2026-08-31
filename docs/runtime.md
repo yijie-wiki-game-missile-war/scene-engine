@@ -94,12 +94,27 @@ DisplayCommand.set_transform_batch(node_ids)
 DisplayCommand.set_parent(node_id, parent_id)
 DisplayCommand.set_visible(node_id, visible)
 DisplayCommand.set_state(node_id, complete_state)
+DisplayCommand.set_property(node_id, property_name, value)
+DisplayCommand.unset_property(node_id, property_name)
+DisplayCommand.emit_event(node_id, event_name, payload={})
 DisplayCommand.replace_prefab(node_id, prefab_id, complete_state)
 DisplayCommand.remove(node_id)
 ```
 
 Generic `DisplayCommand(kind=..., **fields)` construction is intentionally unavailable. Engine owns `command_seq`,
 `source_tick`, stream/commit/revision and encoded bytes.
+
+`set_property` and `unset_property` address one top-level member of the complete authority state. They are ordered delta
+publication conveniences, not a second state owner: product code must mutate its canonical World/state model so any later
+checkpoint contains the same complete result. `set_property(..., None)` writes JSON `null`; only `unset_property` removes the
+member. A dot in `property_name` is a literal character and never means a nested path. Use `set_state` for an atomic candidate
+that changes several mutually dependent fields. Product-wide projected data such as coins or score can use a dedicated
+authority Node/Prefab; it follows the same property and checkpoint rules and does not require a second global-data channel.
+
+`emit_event` publishes one transient JSON-object payload. It occupies one command sequence and shares exact FIFO order with
+Transform, reparent and properties, but it never enters a checkpoint. A linear Replay therefore dispatches it again from the
+recorded commit; seeking to a later checkpoint does not synthesize it. Facts that must survive reconnect/seek belong in state,
+optionally with a logical start tick, rather than only in an event.
 
 Every scalar command target and every Transform-batch ID is a checked `uint32` pool row. A commit has at most one non-empty
 Transform batch; it occupies one `command_seq` regardless of row count. Its sorted existing-row IDs plus create targets must
@@ -110,9 +125,9 @@ clears only the rows captured by that packet; an encoding failure does not silen
 
 ## Nested Prefab projection
 
-Nested Prefabs are entirely inside `@scene-engine/display@0.13.0` and Prefab definition schema
-`scene-engine-prefab-definition@4`. They do not change `scene-engine-wire@3`, `scene-engine-display-node@7`,
-`scene-engine-packet-log@3`, checkpoint records, Display commands or ACK cursors.
+Nested Prefabs are entirely inside `@scene-engine/display@0.14.0` and Prefab definition schema
+`scene-engine-prefab-definition@5`. Property/event commands use `scene-engine-display-node@8`; they do not add a Wire packet
+kind, attachment, second event channel or packet-log schema.
 
 Python still creates and controls only the outer `py/` authority root. `set_state` sends one complete outer state. Display calls
 the registered synchronous resolvers, recursively derives fixed-child overrides and every dynamic slot's complete desired set,

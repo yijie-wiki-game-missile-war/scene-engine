@@ -14,7 +14,7 @@ Scene Engine 的测试验证当前产品定义、架构所有权和技术合同�
 
 这一类从 `DisplayRuntime` 进入，经唯一 NodeGraph、Component/Animation 系统和 RenderSystem 到 Three backend，覆盖
 简单几何体、固定与动态嵌套 Prefab、Node 增删与 reparent、Matrix4 层级直乘与 shear、visibility、完整 state replacement、
-Display-local sprite animation，以及 mesh、sprite、model、surface、particle 渲染路径。
+顶层属性 set/unset、同步瞬时事件、Display-local sprite animation，以及 mesh、sprite、model、surface、particle 渲染路径。
 
 默认门禁只执行小规模、离线、确定性的 foundation 与 scale smoke。真实 Three backend 的 Node 测试使用确定性
 TestRenderer，因此验证 CPU 侧绑定、矩阵、批处理、资源和生命周期，但不把 GPU、驱动或浏览器调度时间混入默认
@@ -31,7 +31,8 @@ checkpoint、commit、command、ACK、pending/in-flight 和最终状态一致性
 
 Python 侧另用确定性的 Event/Condition 障碍测试后台 transport sender：阻塞 `send` 时 Runtime 仍可完成 tick、跨连接
 保持 FIFO、断开会取消旧 epoch、后台失败只移除对应 session、控制队列保持有界、停止会排空并回收 worker。测试不以
-`sleep` 推测调度，也不允许 worker 接触 World、Program、recorder、Session 或 MatrixPool。
+`sleep` 推测调度，也不允许 worker 接触 World、Program、recorder、Session 或 MatrixPool。Transform、reparent、属性与
+事件在编码后都是同一不可变 packet，因此还要验证它们在后台发送前后的 command 顺序和载荷不变。
 
 默认门禁只执行 32 roots 的确定性跨语言 smoke；更多 roots、commits、update ratio 和 roundtrip/windowed profile
 通过显式 benchmark runner 运行。

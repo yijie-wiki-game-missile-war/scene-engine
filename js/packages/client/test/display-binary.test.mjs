@@ -152,6 +152,12 @@ function parsedCommandToRecord(value) {
       return { ...nodeCommon, visible: value.visible };
     case 'node-set-state':
       return { ...nodeCommon, state: value.state };
+    case 'node-set-property':
+      return { ...nodeCommon, property_name: value.propertyName, value: value.value };
+    case 'node-unset-property':
+      return { ...nodeCommon, property_name: value.propertyName };
+    case 'node-emit-event':
+      return { ...nodeCommon, event_name: value.eventName, payload: value.payload };
     case 'node-replace-prefab':
       return { ...nodeCommon, prefab_id: value.prefabId, state: value.state };
     case 'node-remove':
@@ -177,7 +183,7 @@ function rawAttachment(packet, kind) {
   return packet.attachments.find((attachment) => attachment.kind === kind).value;
 }
 
-test('binary Display v4 checkpoint decodes one owned pool tensor and ID metadata', () => {
+test('binary Display v5 checkpoint decodes one owned pool tensor and ID metadata', () => {
   const source = matrixPool(3, [[0, shearMatrix(17.75)], [2, matrix(4)]]);
   const bytes = encodeDisplayCheckpoint(checkpoint({
     poolSize: 3,
@@ -185,10 +191,10 @@ test('binary Display v4 checkpoint decodes one owned pool tensor and ID metadata
     nodes: [baselineNode(0), { ...baselineNode(2, 0), transform_mode: 'initial', visible: false }],
   }));
   assert.equal(new TextDecoder().decode(bytes.subarray(0, 4)), 'SDCP');
-  assert.equal(bytes[4], 4);
+  assert.equal(bytes[4], 5);
 
   const parsed = parseDisplayCheckpoint(bytes, { header: { last_command_seq: 7 } });
-  assert.equal(parsed.schema, 'scene-engine-display-checkpoint@7');
+  assert.equal(parsed.schema, 'scene-engine-display-checkpoint@8');
   assert.equal(parsed.matrixPoolSize, 3);
   assert.ok(parsed.matrixPool instanceof Float32Array);
   assert.equal(parsed.matrixPool.length, 3 * MATRIX_LENGTH);
@@ -209,7 +215,7 @@ test('binary Display v4 checkpoint decodes one owned pool tensor and ID metadata
   assert.equal(parsed.matrixPool[0], first, 'packet mutation cannot alias the decoded tensor');
 });
 
-test('binary Display v4 command stream carries one transform batch before create rows', () => {
+test('binary Display v5 command stream carries ordered transform, property, and event commands', () => {
   const commands = [
     command('node-create', 8, {
       node_id: 2,
@@ -223,10 +229,21 @@ test('binary Display v4 command stream carries one transform batch before create
     command('node-set-parent', 10, { node_id: 0, parent_node_id: 2 }),
     command('node-set-visible', 11, { node_id: 0, visible: false }),
     command('node-set-state', 12, { node_id: 0, state: { mode: 'active' } }),
-    command('node-replace-prefab', 13, {
+    command('node-set-property', 13, {
+      node_id: 0,
+      property_name: 'stats.gold',
+      value: { amount: 7, bonuses: [null, true, '初回'] },
+    }),
+    command('node-unset-property', 14, { node_id: 0, property_name: '状态.旧值' }),
+    command('node-emit-event', 15, {
+      node_id: 0,
+      event_name: 'combat.爆炸🔥',
+      payload: { damage: 3, critical: false },
+    }),
+    command('node-replace-prefab', 16, {
       node_id: 0, prefab_id: 'unit.replacement', state: { level: 2 },
     }),
-    command('node-remove', 14, { node_id: 0 }),
+    command('node-remove', 17, { node_id: 0 }),
   ];
   const dirtyNodeIds = new Uint32Array([0, 2]);
   const dirtyMatrices = new Float32Array([...shearMatrix(2), ...matrix(1)]);
@@ -234,13 +251,16 @@ test('binary Display v4 command stream carries one transform batch before create
     poolSize: 3, dirtyNodeIds, dirtyMatrices,
   }), { sourceTick: 12 });
   const parsed = parseDisplayCommandStream(bytes, {
-    header: { source_tick: 12, last_command_seq: 14 },
+    header: { source_tick: 12, last_command_seq: 17 },
     baseCommandSeq: 7,
   });
 
-  assert.equal(parsed.schema, 'scene-engine-display-command-stream@7');
+  assert.equal(parsed.schema, 'scene-engine-display-command-stream@8');
   assert.deepEqual(parsed.commands.map(({ kind }) => kind), commands.map(({ kind }) => kind));
-  assert.deepEqual(parsed.commands.map(({ commandSeq }) => commandSeq), [8, 9, 10, 11, 12, 13, 14]);
+  assert.deepEqual(
+    parsed.commands.map(({ commandSeq }) => commandSeq),
+    [8, 9, 10, 11, 12, 13, 14, 15, 16, 17],
+  );
   assert.deepEqual([...parsed.dirtyNodeIds], [0, 2]);
   assert.deepEqual(parsed.dirtyMatrices, dirtyMatrices);
   assert.notStrictEqual(parsed.dirtyMatrices.buffer, bytes.buffer);
@@ -249,9 +269,131 @@ test('binary Display v4 command stream carries one transform batch before create
   assert.equal(parsed.commands[1].transformCount, 1);
   assert.deepEqual([...parsed.commands[1].nodeIds], [0]);
   assert.equal('nodeId' in parsed.commands[1], false);
+  assert.equal(parsed.commands[5].propertyName, 'stats.gold');
+  assert.deepEqual(parsed.commands[5].value, {
+    amount: 7, bonuses: [null, true, '初回'],
+  });
+  assert.equal(Object.isFrozen(parsed.commands[5].value), true);
+  assert.equal(Object.isFrozen(parsed.commands[5].value.bonuses), true);
+  assert.equal(parsed.commands[6].propertyName, '状态.旧值');
+  assert.equal(parsed.commands[7].eventName, 'combat.爆炸🔥');
+  assert.deepEqual(parsed.commands[7].payload, { critical: false, damage: 3 });
+  assert.equal(Object.isFrozen(parsed.commands[7].payload), true);
   assert.deepEqual(encodeDisplayCommandStream(parsedStreamToRecord(parsed), {
     sourceTick: 12,
   }), bytes);
+});
+
+test('property values cover JSONValue and message names use the shared Unicode domain', () => {
+  for (const value of [
+    null,
+    false,
+    2.5,
+    '状态',
+    [1, null, { nested: true }],
+    { items: ['a', 'b'] },
+  ]) {
+    const bytes = encodeDisplayCommandStream(stream([
+      command('node-set-property', 8, {
+        property_name: 'stats.金币🔥', value,
+      }),
+    ]), { sourceTick: 12 });
+    const parsed = parseDisplayCommandStream(bytes, {
+      header: { source_tick: 12, last_command_seq: 8 }, baseCommandSeq: 7,
+    });
+    assert.equal(parsed.commands[0].propertyName, 'stats.金币🔥');
+    assert.deepEqual(parsed.commands[0].value, value);
+    if (value !== null && typeof value === 'object') {
+      assert.equal(Object.isFrozen(parsed.commands[0].value), true);
+    }
+  }
+
+  const maximumName = '🔥'.repeat(48);
+  const bytes = encodeDisplayCommandStream(stream([
+    command('node-set-property', 8, { property_name: maximumName, value: 1 }),
+    command('node-unset-property', 9, { property_name: 'safe.__proto__' }),
+    command('node-emit-event', 10, {
+      event_name: 'visual.爆炸', payload: { at: [1, 2, 3] },
+    }),
+  ]), { sourceTick: 12 });
+  const parsed = parseDisplayCommandStream(bytes, {
+    header: { source_tick: 12, last_command_seq: 10 }, baseCommandSeq: 7,
+  });
+  assert.equal(parsed.commands[0].propertyName, maximumName);
+  assert.equal(parsed.commands[1].propertyName, 'safe.__proto__');
+  assert.equal(parsed.commands[2].eventName, 'visual.爆炸');
+});
+
+test('property and event records reject invalid names and non-record event payloads', () => {
+  const invalidNames = [
+    '',
+    'has space',
+    'line\nbreak',
+    'format\u200dmark',
+    'private\ue000use',
+    'lone\ud800surrogate',
+    '__proto__',
+    'prototype',
+    'constructor',
+    '🔥'.repeat(49),
+  ];
+  for (const propertyName of invalidNames) {
+    assert.throws(() => encodeDisplayCommandStream(stream([
+      command('node-set-property', 8, { property_name: propertyName, value: 1 }),
+    ]), { sourceTick: 12 }), (error) => error.code === 'display-property-name-invalid');
+  }
+  for (const eventName of invalidNames) {
+    assert.throws(() => encodeDisplayCommandStream(stream([
+      command('node-emit-event', 8, { event_name: eventName, payload: {} }),
+    ]), { sourceTick: 12 }), (error) => error.code === 'display-event-name-invalid');
+  }
+  assert.throws(() => encodeDisplayCommandStream(stream([
+    command('node-emit-event', 8, { event_name: 'valid', payload: [] }),
+  ]), { sourceTick: 12 }), (error) => error.code === 'display-event-payload-invalid');
+
+  const dangerousValue = JSON.parse('{"__proto__":1}');
+  assert.throws(() => encodeDisplayCommandStream(stream([
+    command('node-set-property', 8, { property_name: 'valid', value: dangerousValue }),
+  ]), { sourceTick: 12 }), (error) => error.code === 'display-property-value-invalid');
+});
+
+test('binary decoder rejects invalid message names and a non-record event payload', () => {
+  const parseOne = (bytes) => parseDisplayCommandStream(bytes, {
+    header: { source_tick: 12, last_command_seq: 8 }, baseCommandSeq: 7,
+  });
+  const propertyBytes = encodeDisplayCommandStream(stream([
+    command('node-set-property', 8, { property_name: 'x', value: null }),
+  ]), { sourceTick: 12 });
+  const invalidPropertyName = propertyBytes.slice();
+  invalidPropertyName[43] = 0x20;
+  assert.throws(() => parseOne(invalidPropertyName),
+    (error) => error.code === 'display-property-name-invalid');
+  assert.throws(() => parseOne(propertyBytes.subarray(0, propertyBytes.length - 1)),
+    (error) => error.code === 'display-property-value-truncated');
+  const nestedProperty = encodeDisplayCommandStream(stream([
+    command('node-set-property', 8, {
+      property_name: 'nested', value: { outer: { inner: 1 } },
+    }),
+  ]), { sourceTick: 12 });
+  assert.throws(() => parseDisplayCommandStream(nestedProperty, {
+    header: { source_tick: 12, last_command_seq: 8 },
+    baseCommandSeq: 7,
+    maximumJsonDepth: 1,
+  }), (error) => error.code === 'json-depth-limit');
+
+  const eventBytes = encodeDisplayCommandStream(stream([
+    command('node-emit-event', 8, { event_name: 'x', payload: {} }),
+  ]), { sourceTick: 12 });
+  const invalidEventName = eventBytes.slice();
+  invalidEventName[43] = 0x20;
+  assert.throws(() => parseOne(invalidEventName),
+    (error) => error.code === 'display-event-name-invalid');
+  const invalidPayload = eventBytes.slice();
+  invalidPayload.set(new TextEncoder().encode('[]'), invalidPayload.length - 2);
+  assert.throws(() => parseOne(invalidPayload),
+    (error) => error.code === 'display-event-payload-invalid');
+  assert.throws(() => parseOne(eventBytes.subarray(0, eventBytes.length - 1)),
+    (error) => error.code === 'display-event-payload-truncated');
 });
 
 test('command stream fixed command limit precedes command traversal', () => {

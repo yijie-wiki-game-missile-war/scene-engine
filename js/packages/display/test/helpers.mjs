@@ -81,6 +81,9 @@ function createNumericAuthorityTestAdapter(authority) {
     setNodeParent: (record) => authority.setNodeParent(record),
     setNodeVisible: (record) => authority.setNodeVisible(record),
     setNodeState: (record) => authority.setNodeState(record),
+    setNodeProperty: (record) => authority.setNodeProperty(record),
+    unsetNodeProperty: (record) => authority.unsetNodeProperty(record),
+    emitNodeEvent: (record) => authority.emitNodeEvent(record),
     replaceNodePrefab: (record) => authority.replaceNodePrefab(record),
     removeNode: (record) => authority.removeNode(record),
     _assertMatrixPoolSettled: () => authority._assertMatrixPoolSettled(),
@@ -113,11 +116,12 @@ export class FakeFrameAdapter {
 }
 
 export function emptyPrefab({ id = 'target.test.item', gameplayType = 'test.item',
-  childName = 'body', resolveState = undefined, childComponents = [] } = {}) {
+  events = [], childName = 'body', resolveState = undefined, childComponents = [] } = {}) {
   return definePrefab({
     schema: PREFAB_DEFINITION_SCHEMA,
     id,
     gameplayType,
+    events,
     root: {
       components: [],
       children: childName === null ? [] : [{

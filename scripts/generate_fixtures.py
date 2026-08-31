@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regenerate the frozen cross-language Scene Engine wire@3/display@7 fixtures."""
+"""Regenerate the frozen cross-language Scene Engine wire@3/display@8 fixtures."""
 
 from __future__ import annotations
 
@@ -162,7 +162,7 @@ def main() -> None:
     args = parser.parse_args()
     catalog_identity_path, catalog_identity_bytes, catalog = catalog_identity_fixture()
     wire_root = ROOT / "fixtures" / "wire-v3"
-    display_root = ROOT / "fixtures" / "display-v7"
+    display_root = ROOT / "fixtures" / "display-v8"
     tree_root = ROOT / "fixtures" / "json-tree-v1"
     package_wire_root = ROOT / "js" / "packages" / "client" / "fixtures" / "wire-v3"
     package_log = ROOT / "js" / "packages" / "client" / "fixtures" / "packet-log"
@@ -204,6 +204,12 @@ def main() -> None:
         DisplayCommand.set_state(aircraft_id, {"animation": "moving"}),
         DisplayCommand.replace_prefab(
             aircraft_id, "unit.basic", {"animation": "damaged"}
+        ),
+        DisplayCommand.set_property(aircraft_id, "coins", 7),
+        DisplayCommand.set_property(aircraft_id, "flash", None),
+        DisplayCommand.unset_property(aircraft_id, "flash"),
+        DisplayCommand.emit_event(
+            aircraft_id, "explode", {"damage": 3, "critical": True}
         ),
         DisplayCommand.remove(doomed_id),
     )
@@ -290,7 +296,7 @@ def main() -> None:
             aircraft_id,
             parent_node_id=root_id,
             visible=False,
-            state={"animation": "damaged"},
+            state={"animation": "damaged", "coins": 7},
         ),
         node(transient_id, parent_node_id=root_id),
     )

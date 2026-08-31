@@ -1,6 +1,6 @@
-# JavaScript Client 0.14
+# JavaScript Client 0.15
 
-`@scene-engine/client@0.14.0` is the only browser packet decoder, immutable WorldState owner, cumulative ACK barrier and Display
+`@scene-engine/client@0.15.0` is the only browser packet decoder, immutable WorldState owner, cumulative ACK barrier and Display
 session bridge. Its root exports:
 
 ```text
@@ -24,7 +24,8 @@ runtime
   catalogIdentity / installScene / activate / start / summary / currentView
 authorityPort
   installNodeMatrixPool / applyNodeTransformBatch
-  createNode / setNodeTransforms / setNodeParent / setNodeVisible / setNodeState / replaceNodePrefab / removeNode
+  createNode / setNodeTransforms / setNodeParent / setNodeVisible / setNodeState
+  setNodeProperty / unsetNodeProperty / emitNodeEvent / replaceNodePrefab / removeNode
 commitGate
   begin / seal / fail
 dispose
@@ -82,6 +83,11 @@ commitGate.seal(cursor)
 
 A command failure calls `commitGate.fail`, emits no ACK and leaves the projection invalid. The Client never performs local repair;
 recovery requires a fresh checkpoint/session.
+
+Property values are arbitrary canonical JSON values; event payloads are canonical JSON objects. Client validates and freezes
+them before opening or crossing the Authority boundary. Event calls also carry their engine-owned `commandSeq` and `sourceTick`
+so display handlers can diagnose and derive deterministic visual origins without reading a wall clock. No event attachment or
+parallel callback queue exists: all three new operations remain ordinary ordered SDCS commands.
 
 ACK means WorldState, all synchronous Authority operations and the cursor were accepted. It does not wait for resources,
 DisplayView construction, HUD, observers, RAF or draw.

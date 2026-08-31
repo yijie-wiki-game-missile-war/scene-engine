@@ -31,7 +31,7 @@ Exact layouts:
 - ACK/error: no attachments.
 
 Checkpoint and commit headers carry `stream_id`, `commit_seq`, `source_tick`, `world_revision`, `last_command_seq`, `world_codec`
-and `display_codec=scene-engine-display-node@7`. Commit adds cause and causation ID. ACK is cumulative over stream, commit and
+and `display_codec=scene-engine-display-node@8`. Commit adds cause and causation ID. ACK is cumulative over stream, commit and
 last command cursor.
 
 The Display checkpoint contains:
@@ -52,7 +52,7 @@ Prefab/Resource/Component and authority-state schema definitions, writes a build
 values. Wire transports the identities; it does not invent or recompute product catalog content.
 
 The command stream contains a base cursor, source-tick seal, the resulting matrix-pool size, one sorted dirty-ID vector, its
-aligned matrix tensor and strict `scene-engine-node-command@7` records. Sequence is the base plus one-based record order, last
+aligned matrix tensor and strict `scene-engine-node-command@8` records. Sequence is the base plus one-based record order, last
 cursor is base plus count and the sealed source tick must equal the packet header. Structural/state commands have one target;
 one optional Transform-batch command has an arbitrary sorted ID vector and occupies one sequence regardless of its row count.
 
@@ -64,9 +64,10 @@ browser-only concern.
 
 ## Binary Display payloads
 
-Both raw Display payloads begin with a four-byte kind magic (`SDCP` checkpoint or `SDCS` command stream), payload version `4`,
+Both raw Display payloads begin with a four-byte kind magic (`SDCP` checkpoint or `SDCS` command stream), payload version `5`,
 scalar code `1` (`float32`) and zero `u16` flags. Strings are fatal UTF-8 prefixed by `u16` byte length and cannot use length
-`0xffff`. State remains canonical finite/safe-integer JSON prefixed by a `u32`
+`0xffff`. Complete state and event payloads are canonical JSON objects; property values may be any canonical JSON value. Every
+JSON body is prefixed by a `u32`
 byte length. SHA-256 identities are transported as their 32 raw bytes. Python's structural decoder rejects unknown scalar
 codes, opcodes or flags, malformed UTF-8 or JSON, invalid lengths, truncation and trailing bytes. Matrix semantics are checked
 later by the JavaScript Client before Authority mutation or ACK.
@@ -94,7 +95,16 @@ instead carries only a batch-row count because its IDs and matrices already occu
 5 set-state       node_id, state
 6 replace-Prefab  node_id, Prefab ID, state
 7 remove          node_id
+8 set-property    node_id, property name, JSON value
+9 unset-property  node_id, property name
+10 emit-event     node_id, event name, JSON-object payload
 ```
+
+Property and event names are `u16`-length fatal UTF-8 with a semantic maximum of 192 bytes. They are non-empty, contain no
+Unicode whitespace or General Category `C*` characters, and reject `__proto__`, `prototype` and `constructor`. A dot is an
+ordinary name character, not a path separator. `null` is a valid set-property value and is distinct from unset-property.
+Event metadata `command_seq` and `source_tick` is derived from the normal command-stream cursor; it is not redundantly encoded.
+There is no event attachment kind: events use opcode 10 in the same ordered SDCS transaction as every other Display command.
 
 At most one non-empty Transform batch is legal. Its targets are exactly the first `transform_count` dirty IDs; remaining dirty
 IDs must exactly equal the create targets. Existing IDs precede newly appended create IDs, so the globally sorted table forms
@@ -140,7 +150,7 @@ contract.
 
 World patch identity is `scene-engine-json-tree@1`; operations are `set`, `unset` and `append`. All paths and values are validated
 before mutation. Raw packet bytes are immutable after first encode, and packet logs never decode/re-encode them. Cross-language
-fixtures live under `fixtures/wire-v3`, `fixtures/display-v7`, `fixtures/display-catalog-v2` and the Client fixture directories.
+fixtures live under `fixtures/wire-v3`, `fixtures/display-v8`, `fixtures/display-catalog-v2` and the Client fixture directories.
 `scripts/generate_fixtures.py` is their sole writer; the Client package's JavaScript generator delegates to it. The canonical
 cross-language corpus includes a sheared affine matrix and the Client asserts its packaged Wire files are byte-identical to the
 root corpus.

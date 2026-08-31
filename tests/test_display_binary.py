@@ -116,6 +116,9 @@ def command_stream() -> dict:
         ("node-set-visible", 4, {"visible": False}),
         ("node-set-state", 5, {"state": {"items": [1, 2]}}),
         ("node-replace-prefab", 6, {"prefab_id": "world/replacement", "state": {"mode": "other"}}),
+        ("node-set-property", 6, {"property_name": "status.health", "value": [None, True, {"amount": 3}]}),
+        ("node-unset-property", 6, {"property_name": "temporaryFlag"}),
+        ("node-emit-event", 6, {"event_name": "combat.Exploded", "payload": {"coins": 4}}),
         ("node-remove", 7, {}),
     ]
     base = 10
@@ -146,6 +149,27 @@ def command_stream() -> dict:
     }
 
 
+def single_command_stream(kind: str, fields: dict) -> dict:
+    return {
+        "schema": DISPLAY_COMMAND_STREAM_SCHEMA,
+        "base_command_seq": 0,
+        "last_command_seq": 1,
+        "matrix_pool_size": 1,
+        "dirty_node_ids": [],
+        "dirty_matrices": [],
+        "commands": [
+            {
+                "schema": DISPLAY_COMMAND_SCHEMA,
+                "command_seq": 1,
+                "source_tick": 20,
+                "kind": kind,
+                "node_id": 0,
+                **fields,
+            }
+        ],
+    }
+
+
 def test_binary_checkpoint_round_trips_full_pool_and_sparse_node_records() -> None:
     encoded = encode_display_checkpoint_binary(checkpoint(), 7)
 
@@ -153,7 +177,7 @@ def test_binary_checkpoint_round_trips_full_pool_and_sparse_node_records() -> No
     assert encoded.last_command_seq == 7
     assert bytes(encoded) == encoded.bytes
     assert encoded.bytes[:4] == DISPLAY_BINARY_CHECKPOINT_MAGIC
-    assert encoded.bytes[4] == DISPLAY_BINARY_VERSION == 4
+    assert encoded.bytes[4] == DISPLAY_BINARY_VERSION == 5
     assert encoded.bytes[5] == DISPLAY_BINARY_SCALAR_FLOAT32
     assert struct.unpack_from("<QII", encoded.bytes, 8) == (7, 3, 2)
     assert struct.unpack_from("<16f", encoded.bytes, 24) == pytest.approx(POSE)
@@ -197,17 +221,17 @@ def test_checkpoint_tensor_preserves_opaque_float32_bits() -> None:
 
 def test_binary_command_stream_round_trips_batch_then_all_command_opcodes() -> None:
     value = command_stream()
-    encoded = encode_display_command_stream_binary(value, 20, 17)
+    encoded = encode_display_command_stream_binary(value, 20, 20)
 
     assert encoded.kind == DISPLAY_COMMAND_STREAM_KIND
     assert encoded.base_command_seq == 10
     assert encoded.source_tick == 20
     assert encoded.bytes[:4] == DISPLAY_BINARY_COMMAND_STREAM_MAGIC
-    assert struct.unpack_from("<QQIII", encoded.bytes, 8) == (10, 20, 7, 8, 2)
+    assert struct.unpack_from("<QQIII", encoded.bytes, 8) == (10, 20, 10, 8, 2)
     assert struct.unpack_from("<2I", encoded.bytes, 36) == (0, 2)
     assert struct.unpack_from("<16f", encoded.bytes, 44) == pytest.approx(POSE)
 
-    decoded = decode_display_command_stream_binary(encoded.bytes, 20, 17)
+    decoded = decode_display_command_stream_binary(encoded.bytes, 20, 20)
     dirty_node_ids = _assert_immutable_c_array(
         decoded["dirty_node_ids"], dtype="<u4", shape=(2,)
     )
@@ -217,20 +241,192 @@ def test_binary_command_stream_round_trips_batch_then_all_command_opcodes() -> N
     )
     assert [record["kind"] for record in decoded["commands"]] == [
         "node-create", "node-set-transform-batch", "node-set-parent",
-        "node-set-visible", "node-set-state", "node-replace-prefab", "node-remove",
+        "node-set-visible", "node-set-state", "node-replace-prefab",
+        "node-set-property", "node-unset-property", "node-emit-event", "node-remove",
     ]
+    assert decoded["commands"][6]["value"] == [None, True, {"amount": 3}]
+    assert decoded["commands"][8]["payload"] == {"coins": 4}
     assert not any("transform" in record for record in decoded["commands"])
-    assert encode_display_command_stream_binary(decoded, 20, 17).bytes == encoded.bytes
+    assert encode_display_command_stream_binary(decoded, 20, 20).bytes == encoded.bytes
 
     with pytest.raises(WireError, match="source tick"):
-        decode_display_command_stream_binary(encoded.bytes, 21, 17)
+        decode_display_command_stream_binary(encoded.bytes, 21, 20)
     with pytest.raises(WireError, match="cursor"):
-        decode_display_command_stream_binary(encoded.bytes, 20, 18)
+        decode_display_command_stream_binary(encoded.bytes, 20, 21)
+
+
+def test_property_and_event_opcodes_have_exact_v5_binary_layouts() -> None:
+    property_name = b"status.health"
+    property_json = b'{"a":1,"b":[true,null]}'
+    property_encoded = encode_display_command_stream_binary(
+        single_command_stream(
+            "node-set-property",
+            {
+                "property_name": property_name.decode(),
+                "value": {"b": [True, None], "a": 1},
+            },
+        ),
+        20,
+        1,
+    )
+    assert property_encoded.bytes[36:] == (
+        struct.pack("<BIH", 8, 0, len(property_name))
+        + property_name
+        + struct.pack("<I", len(property_json))
+        + property_json
+    )
+
+    unset_name = b"temporaryFlag"
+    unset_encoded = encode_display_command_stream_binary(
+        single_command_stream(
+            "node-unset-property", {"property_name": unset_name.decode()}
+        ),
+        20,
+        1,
+    )
+    assert unset_encoded.bytes[36:] == (
+        struct.pack("<BIH", 9, 0, len(unset_name)) + unset_name
+    )
+
+    event_name = b"combat.Exploded"
+    event_json = b'{"coins":4,"critical":true}'
+    event_encoded = encode_display_command_stream_binary(
+        single_command_stream(
+            "node-emit-event",
+            {
+                "event_name": event_name.decode(),
+                "payload": {"critical": True, "coins": 4},
+            },
+        ),
+        20,
+        1,
+    )
+    assert event_encoded.bytes[36:] == (
+        struct.pack("<BIH", 10, 0, len(event_name))
+        + event_name
+        + struct.pack("<I", len(event_json))
+        + event_json
+    )
+    decoded = decode_display_command_stream_binary(event_encoded.bytes, 20, 1)
+    assert decoded["commands"] == [
+        {
+            "schema": DISPLAY_COMMAND_SCHEMA,
+            "command_seq": 1,
+            "source_tick": 20,
+            "kind": "node-emit-event",
+            "node_id": 0,
+            "event_name": "combat.Exploded",
+            "payload": {"coins": 4, "critical": True},
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [None, False, "ready", 9007199254740991, -12.5, [1, "two"], {"ok": True}],
+)
+def test_binary_set_property_round_trips_any_json_value(value: object) -> None:
+    encoded = encode_display_command_stream_binary(
+        single_command_stream(
+            "node-set-property", {"property_name": "value", "value": value}
+        ),
+        20,
+        1,
+    )
+    decoded = decode_display_command_stream_binary(encoded.bytes, 20, 1)
+
+    assert decoded["commands"][0]["value"] == value
+    assert encode_display_command_stream_binary(decoded, 20, 1).bytes == encoded.bytes
+
+
+def test_binary_property_json_and_event_object_fail_closed() -> None:
+    property_encoded = encode_display_command_stream_binary(
+        single_command_stream(
+            "node-set-property", {"property_name": "value", "value": {"x": 1}}
+        ),
+        20,
+        1,
+    ).bytes
+    for replacement, match in (
+        (b'{"x":1,"x":2}', "duplicate"),
+        (b"\xef\xbb\xbf{}", "BOM"),
+        (b"9007199254740992", "unsafe integer"),
+        (b"NaN", "non-finite"),
+        (b'{"__proto__":1}', "property value JSON"),
+        (b'"\xff"', "not valid UTF-8"),
+    ):
+        malformed = _replace_single_command_json(property_encoded, replacement)
+        with pytest.raises(WireError, match=match):
+            decode_display_command_stream_binary(malformed, 20, 1)
+
+    deep = encode_display_command_stream_binary(
+        single_command_stream(
+            "node-set-property",
+            {"property_name": "value", "value": {"outer": {"inner": 1}}},
+        ),
+        20,
+        1,
+    )
+    with pytest.raises(WireError, match="property value JSON"):
+        decode_display_command_stream_binary(
+            deep.bytes, 20, 1, maximum_json_depth=1
+        )
+    with pytest.raises(ConfigurationError, match="property value.*canonical JSON"):
+        encode_display_command_stream_binary(
+            single_command_stream(
+                "node-set-property",
+                {"property_name": "value", "value": {"outer": {"inner": 1}}},
+            ),
+            20,
+            1,
+            maximum_json_depth=1,
+        )
+
+    event = encode_display_command_stream_binary(
+        single_command_stream(
+            "node-emit-event", {"event_name": "ready", "payload": {}}
+        ),
+        20,
+        1,
+    ).bytes
+    primitive_payload = _replace_single_command_json(event, b"null")
+    with pytest.raises(WireError, match="event payload must be a JSON object"):
+        decode_display_command_stream_binary(primitive_payload, 20, 1)
+
+
+def test_binary_message_names_share_the_semantic_unicode_contract() -> None:
+    boundary_name = "界" * 64
+    encoded = encode_display_command_stream_binary(
+        single_command_stream(
+            "node-set-property",
+            {"property_name": boundary_name, "value": None},
+        ),
+        20,
+        1,
+    )
+    decoded = decode_display_command_stream_binary(encoded.bytes, 20, 1)
+    assert decoded["commands"][0]["property_name"] == boundary_name
+
+    malformed = bytearray(
+        encode_display_command_stream_binary(
+            single_command_stream(
+                "node-unset-property", {"property_name": "ok"}
+            ),
+            20,
+            1,
+        ).bytes
+    )
+    malformed[-2:] = b"a "
+    with pytest.raises(WireError, match="decoded Display command"):
+        decode_display_command_stream_binary(malformed, 20, 1)
+
+    with pytest.raises(WireError, match="truncated"):
+        decode_display_command_stream_binary(encoded.bytes[:-1], 20, 1)
 
 
 def test_command_stream_fixed_command_limit_precedes_command_traversal() -> None:
     over_limit_count = 65_537
-    encoded = encode_display_command_stream_binary(command_stream(), 20, 17)
+    encoded = encode_display_command_stream_binary(command_stream(), 20, 20)
     malformed = bytearray(encoded.bytes)
     struct.pack_into("<I", malformed, 24, over_limit_count)
 
@@ -332,12 +528,12 @@ def test_raw_stream_rejects_out_of_pool_command_and_parent_ids() -> None:
     value = command_stream()
     value["matrix_pool_size"] = 7
     with pytest.raises(ConfigurationError, match="outside"):
-        encode_display_command_stream_binary(value, 20, 17)
+        encode_display_command_stream_binary(value, 20, 20)
 
     value = command_stream()
     value["commands"][2]["parent_node_id"] = 8
     with pytest.raises(ConfigurationError, match="outside"):
-        encode_display_command_stream_binary(value, 20, 17)
+        encode_display_command_stream_binary(value, 20, 20)
 
 
 def test_dirty_ids_must_be_sorted_unique_and_exact_matrix_targets() -> None:
@@ -346,12 +542,12 @@ def test_dirty_ids_must_be_sorted_unique_and_exact_matrix_targets() -> None:
         value["dirty_node_ids"] = dirty_ids
         value["dirty_matrices"] = [_tensor_row(POSE) for _ in dirty_ids]
         with pytest.raises(ConfigurationError, match="dirty"):
-            encode_display_command_stream_binary(value, 20, 17)
+            encode_display_command_stream_binary(value, 20, 20)
 
 
 @pytest.mark.parametrize(
     ("offset", "replacement", "match"),
-    [(0, b"NOPE", "magic"), (4, b"\x01", "version"), (5, b"\x02", "scalar"), (6, b"\x01\x00", "flags")],
+    [(0, b"NOPE", "magic"), (4, b"\x04", "version"), (5, b"\x02", "scalar"), (6, b"\x01\x00", "flags")],
 )
 def test_binary_header_and_framing_corruption_fail_closed(
     offset: int, replacement: bytes, match: str
@@ -403,7 +599,7 @@ def test_binary_encoder_accepts_only_current_semantic_schema_versions() -> None:
     commands = command_stream()
     commands["commands"][0]["schema"] = "scene-engine-node-command@5"
     with pytest.raises(ConfigurationError, match="schema"):
-        encode_display_command_stream_binary(commands, 20, 17)
+        encode_display_command_stream_binary(commands, 20, 20)
 
 
 def _first_checkpoint_record_offset(raw: bytes | bytearray) -> int:
@@ -420,3 +616,17 @@ def _replace_first_state(raw: bytes, replacement: bytes) -> bytes:
     original_length = struct.unpack_from("<I", raw, cursor)[0]
     state_offset = cursor + 4
     return raw[:cursor] + struct.pack("<I", len(replacement)) + replacement + raw[state_offset + original_length :]
+
+
+def _replace_single_command_json(raw: bytes, replacement: bytes) -> bytes:
+    cursor = 36 + 1 + 4
+    name_length = struct.unpack_from("<H", raw, cursor)[0]
+    cursor += 2 + name_length
+    original_length = struct.unpack_from("<I", raw, cursor)[0]
+    value_offset = cursor + 4
+    return (
+        raw[:cursor]
+        + struct.pack("<I", len(replacement))
+        + replacement
+        + raw[value_offset + original_length :]
+    )

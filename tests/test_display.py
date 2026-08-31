@@ -22,7 +22,7 @@ from scene_engine.display import (
     validate_display_command_stream,
 )
 from scene_engine.display_binary import encode_display_command_stream_binary
-from scene_engine.errors import ConfigurationError
+from scene_engine.errors import ConfigurationError, JsonTreeError
 
 
 HASH_A = "a" * 64
@@ -419,6 +419,9 @@ def test_mutation_command_construction_uses_uint32_node_ids() -> None:
         DisplayCommand.set_parent(target, None),
         DisplayCommand.set_visible(target, False),
         DisplayCommand.set_state(target, {}),
+        DisplayCommand.set_property(target, "status.health", None),
+        DisplayCommand.unset_property(target, "status.health"),
+        DisplayCommand.emit_event(target, "combat.Exploded", {}),
         DisplayCommand.replace_prefab(target, "world/replacement", {}),
         DisplayCommand.remove(target),
     )
@@ -535,6 +538,173 @@ def test_state_update_is_complete_replacement_not_a_merge_patch() -> None:
         "state",
     }
     assert record["state"] == {"mode": "ready"}
+
+
+def test_property_and_event_commands_are_owned_closed_and_ordered() -> None:
+    pool = DisplayMatrixPool()
+    node_id = pool.append(transform())
+    baseline = encode_display_checkpoint(
+        scene_name="main",
+        catalog=DisplayCatalogIdentity(HASH_A, HASH_B, HASH_C),
+        last_command_seq=4,
+        matrix_pool=pool,
+        nodes=(node(node_id),),
+    )
+    baseline.confirm_published()
+    property_value = {"parts": ["wing", {"health": 4}]}
+    event_payload = {"damage": {"amount": 12}, "critical": True}
+    commands = (
+        DisplayCommand.set_property(node_id, "status.health", property_value),
+        DisplayCommand.unset_property(node_id, "temporaryFlag"),
+        DisplayCommand.emit_event(node_id, "combat.Exploded", event_payload),
+    )
+    property_value["parts"].append("mutated")
+    event_payload["damage"]["amount"] = 99
+
+    stream, cursor = encode_display_command_stream(
+        base_command_seq=4,
+        source_tick=60,
+        matrix_pool=pool,
+        commands=commands,
+    )
+    records = stream.to_record()["commands"]
+
+    assert cursor == 7
+    assert [record["command_seq"] for record in records] == [5, 6, 7]
+    assert {record["source_tick"] for record in records} == {60}
+    assert records[0] == {
+        "schema": DISPLAY_COMMAND_SCHEMA,
+        "command_seq": 5,
+        "source_tick": 60,
+        "kind": "node-set-property",
+        "node_id": node_id,
+        "property_name": "status.health",
+        "value": {"parts": ["wing", {"health": 4}]},
+    }
+    assert records[1]["property_name"] == "temporaryFlag"
+    assert records[2]["payload"] == {
+        "damage": {"amount": 12},
+        "critical": True,
+    }
+    assert stream.maximum_json_depth == 3
+    assert validate_display_command_stream(
+        stream.to_record(),
+        expected_source_tick=60,
+        expected_last_command_seq=7,
+    ) == commands
+
+    with pytest.raises(TypeError):
+        commands[0].fields["value"] = None
+    with pytest.raises(TypeError):
+        commands[2].fields["payload"]["critical"] = False
+
+
+@pytest.mark.parametrize(
+    "value",
+    [None, True, "ready", 9007199254740991, -12.5, [1, "two"], {"ok": False}],
+)
+def test_set_property_accepts_every_json_value_shape(value: object) -> None:
+    record = DisplayCommand.set_property(0, "value", value).to_record(
+        command_seq=1, source_tick=2
+    )
+    assert record["value"] == value
+
+
+def test_set_property_null_is_distinct_from_unset_and_event_payload_is_object() -> None:
+    set_record = DisplayCommand.set_property(0, "optional", None).to_record(
+        command_seq=1, source_tick=2
+    )
+    unset_record = DisplayCommand.unset_property(0, "optional").to_record(
+        command_seq=2, source_tick=2
+    )
+    event_record = DisplayCommand.emit_event(0, "ready").to_record(
+        command_seq=3, source_tick=2
+    )
+
+    assert "value" in set_record and set_record["value"] is None
+    assert "value" not in unset_record
+    assert event_record["payload"] == {}
+    for invalid in (None, [], "payload", 1):
+        with pytest.raises(ConfigurationError, match="event payload"):
+            DisplayCommand.emit_event(0, "ready", invalid)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["status.health", "Health", "生命值", "combat/impact", "🔥", "界" * 64],
+)
+def test_property_and_event_names_accept_unicode_without_path_semantics(
+    name: str,
+) -> None:
+    assert DisplayCommand.set_property(0, name, 1).fields["property_name"] == name
+    assert DisplayCommand.unset_property(0, name).fields["property_name"] == name
+    assert DisplayCommand.emit_event(0, name, {}).fields["event_name"] == name
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "",
+        " ",
+        "a b",
+        "a\tb",
+        "a\nb",
+        "zero\x00byte",
+        "format\u200bmark",
+        "private\ue000use",
+        "unassigned\u0378",
+        "lone\ud800surrogate",
+        "__proto__",
+        "prototype",
+        "constructor",
+        "界" * 65,
+    ],
+)
+def test_property_and_event_names_reject_ambiguous_or_unsafe_unicode(
+    name: str,
+) -> None:
+    with pytest.raises(ConfigurationError):
+        DisplayCommand.set_property(0, name, 1)
+    with pytest.raises(ConfigurationError):
+        DisplayCommand.unset_property(0, name)
+    with pytest.raises(ConfigurationError):
+        DisplayCommand.emit_event(0, name, {})
+
+
+@pytest.mark.parametrize(
+    "value",
+    [b"bytes", 9007199254740992, math.nan, math.inf, {1: "bad"}, {"__proto__": 1}],
+)
+def test_set_property_rejects_values_outside_json(value: object) -> None:
+    with pytest.raises(JsonTreeError):
+        DisplayCommand.set_property(0, "value", value)
+
+
+def test_property_and_event_commands_require_an_active_node() -> None:
+    pool = DisplayMatrixPool()
+    active_id = pool.append(transform())
+    baseline = encode_display_checkpoint(
+        scene_name="main",
+        catalog=DisplayCatalogIdentity(HASH_A, HASH_B, HASH_C),
+        last_command_seq=0,
+        matrix_pool=pool,
+        nodes=(node(active_id),),
+    )
+    baseline.confirm_published()
+    pending_id = pool.append(transform())
+
+    for command in (
+        DisplayCommand.set_property(pending_id, "health", 1),
+        DisplayCommand.unset_property(pending_id, "health"),
+        DisplayCommand.emit_event(pending_id, "hit", {}),
+    ):
+        with pytest.raises(ConfigurationError, match="not active"):
+            encode_display_command_stream(
+                base_command_seq=0,
+                source_tick=1,
+                matrix_pool=pool,
+                commands=(command,),
+            )
 
 
 def test_matrix_pack_owns_binary32_bits_without_semantic_normalization() -> None:

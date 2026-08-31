@@ -3,6 +3,7 @@ import {
   cloneAndFreeze,
   exactKeys,
   plainRecord,
+  protocolNameSet,
   safeInteger,
 } from '../internal.js';
 import { IDENTITY_TRANSFORM, isIdentityTransform, normalizeTransform } from '../math/transform.js';
@@ -14,7 +15,7 @@ import { Resource } from './resource.js';
 import { prepareComponentPropertiesPatch } from '../component/component-registry.js';
 import { compilePrefabCatalog } from './prefab-compiler.js';
 
-export const PREFAB_DEFINITION_SCHEMA = 'scene-engine-prefab-definition@4';
+export const PREFAB_DEFINITION_SCHEMA = 'scene-engine-prefab-definition@5';
 const EMPTY_PATCH = Object.freeze({ nodes: Object.freeze({}), components: Object.freeze({}) });
 const ENCODER = new TextEncoder();
 const PREFAB_ID = /^[a-z0-9][a-z0-9._@-]*(?:\/[a-z0-9][a-z0-9._@-]*)*$/u;
@@ -69,7 +70,7 @@ function validateComponentSet(components, componentRegistry) {
 export class PrefabDefinition extends Resource {
   constructor(value) {
     const record = exactKeys(value, ['schema', 'id', 'gameplayType', 'root'], [
-      'revision', 'resolveState', 'prefabInstances', 'prefabSlots',
+      'revision', 'resolveState', 'events', 'prefabInstances', 'prefabSlots',
     ], 'display-prefab-definition-invalid');
     if (record.schema !== PREFAB_DEFINITION_SCHEMA) fail('display-prefab-definition-invalid');
     if (Object.hasOwn(record, 'resolveState') && typeof record.resolveState !== 'function') {
@@ -80,15 +81,18 @@ export class PrefabDefinition extends Resource {
       fail('display-prefab-definition-invalid');
     }
     const { resolveState, ...plain } = record;
+    plain.events = protocolNameSet(record.events ?? [], 'display-prefab-events-invalid');
     plain.prefabInstances = record.prefabInstances ?? [];
     plain.prefabSlots = record.prefabSlots ?? [];
     super({ id: assertPrefabId(record.id), schema: record.schema,
       revision: record.revision ?? 0, descriptor: plain });
     this._gameplayType = gameplayType(record.gameplayType);
+    this._events = this.describe().events;
     this._resolver = resolveState ?? (() => EMPTY_PATCH);
     Object.freeze(this);
   }
   get gameplayType() { return this._gameplayType; }
+  get events() { return this._events; }
 
   compile({ componentRegistry, resourceRegistry, prefabRegistry = null,
     compiledPrefabCatalog = null }) {
@@ -200,7 +204,8 @@ export class PrefabDefinition extends Resource {
           'display-prefab-dynamic-policy-invalid', { minimum: 1 }),
       });
     });
-    return Object.freeze({ definition: this, id: this.id, gameplayType: this.gameplayType, root,
+    return Object.freeze({ definition: this, id: this.id, gameplayType: this.gameplayType,
+      events: this.events, root,
       nodes: Object.freeze(nodes),
       prefabInstances: Object.freeze(prefabInstances),
       prefabSlots: Object.freeze(prefabSlots),

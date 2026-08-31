@@ -22,7 +22,7 @@ test('validates packet-log@3 command cursor and replays through sole Authority p
   assert.equal(log.manifest.wire_schema, 'scene-engine-wire@3');
   assert.equal(log.entries.length, 4);
   assert.equal(log.manifest.checkpoint_count, 2);
-  assert.deepEqual(log.entries.map(({ last_command_seq: value }) => value), [0, 7, 7, 7]);
+  assert.deepEqual(log.entries.map(({ last_command_seq: value }) => value), [0, 11, 11, 11]);
   assert.deepEqual(log.records.map(({ packet }) => packet.kind), [
     'engine.checkpoint', 'engine.commit', 'engine.commit', 'engine.checkpoint',
   ]);
@@ -34,16 +34,18 @@ test('validates packet-log@3 command cursor and replays through sole Authority p
     client.applyPacket(record.rawBytes);
   }
   assert.equal(client.currentCommit().commitSeq, 2);
-  assert.equal(client.currentCommit().lastCommandSeq, 7);
+  assert.equal(client.currentCommit().lastCommandSeq, 11);
   assert.equal(client.currentWorldState().state.stable.value, 8);
   assert.deepEqual(sessions[0].log.map(([kind]) => kind), [
     'installScene', 'installNodeMatrixPool', 'createNode', 'createNode', 'createNode',
     'activate', 'start', 'summary',
     'begin', 'applyNodeTransformBatch', 'createNode', 'setNodeTransforms',
     'setNodeParent', 'setNodeVisible',
-    'setNodeState', 'replaceNodePrefab', 'removeNode', 'seal', 'summary',
+    'setNodeState', 'replaceNodePrefab', 'setNodeProperty', 'setNodeProperty',
+    'unsetNodeProperty', 'emitNodeEvent', 'removeNode', 'seal', 'summary',
     'begin', 'applyNodeTransformBatch', 'seal', 'summary',
   ]);
+  assert.equal(sessions[0].log.filter(([kind]) => kind === 'emitNodeEvent').length, 1);
   assert.deepEqual(log.packetAt(0), log.records[0].rawBytes);
 });
 
@@ -55,7 +57,8 @@ test('seek checkpoint constructs a fresh client/runtime at the indexed command c
   const client = new SceneEngineClient({ createDisplaySession: factory });
   client.applyPacket(checkpoint.rawBytes);
   assert.equal(client.currentCommit().commitSeq, 2);
-  assert.equal(client.currentCommit().lastCommandSeq, 7);
+  assert.equal(client.currentCommit().lastCommandSeq, 11);
+  assert.equal(sessions[0].log.some(([kind]) => kind === 'emitNodeEvent'), false);
   assert.equal(sessions.length, 1);
 });
 

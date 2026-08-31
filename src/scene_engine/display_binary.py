@@ -19,7 +19,9 @@ from .display import (
     DisplayCatalogIdentity,
     DisplayCommand,
     DisplayNode,
+    MAXIMUM_EVENT_NAME_BYTES,
     MAXIMUM_NODE_ID,
+    MAXIMUM_PROPERTY_NAME_BYTES,
     NULL_NODE_ID,
     ValidatedDisplayCheckpoint,
     ValidatedDisplayCommandStream,
@@ -30,7 +32,7 @@ from .json_tree import MAXIMUM_SAFE_INTEGER, validate_json_value
 
 DISPLAY_BINARY_CHECKPOINT_MAGIC = b"SDCP"
 DISPLAY_BINARY_COMMAND_STREAM_MAGIC = b"SDCS"
-DISPLAY_BINARY_VERSION = 4
+DISPLAY_BINARY_VERSION = 5
 DISPLAY_BINARY_SCALAR_FLOAT32 = 1
 
 DISPLAY_CHECKPOINT_KIND = "display_checkpoint"
@@ -60,6 +62,9 @@ _OPCODE_BY_KIND = {
     "node-set-state": 5,
     "node-replace-prefab": 6,
     "node-remove": 7,
+    "node-set-property": 8,
+    "node-unset-property": 9,
+    "node-emit-event": 10,
 }
 _KIND_BY_OPCODE = {value: key for key, value in _OPCODE_BY_KIND.items()}
 
@@ -382,6 +387,44 @@ def encode_display_command_stream_binary(
             chunks.append(
                 _encode_state(fields["state"], maximum_json_depth=maximum_json_depth)
             )
+        elif kind == "node-set-property":
+            chunks.append(
+                _encode_string(
+                    fields["property_name"],
+                    "property_name",
+                    maximum_bytes=MAXIMUM_PROPERTY_NAME_BYTES,
+                )
+            )
+            chunks.append(
+                _encode_json_value(
+                    fields["value"],
+                    field="property value",
+                    maximum_json_depth=maximum_json_depth,
+                )
+            )
+        elif kind == "node-unset-property":
+            chunks.append(
+                _encode_string(
+                    fields["property_name"],
+                    "property_name",
+                    maximum_bytes=MAXIMUM_PROPERTY_NAME_BYTES,
+                )
+            )
+        elif kind == "node-emit-event":
+            chunks.append(
+                _encode_string(
+                    fields["event_name"],
+                    "event_name",
+                    maximum_bytes=MAXIMUM_EVENT_NAME_BYTES,
+                )
+            )
+            chunks.append(
+                _encode_json_object(
+                    fields["payload"],
+                    field="event payload",
+                    maximum_json_depth=maximum_json_depth,
+                )
+            )
         elif kind == "node-replace-prefab":
             chunks.append(
                 _encode_string(
@@ -533,6 +576,53 @@ def decode_display_command_stream_binary(
             state = reader.state(maximum_json_depth=maximum_json_depth)
             command = _validated_command_call(DisplayCommand.set_state, node_id, state)
             records.append({**common, "state": _thaw(command.fields["state"])})
+        elif kind == "node-set-property":
+            property_name = reader.string(
+                "property_name", maximum_bytes=MAXIMUM_PROPERTY_NAME_BYTES
+            )
+            property_value = reader.json_value(
+                "property value", maximum_json_depth=maximum_json_depth
+            )
+            command = _validated_command_call(
+                DisplayCommand.set_property,
+                node_id,
+                property_name,
+                property_value,
+            )
+            records.append(
+                {
+                    **common,
+                    "property_name": command.fields["property_name"],
+                    "value": _thaw(command.fields["value"]),
+                }
+            )
+        elif kind == "node-unset-property":
+            property_name = reader.string(
+                "property_name", maximum_bytes=MAXIMUM_PROPERTY_NAME_BYTES
+            )
+            command = _validated_command_call(
+                DisplayCommand.unset_property, node_id, property_name
+            )
+            records.append(
+                {**common, "property_name": command.fields["property_name"]}
+            )
+        elif kind == "node-emit-event":
+            event_name = reader.string(
+                "event_name", maximum_bytes=MAXIMUM_EVENT_NAME_BYTES
+            )
+            payload = reader.json_object(
+                "event payload", maximum_json_depth=maximum_json_depth
+            )
+            command = _validated_command_call(
+                DisplayCommand.emit_event, node_id, event_name, payload
+            )
+            records.append(
+                {
+                    **common,
+                    "event_name": command.fields["event_name"],
+                    "payload": _thaw(command.fields["payload"]),
+                }
+            )
         elif kind == "node-replace-prefab":
             prefab_id = reader.string(
                 "prefab_id", maximum_bytes=_MAXIMUM_PREFAB_ID_BYTES
@@ -548,9 +638,11 @@ def decode_display_command_stream_binary(
                     "state": _thaw(command.fields["state"]),
                 }
             )
-        else:
+        elif kind == "node-remove":
             _validated_command_call(DisplayCommand.remove, node_id)
             records.append(common)
+        else:
+            reader.fail("command opcode is unsupported")
     create_targets = sorted(
         record["node_id"]
         for record in records
@@ -739,9 +831,30 @@ def _encode_string(value: Any, field: str, *, maximum_bytes: int) -> bytes:
 
 
 def _encode_state(value: Any, *, maximum_json_depth: int) -> bytes:
+    return _encode_json_object(
+        value,
+        field="authority state",
+        maximum_json_depth=maximum_json_depth,
+    )
+
+
+def _encode_json_object(
+    value: Any, *, field: str, maximum_json_depth: int
+) -> bytes:
     owned = _thaw(value)
     if not isinstance(owned, dict):
-        raise ConfigurationError("authority state must be a JSON object")
+        raise ConfigurationError(f"{field} must be a JSON object")
+    return _encode_json_value(
+        owned,
+        field=field,
+        maximum_json_depth=maximum_json_depth,
+    )
+
+
+def _encode_json_value(
+    value: Any, *, field: str, maximum_json_depth: int
+) -> bytes:
+    owned = _thaw(value)
     try:
         validate_json_value(owned, maximum_depth=maximum_json_depth)
         payload = json.dumps(
@@ -752,9 +865,9 @@ def _encode_state(value: Any, *, maximum_json_depth: int) -> bytes:
             sort_keys=True,
         ).encode("utf-8")
     except (JsonTreeError, TypeError, ValueError, UnicodeError) as exc:
-        raise ConfigurationError("authority state is not canonical JSON") from exc
+        raise ConfigurationError(f"{field} is not canonical JSON") from exc
     if len(payload) > _MAXIMUM_U32:
-        raise ConfigurationError("authority state exceeds uint32 bytes")
+        raise ConfigurationError(f"{field} exceeds uint32 bytes")
     return _U32.pack(len(payload)) + payload
 
 
@@ -820,9 +933,25 @@ class _Reader:
         return value
 
     def state(self, *, maximum_json_depth: int) -> dict[str, Any]:
-        length = self.u32("state length")
-        raw = self.take(length, "state")
-        return _decode_state(raw, maximum_json_depth=maximum_json_depth, label=self.label)
+        return self.json_object("state", maximum_json_depth=maximum_json_depth)
+
+    def json_object(
+        self, field: str, *, maximum_json_depth: int
+    ) -> dict[str, Any]:
+        value = self.json_value(field, maximum_json_depth=maximum_json_depth)
+        if not isinstance(value, dict):
+            self.fail(f"{field} must be a JSON object")
+        return value
+
+    def json_value(self, field: str, *, maximum_json_depth: int) -> Any:
+        length = self.u32(f"{field} length")
+        raw = self.take(length, field)
+        return _decode_json_value(
+            raw,
+            maximum_json_depth=maximum_json_depth,
+            label=self.label,
+            field=field,
+        )
 
     def validate_node_id(self, value: int, field: str) -> int:
         if value > MAXIMUM_NODE_ID:
@@ -865,34 +994,34 @@ class _Reader:
             self.fail("payload has trailing bytes")
 
 
-def _decode_state(
-    raw: bytes, *, maximum_json_depth: int, label: str
-) -> dict[str, Any]:
+def _decode_json_value(
+    raw: bytes, *, maximum_json_depth: int, label: str, field: str
+) -> Any:
     if raw.startswith(b"\xef\xbb\xbf"):
-        raise WireError(f"{label}: state JSON must not contain a BOM")
+        raise WireError(f"{label}: {field} JSON must not contain a BOM")
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
-        raise WireError(f"{label}: state is not valid UTF-8") from exc
+        raise WireError(f"{label}: {field} is not valid UTF-8") from exc
 
     def pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
         result: dict[str, Any] = {}
         for key, item in items:
             if key in result:
-                raise WireError(f"{label}: state contains a duplicate key")
+                raise WireError(f"{label}: {field} contains a duplicate key")
             result[key] = item
         return result
 
     def integer(token: str) -> int:
         value = int(token)
         if abs(value) > MAXIMUM_SAFE_INTEGER:
-            raise WireError(f"{label}: state contains an unsafe integer")
+            raise WireError(f"{label}: {field} contains an unsafe integer")
         return value
 
     def finite(token: str) -> float:
         value = float(token)
         if not math.isfinite(value):
-            raise WireError(f"{label}: state contains a non-finite number")
+            raise WireError(f"{label}: {field} contains a non-finite number")
         return value
 
     try:
@@ -902,18 +1031,16 @@ def _decode_state(
             parse_int=integer,
             parse_float=finite,
             parse_constant=lambda _token: _raise(
-                WireError, f"{label}: state contains a non-finite number"
+                WireError, f"{label}: {field} contains a non-finite number"
             ),
         )
         validate_json_value(value, maximum_depth=maximum_json_depth)
     except WireError:
         raise
     except (json.JSONDecodeError, JsonTreeError, ValueError) as exc:
-        raise WireError(f"{label}: state JSON is invalid") from exc
-    if not isinstance(value, dict):
-        raise WireError(f"{label}: state must be a JSON object")
+        raise WireError(f"{label}: {field} JSON is invalid") from exc
     if _contains_lone_surrogate(value):
-        raise WireError(f"{label}: state contains a lone surrogate")
+        raise WireError(f"{label}: {field} contains a lone surrogate")
     return value
 
 

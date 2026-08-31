@@ -10,6 +10,7 @@ from __future__ import annotations
 import math
 import re
 import struct
+import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -21,14 +22,16 @@ from .errors import ConfigurationError
 from .json_tree import validate_json_value
 
 
-DISPLAY_CODEC = "scene-engine-display-node@7"
-DISPLAY_CHECKPOINT_SCHEMA = "scene-engine-display-checkpoint@7"
-DISPLAY_COMMAND_STREAM_SCHEMA = "scene-engine-display-command-stream@7"
-DISPLAY_COMMAND_SCHEMA = "scene-engine-node-command@7"
+DISPLAY_CODEC = "scene-engine-display-node@8"
+DISPLAY_CHECKPOINT_SCHEMA = "scene-engine-display-checkpoint@8"
+DISPLAY_COMMAND_STREAM_SCHEMA = "scene-engine-display-command-stream@8"
+DISPLAY_COMMAND_SCHEMA = "scene-engine-node-command@8"
 MAXIMUM_NODE_ID = 0xFFFFFFFE
 NULL_NODE_ID = 0xFFFFFFFF
 MAXIMUM_PREFAB_ID_BYTES = 192
 MAXIMUM_SCENE_NAME_BYTES = 96
+MAXIMUM_PROPERTY_NAME_BYTES = 192
+MAXIMUM_EVENT_NAME_BYTES = 192
 MAXIMUM_NODE_DEPTH = 128
 
 _NODE_SEGMENT = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
@@ -37,6 +40,10 @@ _HASH = re.compile(r"^[0-9a-f]{64}$")
 _MATRIX4_F32 = struct.Struct("<16f")
 _IDENTITY_MATRIX4_F32 = np.eye(4, dtype="<f4", order="F")
 _IDENTITY_MATRIX4_F32.flags.writeable = False
+_EMPTY_EVENT_PAYLOAD: Mapping[str, Any] = MappingProxyType({})
+_FORBIDDEN_MESSAGE_NAMES = frozenset(
+    {"__proto__", "prototype", "constructor"}
+)
 _COMMAND_KINDS = frozenset(
     {
         "node-create",
@@ -44,6 +51,9 @@ _COMMAND_KINDS = frozenset(
         "node-set-parent",
         "node-set-visible",
         "node-set-state",
+        "node-set-property",
+        "node-unset-property",
+        "node-emit-event",
         "node-replace-prefab",
         "node-remove",
     }
@@ -784,6 +794,16 @@ class DisplayMatrixPool:
                     maximum_json_depth,
                     _maximum_json_depth(command.fields["state"]),
                 )
+            elif command.kind == "node-set-property":
+                maximum_json_depth = max(
+                    maximum_json_depth,
+                    _maximum_json_depth(command.fields["value"]),
+                )
+            elif command.kind == "node-emit-event":
+                maximum_json_depth = max(
+                    maximum_json_depth,
+                    _maximum_json_depth(command.fields["payload"]),
+                )
         if create_targets != self._pending_created_ids:
             raise ConfigurationError(
                 "node-create commands must exactly match newly appended Node IDs"
@@ -926,6 +946,45 @@ class DisplayCommand:
     def set_state(cls, node_id: int, state: Mapping[str, Any]) -> "DisplayCommand":
         return _new_display_command(
             kind="node-set-state", node_id=node_id, state=state
+        )
+
+    @classmethod
+    def set_property(
+        cls, node_id: int, property_name: str, value: Any
+    ) -> "DisplayCommand":
+        """Replace one top-level authority-state property with a JSON value."""
+
+        return _new_display_command(
+            kind="node-set-property",
+            node_id=node_id,
+            property_name=property_name,
+            value=value,
+        )
+
+    @classmethod
+    def unset_property(cls, node_id: int, property_name: str) -> "DisplayCommand":
+        """Remove one top-level authority-state property."""
+
+        return _new_display_command(
+            kind="node-unset-property",
+            node_id=node_id,
+            property_name=property_name,
+        )
+
+    @classmethod
+    def emit_event(
+        cls,
+        node_id: int,
+        event_name: str,
+        payload: Mapping[str, Any] = _EMPTY_EVENT_PAYLOAD,
+    ) -> "DisplayCommand":
+        """Publish one transient, ordered event for an authority Node."""
+
+        return _new_display_command(
+            kind="node-emit-event",
+            node_id=node_id,
+            event_name=event_name,
+            payload=payload,
         )
 
     @classmethod
@@ -1310,6 +1369,9 @@ def _command_from_record(value: Any) -> DisplayCommand:
         "node-set-parent": {"parent_node_id"},
         "node-set-visible": {"visible"},
         "node-set-state": {"state"},
+        "node-set-property": {"property_name", "value"},
+        "node-unset-property": {"property_name"},
+        "node-emit-event": {"event_name", "payload"},
         "node-replace-prefab": {"prefab_id", "state"},
         "node-remove": set(),
     }
@@ -1383,6 +1445,24 @@ def _normalize_command_fields(
         if actual != {"state"}:
             raise ConfigurationError("node-set-state fields are invalid")
         return {"state": _plain_state(fields["state"])}
+    if kind == "node-set-property":
+        if actual != {"property_name", "value"}:
+            raise ConfigurationError("node-set-property fields are invalid")
+        return {
+            "property_name": _property_name(fields["property_name"]),
+            "value": _plain_json_value(fields["value"]),
+        }
+    if kind == "node-unset-property":
+        if actual != {"property_name"}:
+            raise ConfigurationError("node-unset-property fields are invalid")
+        return {"property_name": _property_name(fields["property_name"])}
+    if kind == "node-emit-event":
+        if actual != {"event_name", "payload"}:
+            raise ConfigurationError("node-emit-event fields are invalid")
+        return {
+            "event_name": _event_name(fields["event_name"]),
+            "payload": _plain_state(fields["payload"], label="event payload"),
+        }
     if kind == "node-replace-prefab":
         if actual != {"prefab_id", "state"}:
             raise ConfigurationError("node-replace-prefab fields are invalid")
@@ -1641,12 +1721,52 @@ def _scene_name(value: Any) -> str:
     return value
 
 
-def _plain_state(value: Any) -> Mapping[str, Any]:
+def _plain_state(
+    value: Any, *, label: str = "authority state"
+) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
-        raise ConfigurationError("authority state must be a plain JSON object")
+        raise ConfigurationError(f"{label} must be a plain JSON object")
+    normalized = _plain_json_value(value)
+    assert isinstance(normalized, Mapping)
+    return normalized
+
+
+def _plain_json_value(value: Any) -> Any:
     owned = _thaw(value)
     validate_json_value(owned)
     return _freeze(owned)
+
+
+def _message_name(value: Any, field: str, maximum_bytes: int) -> str:
+    if not isinstance(value, str) or not value:
+        raise ConfigurationError(f"{field} must be a non-empty string")
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ConfigurationError(f"{field} must be valid Unicode") from exc
+    if len(encoded) > maximum_bytes:
+        raise ConfigurationError(
+            f"{field} exceeds {maximum_bytes} UTF-8 bytes"
+        )
+    if value in _FORBIDDEN_MESSAGE_NAMES:
+        raise ConfigurationError(f"{field} is forbidden")
+    if any(
+        character.isspace()
+        or unicodedata.category(character).startswith("C")
+        for character in value
+    ):
+        raise ConfigurationError(
+            f"{field} must not contain whitespace or Unicode category C characters"
+        )
+    return value
+
+
+def _property_name(value: Any) -> str:
+    return _message_name(value, "property_name", MAXIMUM_PROPERTY_NAME_BYTES)
+
+
+def _event_name(value: Any) -> str:
+    return _message_name(value, "event_name", MAXIMUM_EVENT_NAME_BYTES)
 
 
 def _finite_number(value: Any, field: str) -> float:
@@ -1814,6 +1934,10 @@ def _thaw(value: Any) -> Any:
 def _command_json_depth(command: DisplayCommand) -> int:
     if command.kind in {"node-create", "node-set-state", "node-replace-prefab"}:
         return _maximum_json_depth(command.fields["state"])
+    if command.kind == "node-set-property":
+        return _maximum_json_depth(command.fields["value"])
+    if command.kind == "node-emit-event":
+        return _maximum_json_depth(command.fields["payload"])
     return 0
 
 

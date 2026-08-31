@@ -30,7 +30,7 @@ from .json_tree import MAXIMUM_SAFE_INTEGER, WORLD_TREE_SCHEMA
 
 
 WIRE_SCHEMA = "scene-engine-wire@3"
-DISPLAY_CODEC = "scene-engine-display-node@7"
+DISPLAY_CODEC = "scene-engine-display-node@8"
 WIRE_MAGIC = b"SENG"
 WIRE_MAJOR_VERSION = 3
 _PACKET_HEADER = struct.Struct("<4sBBHIHH")

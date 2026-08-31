@@ -1,4 +1,4 @@
-"""Scene Engine 0.17: fixed-step world and Display command publication."""
+"""Scene Engine 0.18: fixed-step world and Display command publication."""
 
 from .clock import ManualClock, SystemMonotonicClock
 from .errors import (
@@ -42,7 +42,7 @@ from .runtime import (
 )
 
 
-__version__ = "0.17.0"
+__version__ = "0.18.0"
 
 __all__ = [
     "CheckpointContext",

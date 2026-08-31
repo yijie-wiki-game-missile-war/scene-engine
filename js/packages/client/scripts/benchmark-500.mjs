@@ -66,7 +66,7 @@ function checkpointPacket(nodes, matrixPoolSize) {
       kind: 'display_checkpoint',
       encoding: 'raw',
       value: encodeDisplayCheckpoint({
-        schema: 'scene-engine-display-checkpoint@7',
+        schema: 'scene-engine-display-checkpoint@8',
         scene_name: 'benchmark',
         ...HASHES,
         last_command_seq: 0,
@@ -87,7 +87,7 @@ function commitPacket({
   commands,
 }) {
   const records = commands.map((command, index) => ({
-    schema: 'scene-engine-node-command@7',
+    schema: 'scene-engine-node-command@8',
     command_seq: baseCommandSeq + index + 1,
     source_tick: commitSeq,
     ...command,
@@ -121,7 +121,7 @@ function commitPacket({
       kind: 'display_command_stream',
       encoding: 'raw',
       value: encodeDisplayCommandStream({
-        schema: 'scene-engine-display-command-stream@7',
+        schema: 'scene-engine-display-command-stream@8',
         base_command_seq: baseCommandSeq,
         last_command_seq: lastCommandSeq,
         matrix_pool_size: matrixPoolSize,
@@ -177,6 +177,22 @@ function createBenchmarkSessionFactory(state) {
       setNodeState(record) {
         const node = requireNode(record.nodeId);
         state.nodes.set(record.nodeId, { ...node, state: record.state });
+      },
+      setNodeProperty(record) {
+        const node = requireNode(record.nodeId);
+        state.nodes.set(record.nodeId, {
+          ...node,
+          state: Object.freeze({ ...node.state, [record.propertyName]: record.value }),
+        });
+      },
+      unsetNodeProperty(record) {
+        const node = requireNode(record.nodeId);
+        const nextState = { ...node.state };
+        delete nextState[record.propertyName];
+        state.nodes.set(record.nodeId, { ...node, state: Object.freeze(nextState) });
+      },
+      emitNodeEvent(record) {
+        requireNode(record.nodeId);
       },
       replaceNodePrefab(record) {
         const node = requireNode(record.nodeId);

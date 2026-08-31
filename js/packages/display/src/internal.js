@@ -1,5 +1,10 @@
 import { fail } from './runtime/health.js';
 
+const PROTOCOL_NAME_ENCODER = new TextEncoder();
+const INVALID_PROTOCOL_NAME_CHARACTER = /[\p{White_Space}\p{C}]/u;
+const DANGEROUS_PROTOCOL_NAMES = new Set(['__proto__', 'prototype', 'constructor']);
+const MAXIMUM_PROTOCOL_NAME_BYTES = 192;
+
 export function isPlainRecord(value) {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
   const prototype = Object.getPrototypeOf(value);
@@ -22,6 +27,36 @@ export function exactKeys(value, required, optional, code) {
 export function nonemptyString(value, code) {
   if (typeof value !== 'string' || value.length === 0 || value.trim() !== value) fail(code);
   return value;
+}
+
+/** Closed wire-level property/event name shared by Definitions and Authority. */
+export function protocolName(value, code) {
+  if (typeof value !== 'string' || value.length === 0
+      || PROTOCOL_NAME_ENCODER.encode(value).byteLength > MAXIMUM_PROTOCOL_NAME_BYTES
+      || INVALID_PROTOCOL_NAME_CHARACTER.test(value)
+      || DANGEROUS_PROTOCOL_NAMES.has(value)) {
+    fail(code);
+  }
+  return value;
+}
+
+export function compareUtf8Strings(left, right) {
+  const a = PROTOCOL_NAME_ENCODER.encode(left);
+  const b = PROTOCOL_NAME_ENCODER.encode(right);
+  const length = Math.min(a.length, b.length);
+  for (let index = 0; index < length; index += 1) {
+    if (a[index] !== b[index]) return a[index] - b[index];
+  }
+  return a.length - b.length;
+}
+
+export function protocolNameSet(value, code) {
+  if (!Array.isArray(value)) fail(code);
+  const names = value.map((entry) => protocolName(entry, code)).sort(compareUtf8Strings);
+  for (let index = 1; index < names.length; index += 1) {
+    if (names[index - 1] === names[index]) fail(code);
+  }
+  return Object.freeze(names);
 }
 
 export function finiteNumber(value, code) {

@@ -44,9 +44,10 @@
   ],
   "prefabs": [
     {
-      "schema": "scene-engine-prefab-definition@4",
+      "schema": "scene-engine-prefab-definition@5",
       "id": "unit.basic",
       "gameplayType": "unit.basic",
+      "events": ["explode"],
       "root": {
         "components": [
           {
@@ -136,92 +137,106 @@
       "typeId": "animation.player@1",
       "allowMultiple": true,
       "tickPhase": null,
-      "drivesTransform": false
+      "drivesTransform": false,
+      "eventNames": []
     },
     {
       "typeId": "behavior.billboard@2",
       "allowMultiple": false,
       "tickPhase": "before-render",
-      "drivesTransform": true
+      "drivesTransform": true,
+      "eventNames": []
     },
     {
       "typeId": "behavior.look-at@1",
       "allowMultiple": false,
       "tickPhase": "before-render",
-      "drivesTransform": true
+      "drivesTransform": true,
+      "eventNames": []
     },
     {
       "typeId": "render.ambient-light@1",
       "allowMultiple": true,
       "tickPhase": null,
-      "drivesTransform": false
+      "drivesTransform": false,
+      "eventNames": []
     },
     {
       "typeId": "render.background@1",
       "allowMultiple": false,
       "tickPhase": null,
-      "drivesTransform": false
+      "drivesTransform": false,
+      "eventNames": []
     },
     {
       "typeId": "render.camera@1",
       "allowMultiple": false,
       "tickPhase": null,
-      "drivesTransform": false
+      "drivesTransform": false,
+      "eventNames": []
     },
     {
       "typeId": "render.directional-light@1",
       "allowMultiple": true,
       "tickPhase": null,
-      "drivesTransform": false
+      "drivesTransform": false,
+      "eventNames": []
     },
     {
       "typeId": "render.mesh@1",
       "allowMultiple": true,
       "tickPhase": null,
-      "drivesTransform": false
+      "drivesTransform": false,
+      "eventNames": []
     },
     {
       "typeId": "render.model@2",
       "allowMultiple": true,
       "tickPhase": null,
-      "drivesTransform": false
+      "drivesTransform": false,
+      "eventNames": []
     },
     {
       "typeId": "render.particle@2",
       "allowMultiple": true,
       "tickPhase": null,
-      "drivesTransform": false
+      "drivesTransform": false,
+      "eventNames": []
     },
     {
       "typeId": "render.point-light@1",
       "allowMultiple": true,
       "tickPhase": null,
-      "drivesTransform": false
+      "drivesTransform": false,
+      "eventNames": []
     },
     {
       "typeId": "render.spot-light@1",
       "allowMultiple": true,
       "tickPhase": null,
-      "drivesTransform": false
+      "drivesTransform": false,
+      "eventNames": []
     },
     {
       "typeId": "render.sprite@3",
       "allowMultiple": true,
       "tickPhase": null,
-      "drivesTransform": false
+      "drivesTransform": false,
+      "eventNames": []
     },
     {
       "typeId": "render.surface@1",
       "allowMultiple": true,
       "tickPhase": null,
-      "drivesTransform": false
+      "drivesTransform": false,
+      "eventNames": []
     }
   ],
   "authorityStateSchemas": [
     {
       "gameplayType": "unit.basic",
       "schemaId": "unit.basic.state",
-      "revision": 1
+      "revision": 2
     }
   ]
 }

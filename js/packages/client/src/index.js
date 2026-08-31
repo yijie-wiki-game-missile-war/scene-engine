@@ -17,6 +17,9 @@ const AUTHORITY_METHOD = Object.freeze({
   'node-set-parent': 'setNodeParent',
   'node-set-visible': 'setNodeVisible',
   'node-set-state': 'setNodeState',
+  'node-set-property': 'setNodeProperty',
+  'node-unset-property': 'unsetNodeProperty',
+  'node-emit-event': 'emitNodeEvent',
   'node-replace-prefab': 'replaceNodePrefab',
   'node-remove': 'removeNode',
 });
@@ -523,6 +526,22 @@ function authorityPayload(command) {
       return Object.freeze({ nodeId: command.nodeId, visible: command.visible });
     case 'node-set-state':
       return Object.freeze({ nodeId: command.nodeId, state: command.state });
+    case 'node-set-property':
+      return Object.freeze({
+        nodeId: command.nodeId,
+        propertyName: command.propertyName,
+        value: command.value,
+      });
+    case 'node-unset-property':
+      return Object.freeze({ nodeId: command.nodeId, propertyName: command.propertyName });
+    case 'node-emit-event':
+      return Object.freeze({
+        nodeId: command.nodeId,
+        eventName: command.eventName,
+        payload: command.payload,
+        commandSeq: command.commandSeq,
+        sourceTick: command.sourceTick,
+      });
     case 'node-replace-prefab':
       return Object.freeze({
         nodeId: command.nodeId,

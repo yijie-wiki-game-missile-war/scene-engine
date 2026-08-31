@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { BehaviourComponent } from '../src/component/behaviour-component.js';
+import { Component } from '../src/component/component.js';
 import { ComponentScheduler } from '../src/component/component-scheduler.js';
 import { ComponentRegistry } from '../src/component/component-registry.js';
 import { NodeGraph } from '../src/node/node-graph.js';
@@ -143,11 +144,69 @@ test('Registry rejects final overrides and RenderComponent handlers', () => {
     static typeId = 'render.test-bad@1';
     tick() {}
   }
+  class EventRender extends RenderComponent {
+    static typeId = 'render.test-event@1';
+    static eventNames = ['hit'];
+  }
+  class HandlerRender extends RenderComponent {
+    static typeId = 'render.test-event-handler@1';
+    onEvent() {}
+  }
+  class PlainEventComponent extends Component {
+    static typeId = 'test.plain-event@1';
+    static eventNames = ['hit'];
+  }
   const registry = new ComponentRegistry();
   assert.throws(() => registry.register({ ComponentClass: FinalOverride }),
     { code: 'display-component-final-method-override' });
   assert.throws(() => registry.register({ ComponentClass: BadRender }),
     { code: 'display-render-component-handler-forbidden' });
+  assert.throws(() => registry.register({ ComponentClass: EventRender }),
+    { code: 'display-render-component-handler-forbidden' });
+  assert.throws(() => registry.register({ ComponentClass: HandlerRender }),
+    { code: 'display-render-component-handler-forbidden' });
+  assert.throws(() => registry.register({ ComponentClass: PlainEventComponent }),
+    { code: 'display-component-event-handler-forbidden' });
+});
+
+test('Registry normalizes Behaviour event subscriptions into catalog identity', () => {
+  class EventBehaviour extends BehaviourComponent {
+    static typeId = 'test.events@1';
+    static eventNames = ['zeta', 'event.with.dot', 'alpha'];
+  }
+  const registry = new ComponentRegistry();
+  registry.register({ ComponentClass: EventBehaviour });
+  const descriptor = registry.require(EventBehaviour.typeId);
+  assert.deepEqual(descriptor.eventNames, ['alpha', 'event.with.dot', 'zeta']);
+  assert.equal(Object.isFrozen(descriptor.eventNames), true);
+  assert.deepEqual(registry.catalogEntries(), [{
+    typeId: EventBehaviour.typeId,
+    allowMultiple: false,
+    tickPhase: null,
+    drivesTransform: false,
+    eventNames: ['alpha', 'event.with.dot', 'zeta'],
+  }]);
+
+  for (const eventNames of [
+    null,
+    'hit',
+    ['same', 'same'],
+    [''],
+    ['has space'],
+    ['line\nfeed'],
+    ['zero\u200bwidth'],
+    ['__proto__'],
+    ['x'.repeat(193)],
+  ]) {
+    class InvalidEvents extends BehaviourComponent {
+      static typeId = `test.invalid-events-${String(eventNames)}@1`;
+      static eventNames = eventNames;
+    }
+    assert.throws(
+      () => new ComponentRegistry().register({ ComponentClass: InvalidEvents }),
+      { code: 'display-component-event-names-invalid' },
+    );
+  }
 });
 
 test('final Component methods reject class fields, constructor shadows, and runtime assignment', () => {

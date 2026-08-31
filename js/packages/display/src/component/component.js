@@ -150,6 +150,23 @@ export function replaceComponentProperties(component, properties) {
   return component[REPLACE_PROPERTIES](COMPONENT_MUTATION_TOKEN, properties);
 }
 
+/** Package-private synchronous event barrier used only by AuthorityPort. */
+export function dispatchComponentEvent(component, event) {
+  if (!(component instanceof Component) || component._disposed) {
+    fail('display-component-invalid');
+  }
+  const attachment = ATTACHMENTS.get(component);
+  if (!component._attached || !attachment || !attachment.registered) {
+    fail('display-component-not-attached');
+  }
+  if (!component._enabled) return;
+  if (typeof component.onEvent !== 'function') fail('display-component-event-handler-invalid');
+  assertSynchronous(
+    component.onEvent(attachment.context.publicDisplay, event),
+    'display-component-async-handler',
+  );
+}
+
 function dispatchAnimationCommand(component, operation, playerKey, animationId = null) {
   if (component._disposed) fail('display-component-disposed');
   nonemptyString(playerKey, 'display-animation-command-invalid');

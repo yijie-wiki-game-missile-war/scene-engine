@@ -21,7 +21,7 @@ import { PrefabInstantiator } from './prefab-instantiator.js';
 import { Scene } from './scene.js';
 import { SceneLoader } from './scene-loader.js';
 
-export const DISPLAY_RUNTIME_SCHEMA = 'scene-engine-display-node@7';
+export const DISPLAY_RUNTIME_SCHEMA = 'scene-engine-display-node@8';
 export const DISPLAY_SUMMARY_SCHEMA = 'scene-engine-display-summary@1';
 const ZERO_CURSOR = Object.freeze({ commitSeq: 0, sourceTick: 0, lastCommandSeq: 0 });
 const DISPLAY_OPTION_KEYS = Object.freeze({

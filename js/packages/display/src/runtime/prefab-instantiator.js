@@ -192,6 +192,15 @@ export class PrefabInstantiator {
 
   getScope(root) { return this._scopes.get(root) ?? null; }
 
+  requireRootRecord(root) {
+    const scope = this.getScope(root);
+    const record = scope?.records.get(ROOT_INSTANCE_PATH) ?? null;
+    if (!scope || scope.disposed || record?.compiled !== scope.compiled) {
+      fail('display-prefab-scope-missing');
+    }
+    return record;
+  }
+
   prepareExistingRoot({ root, compiled, initialState = {}, authorityOwnerName = null,
     attach = true, componentContext = this._componentContext, validatedPatch = null }) {
     if (this._scopes.has(root)) fail('display-prefab-scope-duplicate');

@@ -16,11 +16,12 @@ import { assertNodeName } from '../src/node/node-name.js';
 import { compilePrefabCatalog } from '../src/resource/prefab-compiler.js';
 
 function nestingPrefab({ id, gameplayType = id.replaceAll('/', '.'), childName = null,
-  prefabInstances = [], prefabSlots = [], resolveState = undefined } = {}) {
+  events = [], prefabInstances = [], prefabSlots = [], resolveState = undefined } = {}) {
   return definePrefab({
     schema: PREFAB_DEFINITION_SCHEMA,
     id,
     gameplayType,
+    events,
     root: {
       components: [],
       children: childName === null ? [] : [{ localName: childName, components: [], children: [] }],
@@ -102,10 +103,10 @@ test('Prefab compile rejects non-identity root, duplicate local paths, and unkno
     { code: 'display-prefab-local-name-duplicate' });
 });
 
-test('Prefab schema 4 fails closed on schema 3 and normalizes fixed and dynamic declarations', () => {
-  assert.equal(PREFAB_DEFINITION_SCHEMA, 'scene-engine-prefab-definition@4');
+test('Prefab schema 5 fails closed on schema 4 and normalizes event/fixed/dynamic declarations', () => {
+  assert.equal(PREFAB_DEFINITION_SCHEMA, 'scene-engine-prefab-definition@5');
   assert.throws(() => definePrefab({
-    schema: 'scene-engine-prefab-definition@3',
+    schema: 'scene-engine-prefab-definition@4',
     id: 'nested/legacy',
     gameplayType: 'nested.legacy',
     root: { components: [], children: [] },
@@ -124,6 +125,7 @@ test('Prefab schema 4 fails closed on schema 3 and normalizes fixed and dynamic 
   });
   const outer = nestingPrefab({
     id: 'nested/outer',
+    events: ['zeta', 'event.with.dot', 'alpha'],
     prefabInstances: [
       { key: 'middle', parentLocalPath: null, prefabId: middle.id },
       { key: 'shared', parentLocalPath: null, prefabId: leaf.id },
@@ -139,6 +141,9 @@ test('Prefab schema 4 fails closed on schema 3 and normalizes fixed and dynamic 
   assert.strictEqual(compilePrefabCatalog({ prefabRegistry, componentRegistry: components,
     resourceRegistry: resources }), catalog);
   const compiled = catalog.require(outer.id);
+  assert.deepEqual(outer.events, ['alpha', 'event.with.dot', 'zeta']);
+  assert.strictEqual(outer.describe().events, outer.events);
+  assert.strictEqual(compiled.events, outer.events);
   assert.strictEqual(compiled.prefabInstances[0].compiledPrefab,
     catalog.require(middle.id));
   assert.strictEqual(compiled.prefabInstances[1].compiledPrefab,
@@ -157,6 +162,39 @@ test('Prefab schema 4 fails closed on schema 3 and normalizes fixed and dynamic 
     resourceRegistry: resources });
   assert.notStrictEqual(refreshed, catalog);
   assert.equal(refreshed.size, 4);
+});
+
+test('Prefab event allowlist rejects duplicates, unsafe names, whitespace, controls, and overflow', () => {
+  const root = { components: [], children: [] };
+  for (const events of [
+    'event',
+    ['same', 'same'],
+    [''],
+    ['has space'],
+    ['line\nfeed'],
+    ['zero\u200bwidth'],
+    ['__proto__'],
+    ['prototype'],
+    ['constructor'],
+    ['x'.repeat(193)],
+  ]) {
+    assert.throws(() => definePrefab({
+      schema: PREFAB_DEFINITION_SCHEMA,
+      id: 'events/invalid',
+      gameplayType: 'events.invalid',
+      events,
+      root,
+    }), { code: 'display-prefab-events-invalid' });
+  }
+  const maximum = definePrefab({
+    schema: PREFAB_DEFINITION_SCHEMA,
+    id: 'events/maximum',
+    gameplayType: 'events.maximum',
+    events: ['x'.repeat(192), '爆炸'],
+    root,
+  });
+  assert.deepEqual(maximum.events, ['x'.repeat(192), '爆炸']);
+  assert.equal(Object.isFrozen(maximum.events), true);
 });
 
 test('Prefab catalog rejects missing, cyclic, invalid mount, key, policy, and path declarations', () => {

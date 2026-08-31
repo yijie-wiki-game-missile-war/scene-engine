@@ -97,7 +97,7 @@ def test_wire_v3_checkpoint_contains_world_and_binary_display_baseline_only() ->
     assert raw[4] == WIRE_MAJOR_VERSION == 3
     assert packet.kind is PacketKind.CHECKPOINT
     assert packet.header["schema"] == WIRE_SCHEMA == "scene-engine-wire@3"
-    assert packet.header["display_codec"] == DISPLAY_CODEC == "scene-engine-display-node@7"
+    assert packet.header["display_codec"] == DISPLAY_CODEC == "scene-engine-display-node@8"
     assert [item.kind for item in packet.attachments] == [
         AttachmentKind.WORLD_SNAPSHOT,
         AttachmentKind.DISPLAY_CHECKPOINT,
@@ -136,19 +136,19 @@ def test_frozen_wire_v3_golden_packets_round_trip_exact_bytes() -> None:
     } == identity
 
 
-def test_frozen_display_v7_corpus_validates_and_malformed_records_fail() -> None:
-    root = FIXTURES / "display-v7"
+def test_frozen_display_v8_corpus_validates_and_malformed_records_fail() -> None:
+    root = FIXTURES / "display-v8"
     checkpoint_value = json.loads((root / "checkpoint.json").read_text())
     command_value = json.loads((root / "command-tick.json").read_text())
     nodes = validate_display_checkpoint(checkpoint_value)
     commands = validate_display_command_stream(
         command_value,
         expected_source_tick=1,
-        expected_last_command_seq=7,
+        expected_last_command_seq=11,
     )
     assert len(nodes) == 3
     assert np.asarray(checkpoint_value["matrix_pool"], dtype="<f4").shape == (3, 4, 4)
-    assert len(commands) == 7
+    assert len(commands) == 11
     dirty = np.asarray(command_value["dirty_matrices"], dtype="<f4").reshape((-1, 16))
     assert dirty[0, 4] == 0.25
     assert dirty[0, 12] == 1.5
@@ -159,7 +159,7 @@ def test_frozen_display_v7_corpus_validates_and_malformed_records_fail() -> None
             validate_display_command_stream(
                 malformed,
                 expected_source_tick=1,
-                expected_last_command_seq=7,
+                expected_last_command_seq=11,
             )
 
 

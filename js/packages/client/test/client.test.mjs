@@ -58,9 +58,9 @@ test('root export surface remains the exact client allowlist', () => {
   assert.equal('maximumNodeStateBytes' in DEFAULT_ENGINE_LIMITS, false);
 });
 
-test('client package and Display codec versions are the frozen matrix-native release', async () => {
+test('client package and Display codec versions are the property-and-event release', async () => {
   const packageJson = JSON.parse(await readFile(new URL('../package.json', import.meta.url)));
-  assert.equal(packageJson.version, '0.14.0');
+  assert.equal(packageJson.version, '0.15.0');
   assert.throws(() => encodePacket('engine.checkpoint', {
     schema: 'scene-engine-wire@3',
     type: 'engine.checkpoint',
@@ -80,7 +80,7 @@ test('wire v3 fixture has binary display checkpoint and ACK command cursor', asy
   const raw = new Uint8Array(await readFile(`${FIXTURES}/checkpoint.bin`));
   const decoded = readEnginePacket(raw);
   assert.equal(decoded.header.schema, 'scene-engine-wire@3');
-  assert.equal(decoded.header.display_codec, 'scene-engine-display-node@7');
+  assert.equal(decoded.header.display_codec, 'scene-engine-display-node@8');
   assert.deepEqual(decoded.attachments.map(({ kind, encoding }) => [kind, encoding]), [
     ['world_snapshot', 'json'],
     ['display_checkpoint', 'raw'],
@@ -170,15 +170,23 @@ test('applies canonical Python wire@3 fixtures through exact Authority payloads'
     checkpoint.commit.lastCommandSeq,
     tick.commit.lastCommandSeq,
     input.commit.lastCommandSeq,
-  ], [0, 7, 7]);
+  ], [0, 11, 11]);
   assert.deepEqual(sessions[0].log.map(([kind]) => kind), [
     'installScene', 'installNodeMatrixPool', 'createNode', 'createNode', 'createNode',
     'activate', 'start', 'summary',
     'begin', 'applyNodeTransformBatch', 'createNode', 'setNodeTransforms',
     'setNodeParent', 'setNodeVisible',
-    'setNodeState', 'replaceNodePrefab', 'removeNode', 'seal', 'summary',
+    'setNodeState', 'replaceNodePrefab', 'setNodeProperty', 'setNodeProperty',
+    'unsetNodeProperty', 'emitNodeEvent', 'removeNode', 'seal', 'summary',
     'begin', 'applyNodeTransformBatch', 'seal', 'summary',
   ]);
+  assert.deepEqual(sessions[0].log.find(([kind]) => kind === 'emitNodeEvent')[1], {
+    nodeId: 1,
+    eventName: 'explode',
+    payload: { critical: true, damage: 3 },
+    commandSeq: 10,
+    sourceTick: 1,
+  });
   assert.equal(client.currentWorldState().state.stable.value, 8);
 });
 
@@ -489,19 +497,27 @@ test('commit stages one contiguous tensor then applies ID commands in order befo
     command('node-set-parent', 3, 1, { parent_node_id: 1 }),
     command('node-set-visible', 4, 1, { visible: false }),
     command('node-set-state', 5, 1, { state: { mode: 'active' } }),
-    command('node-replace-prefab', 6, 1, {
+    command('node-set-property', 6, 1, {
+      property_name: 'stats.gold', value: { amount: 7 },
+    }),
+    command('node-unset-property', 7, 1, { property_name: 'mode' }),
+    command('node-emit-event', 8, 1, {
+      event_name: 'combat.exploded', payload: { damage: 3 },
+    }),
+    command('node-replace-prefab', 9, 1, {
       prefab_id: 'unit.variant/prefab@1', state: { variant: 2 },
     }),
-    command('node-remove', 7, 1),
+    command('node-remove', 10, 1),
   ];
   const result = client.applyPacket(commitPacket({ commands, matrixPoolSize: 2 }));
   const ack = readEnginePacket(result.ackPacket);
-  assert.equal(ack.header.last_command_seq, 7);
-  assert.equal(client.currentCommit().lastCommandSeq, 7);
+  assert.equal(ack.header.last_command_seq, 10);
+  assert.equal(client.currentCommit().lastCommandSeq, 10);
   assert.deepEqual(sessions[0].log.slice(6).map(([kind]) => kind), [
     'begin', 'applyNodeTransformBatch', 'createNode', 'setNodeTransforms',
     'setNodeParent', 'setNodeVisible',
-    'setNodeState', 'replaceNodePrefab', 'removeNode', 'seal', 'summary',
+    'setNodeState', 'setNodeProperty', 'unsetNodeProperty', 'emitNodeEvent',
+    'replaceNodePrefab', 'removeNode', 'seal', 'summary',
   ]);
   const batch = sessions[0].log.find(([kind]) => kind === 'applyNodeTransformBatch')[1];
   assert.deepEqual([...batch.nodeIds], [0, 1]);
@@ -511,6 +527,22 @@ test('commit stages one contiguous tensor then applies ID commands in order befo
   assert.deepEqual([...transformRecord.nodeIds], [0]);
   assert.deepEqual(Object.keys(transformRecord), ['nodeIds']);
   assert.equal(Object.isFrozen(transformRecord), true);
+  const propertyRecord = sessions[0].log.find(([kind]) => kind === 'setNodeProperty')[1];
+  assert.deepEqual(propertyRecord, {
+    nodeId: 0, propertyName: 'stats.gold', value: { amount: 7 },
+  });
+  assert.equal(Object.isFrozen(propertyRecord), true);
+  assert.equal(Object.isFrozen(propertyRecord.value), true);
+  const eventRecord = sessions[0].log.find(([kind]) => kind === 'emitNodeEvent')[1];
+  assert.deepEqual(eventRecord, {
+    nodeId: 0,
+    eventName: 'combat.exploded',
+    payload: { damage: 3 },
+    commandSeq: 8,
+    sourceTick: 1,
+  });
+  assert.equal(Object.isFrozen(eventRecord), true);
+  assert.equal(Object.isFrozen(eventRecord.payload), true);
 });
 
 test('one sparse transform batch stays one ordered Authority call', () => {
@@ -627,13 +659,44 @@ test('Authority failure calls gate.fail, emits no ACK, and makes client terminal
   );
 });
 
+test('property and event Authority failures call gate.fail and leave cursors unacknowledged', () => {
+  for (const [method, operation] of [
+    ['setNodeProperty', command('node-set-property', 1, 1, {
+      property_name: 'stats.gold', value: 7,
+    })],
+    ['unsetNodeProperty', command('node-unset-property', 1, 1, {
+      property_name: 'stats.gold',
+    })],
+    ['emitNodeEvent', command('node-emit-event', 1, 1, {
+      event_name: 'combat.exploded', payload: { damage: 3 },
+    })],
+  ]) {
+    const { factory, sessions } = createMockDisplayFactory({ failMethod: method });
+    const client = new SceneEngineClient({ createDisplaySession: factory });
+    client.applyPacket(checkpointPacket());
+    const before = client.capture();
+    assert.throws(
+      () => client.applyPacket(commitPacket({ commands: [operation] })),
+      (error) => error.code === 'packet-apply-failed',
+      method,
+    );
+    assert.deepEqual(sessions[0].log.slice(6).map(([kind]) => kind), [
+      'begin', 'applyNodeTransformBatch', method, 'fail',
+    ]);
+    assert.strictEqual(client.currentCommit(), before.commit);
+    assert.strictEqual(client.currentWorldState(), before.worldState);
+  }
+});
+
 test('Promise-returning Authority operation is a synchronous barrier failure', () => {
-  const { factory, sessions } = createMockDisplayFactory({ asyncMethod: 'setNodeVisible' });
+  const { factory, sessions } = createMockDisplayFactory({ asyncMethod: 'emitNodeEvent' });
   const client = new SceneEngineClient({ createDisplaySession: factory });
   client.applyPacket(checkpointPacket());
   assert.throws(
     () => client.applyPacket(commitPacket({
-      commands: [command('node-set-visible', 1, 1, { visible: false })],
+      commands: [command('node-emit-event', 1, 1, {
+        event_name: 'combat.exploded', payload: {},
+      })],
     })),
     (error) => error.code === 'authority-operation-async',
   );
@@ -704,6 +767,20 @@ test('display session accepts wrapper fields but extracts only the four required
     (error) => error.code === 'display-session-runtime-invalid',
   );
   assert.equal(missing.sessions[0].log.at(-1)[0], 'dispose');
+
+  const missingAuthority = createMockDisplayFactory();
+  const missingAuthorityClient = new SceneEngineClient({
+    createDisplaySession(metadata) {
+      const session = missingAuthority.factory(metadata);
+      delete session.authorityPort.emitNodeEvent;
+      return session;
+    },
+  });
+  assert.throws(
+    () => missingAuthorityClient.applyPacket(checkpointPacket()),
+    (error) => error.code === 'authority-port-invalid',
+  );
+  assert.equal(missingAuthority.sessions[0].log.at(-1)[0], 'dispose');
 });
 
 test('checkpoint rejects a Display catalog identity mismatch before scene installation', () => {

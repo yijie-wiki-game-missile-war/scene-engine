@@ -1,6 +1,6 @@
 # Current architecture
 
-Scene Engine 0.17 owns one deterministic publication and browser-projection boundary:
+Scene Engine 0.18 owns one deterministic publication and browser-projection boundary:
 
 ```text
 mutable product World
@@ -9,9 +9,9 @@ mutable product World
   -> scene-engine-wire@3 exact packet bytes
   -> recorder + sessions / bounded outbox
   -> one background transport sender
-  -> SceneEngineClient 0.14
+  -> SceneEngineClient 0.15
        -> immutable WorldState + cumulative ACK + O(1) DisplaySummary
-       -> DisplayRuntime 0.13 AuthorityPort
+       -> DisplayRuntime 0.14 AuthorityPort
             -> one NodeIndex / one NodeGraph / one Component scheduler / one RAF
             -> one private flat Prefab materialization ledger
             -> RenderSystem
@@ -50,8 +50,8 @@ send/close calls attached to the endpoint for which they were accepted.
 
 ## Product and catalog boundary
 
-Python publishes only complete authority roots and later structural/state mutations plus one vector-targeted Transform batch per
-commit. It owns each root's stream-stable numeric ID,
+Python publishes only complete authority roots and later structural/state/property/event mutations plus one vector-targeted
+Transform batch per commit. It owns each root's stream-stable numeric ID,
 existence, parent ID, row in one resident NumPy matrix pool, visibility, exact `prefabId` and complete authority state. It never
 publishes a `py/` name, URL, model, texture, material, light, camera or Prefab-local path. Display deterministically maps an
 authority ID to its internal canonical name `py/<id>`; authored Scene/Prefab paths and renderer `(nodeName,componentKey)` keys
@@ -63,9 +63,16 @@ invalid target or tensor therefore produces no ACK.
 
 Arts/product display code owns concrete Scene, Prefab, Resource and Component definitions. `PrefabDefinition.id` is the unique
 lookup key; `gameplayType` is non-unique state-contract metadata, so multiple Prefabs may share it. Prefab definition schema
-`scene-engine-prefab-definition@4` can compose exact child Prefab ids through fixed `prefabInstances` and bounded dynamic
+`scene-engine-prefab-definition@5` can compose exact child Prefab ids through fixed `prefabInstances`, bounded dynamic
 `prefabSlots`. The catalog compiler validates every fixed reference and every slot allowlist, including missing definitions and
 cycles, before the runtime installs any Scene.
+
+`node-set-property` and `node-unset-property` update one top-level member of the root's complete authority state, then reuse the
+same synchronous resolver/reconcile path as `node-set-state`; a dot in a name is literal, not a nested path. `null` is a value,
+so removal has its own command. Product code remains the durable owner and must include the resulting complete state in later
+checkpoints. `node-emit-event` is ordered but transient: the Prefab must declare the event, and only explicitly subscribed,
+enabled Behaviour components in that outer Prefab definition receive its frozen payload. Events are recorded in exact commit
+bytes and replay in order, but are absent from checkpoints.
 
 Python still owns only the outer `py/` authority root and sends its complete state. A synchronous resolver may derive fixed-child
 overrides and each slot's complete desired instance set; each child resolver then consumes the complete state assigned to that
@@ -92,7 +99,8 @@ For a commit, Client:
 
 1. validates the whole packet, World candidate, ID tables, matrix tensor and command stream;
 2. opens the exact Display commit gate;
-3. stages the one dirty tensor and synchronously applies ordered Authority operations; one Transform batch atomically consumes
+3. stages the one dirty tensor and synchronously applies ordered Authority operations, including property reconciliation and
+   event dispatch; one Transform batch atomically consumes
    the existing-row ID prefix at its sequence position, while create commands claim the new-row suffix;
 4. seals the cursor;
 5. publishes WorldState and cursors;

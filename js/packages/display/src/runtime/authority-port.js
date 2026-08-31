@@ -1,5 +1,13 @@
 import { AuthorityComponent } from '../component/authority-component.js';
-import { cloneAndFreeze, exactKeys } from '../internal.js';
+import { BehaviourComponent } from '../component/behaviour-component.js';
+import { dispatchComponentEvent } from '../component/component.js';
+import {
+  cloneAndFreeze,
+  exactKeys,
+  plainRecord,
+  protocolName,
+  safeInteger,
+} from '../internal.js';
 import { Node } from '../node/node.js';
 import { AUTHORITY_PREFIX } from '../node/node-name.js';
 import { AuthorityMatrixPool, authorityNodeId, authorityNodeName } from './authority-matrix-pool.js';
@@ -161,6 +169,76 @@ export class AuthorityPort {
     const record = exactKeys(command, ['nodeId', 'state'], [],
       'display-authority-command-invalid');
     return this._setNodeState(record.nodeId, record.state);
+  }
+
+  setNodeProperty(command) {
+    this._assertMutable?.();
+    const record = exactKeys(command, ['nodeId', 'propertyName', 'value'], [],
+      'display-authority-command-invalid');
+    const propertyName = protocolName(record.propertyName, 'display-property-name-invalid');
+    const { authority } = this._requireAuthority(record.nodeId);
+    const candidate = { ...authority.state };
+    Object.defineProperty(candidate, propertyName, {
+      configurable: true,
+      enumerable: true,
+      value: record.value,
+      writable: true,
+    });
+    return this._setNodeState(record.nodeId, candidate);
+  }
+
+  unsetNodeProperty(command) {
+    this._assertMutable?.();
+    const record = exactKeys(command, ['nodeId', 'propertyName'], [],
+      'display-authority-command-invalid');
+    const propertyName = protocolName(record.propertyName, 'display-property-name-invalid');
+    const { authority } = this._requireAuthority(record.nodeId);
+    if (!Object.hasOwn(authority.state, propertyName)) {
+      fail('display-authority-property-missing');
+    }
+    const candidate = { ...authority.state };
+    delete candidate[propertyName];
+    return this._setNodeState(record.nodeId, candidate);
+  }
+
+  emitNodeEvent(command) {
+    this._assertMutable?.();
+    const record = exactKeys(command, [
+      'nodeId', 'eventName', 'payload', 'commandSeq', 'sourceTick',
+    ], [], 'display-authority-command-invalid');
+    const eventName = protocolName(record.eventName, 'display-event-name-invalid');
+    const payload = cloneAndFreeze(
+      plainRecord(record.payload, 'display-event-payload-invalid'),
+      'display-event-payload-invalid',
+    );
+    const event = Object.freeze({
+      eventName,
+      payload,
+      commandSeq: safeInteger(record.commandSeq, 'display-event-command-seq-invalid', {
+        minimum: 0,
+      }),
+      sourceTick: safeInteger(record.sourceTick, 'display-event-source-tick-invalid', {
+        minimum: 0,
+      }),
+    });
+    const { node } = this._requireAuthority(record.nodeId);
+    const rootRecord = this._prefabInstantiator.requireRootRecord(node);
+    if (!rootRecord.compiled.definition.events.includes(eventName)) {
+      fail('display-authority-event-unknown');
+    }
+    // Resolve the complete target set before invoking user code. Nested Prefab records
+    // are deliberately excluded: one authority Node addresses only its outer Prefab.
+    const targets = [...rootRecord.componentByPath.values()]
+      .filter((component) => {
+        if (!(component instanceof BehaviourComponent)
+            || component.disposed || !component.enabled) return false;
+        const descriptor = rootRecord.compiled.componentRegistry.require(
+          component.constructor.typeId,
+        );
+        return descriptor.eventNames.includes(eventName);
+      });
+    for (const component of targets) dispatchComponentEvent(component, event);
+    this._onMutation?.();
   }
 
   _setNodeState(reference, stateValue) {

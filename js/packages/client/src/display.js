@@ -1,12 +1,12 @@
 import { encodeJSON, parseCanonicalJSON } from './wire.js';
 
-export const DISPLAY_CHECKPOINT_SCHEMA = 'scene-engine-display-checkpoint@7';
-export const DISPLAY_COMMAND_STREAM_SCHEMA = 'scene-engine-display-command-stream@7';
-export const NODE_COMMAND_SCHEMA = 'scene-engine-node-command@7';
+export const DISPLAY_CHECKPOINT_SCHEMA = 'scene-engine-display-checkpoint@8';
+export const DISPLAY_COMMAND_STREAM_SCHEMA = 'scene-engine-display-command-stream@8';
+export const NODE_COMMAND_SCHEMA = 'scene-engine-node-command@8';
 
 const CHECKPOINT_MAGIC = 'SDCP';
 const COMMAND_STREAM_MAGIC = 'SDCS';
-const BINARY_VERSION = 4;
+const BINARY_VERSION = 5;
 const FLOAT32_SCALAR = 1;
 const NULL_PARENT_INDEX = 0xffffffff;
 const NULL_STRING_LENGTH = 0xffff;
@@ -14,6 +14,7 @@ const COMMON_HEADER_BYTES = 8;
 const MATRIX_LENGTH = 16;
 const MATRIX_BYTES = MATRIX_LENGTH * 4;
 const MAXIMUM_COMMANDS_PER_PAYLOAD = 65_536;
+const MAXIMUM_MESSAGE_NAME_BYTES = 192;
 
 const OPCODE_BY_KIND = Object.freeze({
   'node-create': 1,
@@ -23,6 +24,9 @@ const OPCODE_BY_KIND = Object.freeze({
   'node-set-state': 5,
   'node-replace-prefab': 6,
   'node-remove': 7,
+  'node-set-property': 8,
+  'node-unset-property': 9,
+  'node-emit-event': 10,
 });
 const KIND_BY_OPCODE = Object.freeze(Object.fromEntries(
   Object.entries(OPCODE_BY_KIND).map(([kind, opcode]) => [opcode, kind]),
@@ -31,6 +35,8 @@ const KIND_BY_OPCODE = Object.freeze(Object.fromEntries(
 const SCENE_NAME = /^[a-z0-9][a-z0-9._-]*$/u;
 const PREFAB_ID = /^[a-z0-9][a-z0-9._@-]*(?:\/[a-z0-9][a-z0-9._@-]*)*$/u;
 const SHA256 = /^[0-9a-f]{64}$/u;
+const INVALID_MESSAGE_NAME_CHARACTER = /[\p{White_Space}\p{C}]/u;
+const DANGEROUS_NAMES = new Set(['__proto__', 'prototype', 'constructor']);
 const ENCODER = new TextEncoder();
 const DECODER = new TextDecoder('utf-8', { fatal: true });
 const OWNED_MATRIX_TENSORS = new WeakSet();
@@ -49,6 +55,9 @@ const COMMAND_FIELDS = Object.freeze({
   'node-set-parent': new Set([...NODE_COMMAND_BASE_FIELDS, 'parent_node_id']),
   'node-set-visible': new Set([...NODE_COMMAND_BASE_FIELDS, 'visible']),
   'node-set-state': new Set([...NODE_COMMAND_BASE_FIELDS, 'state']),
+  'node-set-property': new Set([...NODE_COMMAND_BASE_FIELDS, 'property_name', 'value']),
+  'node-unset-property': new Set([...NODE_COMMAND_BASE_FIELDS, 'property_name']),
+  'node-emit-event': new Set([...NODE_COMMAND_BASE_FIELDS, 'event_name', 'payload']),
   'node-replace-prefab': new Set([
     ...NODE_COMMAND_BASE_FIELDS, 'prefab_id', 'state',
   ]),
@@ -379,6 +388,42 @@ function readCommand(
     }
     case 'node-set-state':
       return Object.freeze({ ...nodeCommon, state: reader.state(maximumJsonDepth) });
+    case 'node-set-property':
+      return Object.freeze({
+        ...nodeCommon,
+        propertyName: messageName(
+          reader.string('display-property-name-invalid'),
+          'display-property-name-invalid',
+        ),
+        value: reader.jsonValue(
+          maximumJsonDepth,
+          'display-property-value-length-invalid',
+          'display-property-value-truncated',
+          'display-property-value-invalid',
+        ),
+      });
+    case 'node-unset-property':
+      return Object.freeze({
+        ...nodeCommon,
+        propertyName: messageName(
+          reader.string('display-property-name-invalid'),
+          'display-property-name-invalid',
+        ),
+      });
+    case 'node-emit-event':
+      return Object.freeze({
+        ...nodeCommon,
+        eventName: messageName(
+          reader.string('display-event-name-invalid'),
+          'display-event-name-invalid',
+        ),
+        payload: reader.jsonRecord(
+          maximumJsonDepth,
+          'display-event-payload-length-invalid',
+          'display-event-payload-truncated',
+          'display-event-payload-invalid',
+        ),
+      });
     case 'node-replace-prefab':
       return Object.freeze({
         ...nodeCommon,
@@ -414,6 +459,17 @@ function writeCommand(writer, command) {
       break;
     case 'node-set-state':
       writer.state(command.state);
+      break;
+    case 'node-set-property':
+      writer.string(command.propertyName);
+      writer.jsonValue(command.value, 'display-property-value-length-invalid');
+      break;
+    case 'node-unset-property':
+      writer.string(command.propertyName);
+      break;
+    case 'node-emit-event':
+      writer.string(command.eventName);
+      writer.jsonValue(command.payload, 'display-event-payload-length-invalid');
       break;
     case 'node-replace-prefab':
       writer.string(command.prefabId);
@@ -505,6 +561,23 @@ function normalizeCommand(value, expectedSequence, sourceTick, matrixPoolSize) {
       });
     case 'node-set-state':
       return Object.freeze({ ...nodeCommon, state: normalizeState(value.state) });
+    case 'node-set-property':
+      return Object.freeze({
+        ...nodeCommon,
+        propertyName: messageName(value.property_name, 'display-property-name-invalid'),
+        value: normalizeJsonValue(value.value, 'display-property-value-invalid'),
+      });
+    case 'node-unset-property':
+      return Object.freeze({
+        ...nodeCommon,
+        propertyName: messageName(value.property_name, 'display-property-name-invalid'),
+      });
+    case 'node-emit-event':
+      return Object.freeze({
+        ...nodeCommon,
+        eventName: messageName(value.event_name, 'display-event-name-invalid'),
+        payload: normalizeJsonRecord(value.payload, 'display-event-payload-invalid'),
+      });
     case 'node-replace-prefab':
       return Object.freeze({
         ...nodeCommon,
@@ -614,16 +687,65 @@ function normalizeTransformNodeIds(value, matrixPoolSize) {
 }
 
 function normalizeState(value) {
-  record(value, 'display-node-state-invalid');
-  return cloneAndFreeze(value);
+  return normalizeJsonRecord(value, 'display-node-state-invalid');
 }
 
-function cloneAndFreeze(value) {
-  if (value === null || typeof value !== 'object') return value;
-  if (Array.isArray(value)) return Object.freeze(value.map(cloneAndFreeze));
-  const result = {};
-  for (const [key, item] of Object.entries(value)) result[key] = cloneAndFreeze(item);
-  return Object.freeze(result);
+function normalizeJsonRecord(value, code, maximumDepth = 256) {
+  record(value, code);
+  return normalizeJsonValue(value, code, maximumDepth);
+}
+
+function normalizeJsonValue(value, code, maximumDepth = 256) {
+  return cloneAndFreezeJson(value, new Set(), 0, maximumDepth, code);
+}
+
+function cloneAndFreezeJson(value, active, depth, maximumDepth, code) {
+  if (depth > maximumDepth) fail(code);
+  if (value === null || typeof value === 'boolean') return value;
+  if (typeof value === 'string') {
+    if (containsLoneSurrogate(value)) fail(code);
+    return value;
+  }
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) fail(code);
+    return value;
+  }
+  if (!value || typeof value !== 'object' || active.has(value)) fail(code);
+  active.add(value);
+  try {
+    if (Array.isArray(value)) {
+      if (Object.getPrototypeOf(value) !== Array.prototype) fail(code);
+      const result = [];
+      for (let index = 0; index < value.length; index += 1) {
+        const descriptor = Object.getOwnPropertyDescriptor(value, index);
+        if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) fail(code);
+        result.push(cloneAndFreezeJson(
+          descriptor.value, active, depth + 1, maximumDepth, code,
+        ));
+      }
+      return Object.freeze(result);
+    }
+    record(value, code);
+    const result = {};
+    for (const key of Reflect.ownKeys(value)) {
+      if (typeof key !== 'string' || DANGEROUS_NAMES.has(key) || containsLoneSurrogate(key)) {
+        fail(code);
+      }
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) fail(code);
+      Object.defineProperty(result, key, {
+        configurable: true,
+        enumerable: true,
+        value: cloneAndFreezeJson(
+          descriptor.value, active, depth + 1, maximumDepth, code,
+        ),
+        writable: true,
+      });
+    }
+    return Object.freeze(result);
+  } finally {
+    active.delete(value);
+  }
 }
 
 function poolSize(value) {
@@ -660,6 +782,27 @@ function logicalName(value, code) {
   if (typeof value !== 'string' || ENCODER.encode(value).byteLength > 96
       || !SCENE_NAME.test(value)) fail(code);
   return value;
+}
+
+function messageName(value, code) {
+  if (typeof value !== 'string' || value.length === 0
+      || ENCODER.encode(value).byteLength > MAXIMUM_MESSAGE_NAME_BYTES
+      || INVALID_MESSAGE_NAME_CHARACTER.test(value) || DANGEROUS_NAMES.has(value)) fail(code);
+  return value;
+}
+
+function containsLoneSurrogate(value) {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (next < 0xdc00 || next > 0xdfff) return true;
+      index += 1;
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function prefabId(value) {
@@ -829,11 +972,27 @@ class BinaryReader {
   }
 
   state(maximumJsonDepth) {
-    const length = this.u32('display-state-length-invalid');
-    const value = parseCanonicalJSON(this.take(length, 'display-state-truncated'), {
+    return this.jsonRecord(
+      maximumJsonDepth,
+      'display-state-length-invalid',
+      'display-state-truncated',
+      'display-node-state-invalid',
+    );
+  }
+
+  jsonValue(maximumJsonDepth, lengthCode, truncatedCode, invalidCode, recordRequired = false) {
+    const length = this.u32(lengthCode);
+    const value = parseCanonicalJSON(this.take(length, truncatedCode), {
       maximumDepth: maximumJsonDepth,
     });
-    return normalizeState(value);
+    if (recordRequired) record(value, invalidCode);
+    return normalizeJsonValue(value, invalidCode, maximumJsonDepth);
+  }
+
+  jsonRecord(maximumJsonDepth, lengthCode, truncatedCode, invalidCode) {
+    return this.jsonValue(
+      maximumJsonDepth, lengthCode, truncatedCode, invalidCode, true,
+    );
   }
 
   take(length, code) {
@@ -925,8 +1084,12 @@ class BinaryWriter {
   }
 
   state(value) {
+    this.jsonValue(value, 'display-state-length-invalid');
+  }
+
+  jsonValue(value, lengthCode) {
     const bytes = encodeJSON(value, { sortKeys: true });
-    if (bytes.byteLength > 0xffffffff) fail('display-state-length-invalid');
+    if (bytes.byteLength > 0xffffffff) fail(lengthCode);
     this.u32(bytes.byteLength);
     this.raw(bytes);
   }

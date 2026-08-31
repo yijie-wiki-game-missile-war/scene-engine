@@ -243,6 +243,195 @@ test('state resolver validates the whole patch before changing any target', asyn
     .properties.modelResourceId, 'model/good');
 });
 
+test('Authority property commands update one top-level field through complete state reconciliation',
+  async (t) => {
+    const prefab = definePrefab({
+      schema: PREFAB_DEFINITION_SCHEMA,
+      id: 'target.properties',
+      gameplayType: 'test.properties',
+      root: { components: [], children: [{
+        localName: 'body', visible: true, transform: IDENTITY, components: [], children: [],
+      }] },
+      resolveState(state) {
+        if (state.required !== 'kept') throw new Error('complete state was not retained');
+        return { nodes: { body: { visible: state.visible } } };
+      },
+    });
+    const { runtime } = await createHarness({ prefabEntries: [prefab] });
+    t.after(() => runtime.dispose());
+    commitAuthority(runtime, () => runtime.authority.createNode({
+      ...createCommand(0, prefab.id),
+      state: { required: 'kept', visible: true, optional: 1 },
+    }), { sourceTickDelta: 1 });
+
+    commitAuthority(runtime, () => runtime.authority.setNodeProperty({
+      nodeId: 0, propertyName: 'visible', value: false,
+    }));
+    assert.equal(runtime.currentView().getNode('prefab/py/0/body').visibleSelf, false);
+    assert.deepEqual(runtime._nodeIndex.require('py/0').requireComponent('authority').state, {
+      required: 'kept', visible: false, optional: 1,
+    });
+
+    commitAuthority(runtime, () => runtime.authority.setNodeProperty({
+      nodeId: 0, propertyName: 'field.with.dot', value: null,
+    }));
+    assert.equal(Object.hasOwn(
+      runtime._nodeIndex.require('py/0').requireComponent('authority').state,
+      'field.with.dot',
+    ), true, 'dots are ordinary property-name characters and null is a stored value');
+    commitAuthority(runtime, () => runtime.authority.unsetNodeProperty({
+      nodeId: 0, propertyName: 'field.with.dot',
+    }));
+    commitAuthority(runtime, () => runtime.authority.unsetNodeProperty({
+      nodeId: 0, propertyName: 'optional',
+    }));
+    assert.deepEqual(runtime._nodeIndex.require('py/0').requireComponent('authority').state, {
+      required: 'kept', visible: false,
+    });
+
+    expectAuthorityFailure(runtime, () => runtime.authority.unsetNodeProperty({
+      nodeId: 0, propertyName: 'optional',
+    }), 'display-authority-property-missing');
+  });
+
+test('Authority property names share the closed wire-level validator', async (t) => {
+  const { runtime } = await createHarness();
+  t.after(() => runtime.dispose());
+  commitAuthority(runtime, () => runtime.authority.createNode(createCommand(0)));
+  expectAuthorityFailure(runtime, () => runtime.authority.setNodeProperty({
+    nodeId: 0, propertyName: '__proto__', value: 1,
+  }), 'display-property-name-invalid');
+  assert.deepEqual(runtime._nodeIndex.require('py/0').requireComponent('authority').state, {});
+});
+
+test('Authority events use explicit Prefab and Behaviour allowlists, deterministic root-record routing',
+  async (t) => {
+    const received = [];
+    class EventProbe extends BehaviourComponent {
+      static typeId = 'test.event-probe@1';
+      static allowMultiple = true;
+      static eventNames = ['exploded'];
+      onEvent(display, event) {
+        received.push({ key: this.key, display, event });
+      }
+    }
+    class OtherEventProbe extends BehaviourComponent {
+      static typeId = 'test.other-event-probe@1';
+      static eventNames = ['other'];
+      onEvent() { received.push({ key: this.key, unexpected: true }); }
+    }
+    class NestedEventProbe extends BehaviourComponent {
+      static typeId = 'test.nested-event-probe@1';
+      static eventNames = ['exploded'];
+      onEvent() { received.push({ key: this.key, nested: true }); }
+    }
+    const nested = definePrefab({
+      schema: PREFAB_DEFINITION_SCHEMA,
+      id: 'target/event-nested',
+      gameplayType: 'test.event-nested',
+      events: ['exploded'],
+      root: {
+        components: [{ key: 'nested', type: NestedEventProbe.typeId }], children: [],
+      },
+    });
+    const outer = definePrefab({
+      schema: PREFAB_DEFINITION_SCHEMA,
+      id: 'target/event-outer',
+      gameplayType: 'test.event-outer',
+      events: ['exploded'],
+      root: {
+        components: [
+          { key: 'z', type: EventProbe.typeId },
+          { key: 'a', type: EventProbe.typeId },
+          { key: 'disabled', type: EventProbe.typeId, enabled: false },
+          { key: 'other', type: OtherEventProbe.typeId },
+        ],
+        children: [
+          {
+            localName: 'z-body',
+            components: [{ key: 'z-child', type: EventProbe.typeId }],
+            children: [],
+          },
+          {
+            localName: 'a-body',
+            components: [{ key: 'a-child', type: EventProbe.typeId }],
+            children: [],
+          },
+        ],
+      },
+      prefabInstances: [{ key: 'nested', parentLocalPath: null, prefabId: nested.id }],
+    });
+    const { runtime } = await createHarness({
+      prefabEntries: [outer, nested],
+      configureComponents(registry) {
+        registry.register({ ComponentClass: EventProbe });
+        registry.register({ ComponentClass: OtherEventProbe });
+        registry.register({ ComponentClass: NestedEventProbe });
+      },
+    });
+    t.after(() => runtime.dispose());
+    commitAuthority(runtime, () => runtime.authority.createNode(createCommand(0, outer.id)), {
+      sourceTickDelta: 1,
+    });
+    const eventResult = commitAuthority(runtime, (cursor) => runtime.authority.emitNodeEvent({
+      nodeId: 0,
+      eventName: 'exploded',
+      payload: { damage: 7, parts: ['wing'] },
+      commandSeq: cursor.lastCommandSeq,
+      sourceTick: cursor.sourceTick,
+    }), { sourceTickDelta: 1 });
+    assert.equal(eventResult, undefined);
+    assert.deepEqual(received.map(({ key }) => key), ['z', 'a', 'z-child', 'a-child']);
+    assert.equal(received.some((entry) => entry.nested || entry.unexpected), false);
+    assert.strictEqual(received[0].event, received[1].event);
+    assert.strictEqual(received[1].event, received[2].event);
+    assert.strictEqual(received[2].event, received[3].event);
+    assert.deepEqual(received[0].event, {
+      eventName: 'exploded',
+      payload: { damage: 7, parts: ['wing'] },
+      commandSeq: 2,
+      sourceTick: 2,
+    });
+    assert.equal(Object.isFrozen(received[0].event), true);
+    assert.equal(Object.isFrozen(received[0].event.payload), true);
+    assert.equal(Object.isFrozen(received[0].event.payload.parts), true);
+    assert.equal(Object.isFrozen(received[0].display), true);
+    assert.equal('authority' in received[0].display, false);
+
+    expectAuthorityFailure(runtime, () => runtime.authority.emitNodeEvent({
+      nodeId: 0,
+      eventName: 'unknown',
+      payload: {},
+      commandSeq: 3,
+      sourceTick: 3,
+    }), 'display-authority-event-unknown');
+    assert.deepEqual(received.map(({ key }) => key), ['z', 'a', 'z-child', 'a-child']);
+  });
+
+test('Promise-returning Authority event handlers fail the synchronous commit barrier', async (t) => {
+  class AsyncEventProbe extends BehaviourComponent {
+    static typeId = 'test.async-event-probe@1';
+    static eventNames = ['event'];
+    onEvent() { return Promise.reject(new Error('late event rejection')); }
+  }
+  const prefab = definePrefab({
+    schema: PREFAB_DEFINITION_SCHEMA,
+    id: 'target/async-event',
+    gameplayType: 'test.async-event',
+    events: ['event'],
+    root: { components: [{ key: 'async', type: AsyncEventProbe.typeId }], children: [] },
+  });
+  const { runtime } = await createHarness({
+    prefabEntries: [prefab],
+    configureComponents(registry) { registry.register({ ComponentClass: AsyncEventProbe }); },
+  });
+  t.after(() => runtime.dispose());
+  commitAuthority(runtime, () => runtime.authority.createNode(createCommand(0, prefab.id)));
+  expectAuthorityFailure(runtime, () => runtime.authority.emitNodeEvent({
+    nodeId: 0, eventName: 'event', payload: {}, commandSeq: 2, sourceTick: 1,
+  }), 'display-component-async-handler');
+});
+
 test('nested renderer state fails before cursor seal or backend update', async (t) => {
   const prefab = emptyPrefab({
     id: 'target.animated',

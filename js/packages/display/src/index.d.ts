@@ -59,6 +59,13 @@ export interface DisplayCursor {
   readonly lastCommandSeq: number;
 }
 
+export interface DisplayNodeEvent {
+  readonly eventName: string;
+  readonly payload: JSONRecord;
+  readonly commandSeq: number;
+  readonly sourceTick: number;
+}
+
 export interface DisplayCatalogIdentity {
   readonly sceneCatalogHash: string;
   readonly prefabCatalogHash: string;
@@ -185,6 +192,7 @@ export interface PrefabDefinitionInput {
   readonly id: string;
   readonly revision?: number;
   readonly gameplayType: string;
+  readonly events?: readonly string[];
   readonly root: PrefabNodeDefinition;
   readonly prefabInstances?: readonly FixedPrefabInstanceDefinition[];
   readonly prefabSlots?: readonly PrefabSlotDefinition[];
@@ -311,7 +319,9 @@ export class Component<P extends JSONRecord = JSONRecord> {
 
 export class BehaviourComponent<P extends JSONRecord = JSONRecord> extends Component<P> {
   static readonly tickPhase: 'update' | 'before-render' | null;
+  static readonly eventNames: readonly string[];
   tick(frame: DisplayFrame): void;
+  onEvent(display: PublicDisplayContext, event: DisplayNodeEvent): void;
 }
 
 export class RenderComponent<P extends JSONRecord = JSONRecord> extends Component<P> {
@@ -324,6 +334,7 @@ export type ComponentConstructor<C extends Component = Component> = {
   readonly allowMultiple: boolean;
   readonly tickPhase: 'update' | 'before-render' | null;
   readonly drivesTransform: boolean;
+  readonly eventNames?: readonly string[];
 };
 
 export interface ComponentDescriptor<C extends Component = Component> {
@@ -378,6 +389,7 @@ export class PrefabDefinition {
   readonly schema: typeof PREFAB_DEFINITION_SCHEMA;
   readonly revision: number;
   readonly gameplayType: string;
+  readonly events: readonly string[];
   describe(): Readonly<Record<string, unknown>>;
   compile(registries: {
     readonly componentRegistry: ComponentRegistry;
@@ -417,6 +429,22 @@ export interface AuthorityPort {
   setNodeParent(command: { readonly nodeId: number; readonly parentNodeId: number | null }): undefined;
   setNodeVisible(command: { readonly nodeId: number; readonly visible: boolean }): undefined;
   setNodeState(command: { readonly nodeId: number; readonly state: JSONRecord }): undefined;
+  setNodeProperty(command: {
+    readonly nodeId: number;
+    readonly propertyName: string;
+    readonly value: JSONValue;
+  }): undefined;
+  unsetNodeProperty(command: {
+    readonly nodeId: number;
+    readonly propertyName: string;
+  }): undefined;
+  emitNodeEvent(command: {
+    readonly nodeId: number;
+    readonly eventName: string;
+    readonly payload: JSONRecord;
+    readonly commandSeq: number;
+    readonly sourceTick: number;
+  }): undefined;
   replaceNodePrefab(command: { readonly nodeId: number; readonly prefabId: string; readonly state: JSONRecord }): undefined;
   removeNode(command: { readonly nodeId: number }): undefined;
 }
@@ -559,11 +587,11 @@ export class BillboardComponent extends BehaviourComponent { static readonly typ
 export class LookAtComponent extends BehaviourComponent { static readonly typeId: 'behavior.look-at@1'; static readonly tickPhase: 'before-render'; static readonly drivesTransform: true; }
 
 export const TICKS_PER_SECOND: 60;
-export const DISPLAY_RUNTIME_SCHEMA: 'scene-engine-display-node@7';
+export const DISPLAY_RUNTIME_SCHEMA: 'scene-engine-display-node@8';
 export const DISPLAY_SUMMARY_SCHEMA: 'scene-engine-display-summary@1';
 export const DISPLAY_CATALOG_MANIFEST_SCHEMA: 'scene-engine-display-catalog-manifest@2';
 export const SCENE_DEFINITION_SCHEMA: 'scene-engine-scene-definition@2';
-export const PREFAB_DEFINITION_SCHEMA: 'scene-engine-prefab-definition@4';
+export const PREFAB_DEFINITION_SCHEMA: 'scene-engine-prefab-definition@5';
 export const RESOURCE_REGISTRY_SCHEMA: 'scene-engine-resource-registry@1';
 export const ANIMATION_RESOURCE_SCHEMA: 'scene-engine-animation-resource@2';
 

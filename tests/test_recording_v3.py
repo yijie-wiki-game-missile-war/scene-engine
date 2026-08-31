@@ -384,7 +384,7 @@ def test_packet_log_rejects_sparse_uint32_pool_growth_without_suffix_allocation(
         world_codec="world@1",
         world_patch={"schema": "scene-engine-json-tree@1", "changes": []},
         display_commands={
-            "schema": "scene-engine-display-command-stream@7",
+            "schema": "scene-engine-display-command-stream@8",
             "base_command_seq": 0,
             "last_command_seq": 0,
             "matrix_pool_size": 0xFFFFFFFF,

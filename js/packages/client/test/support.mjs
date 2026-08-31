@@ -67,7 +67,7 @@ export function checkpointPacket({
       kind: 'display_checkpoint',
       encoding: 'raw',
       value: encodeDisplayCheckpoint({
-        schema: 'scene-engine-display-checkpoint@7',
+        schema: 'scene-engine-display-checkpoint@8',
         scene_name: 'main',
         scene_catalog_hash: sceneCatalogHash,
         prefab_catalog_hash: prefabCatalogHash,
@@ -83,7 +83,7 @@ export function checkpointPacket({
 
 export function command(kind, commandSeq, sourceTick, fields = {}) {
   const common = {
-    schema: 'scene-engine-node-command@7',
+    schema: 'scene-engine-node-command@8',
     command_seq: commandSeq,
     source_tick: sourceTick,
     kind,
@@ -179,7 +179,7 @@ export function commitPacket({
       kind: 'display_command_stream',
       encoding: 'raw',
       value: encodeDisplayCommandStream({
-        schema: 'scene-engine-display-command-stream@7',
+        schema: 'scene-engine-display-command-stream@8',
         base_command_seq: baseCommandSeq,
         last_command_seq: lastCommandSeq,
         matrix_pool_size: matrixPoolSize,
@@ -218,6 +218,9 @@ export function createMockDisplayFactory({ failMethod = null, asyncMethod = null
       setNodeParent: (value) => invoke('setNodeParent', value),
       setNodeVisible: (value) => invoke('setNodeVisible', value),
       setNodeState: (value) => invoke('setNodeState', value),
+      setNodeProperty: (value) => invoke('setNodeProperty', value),
+      unsetNodeProperty: (value) => invoke('unsetNodeProperty', value),
+      emitNodeEvent: (value) => invoke('emitNodeEvent', value),
       replaceNodePrefab: (value) => invoke('replaceNodePrefab', value),
       removeNode(value) {
         const result = invoke('removeNode', value);

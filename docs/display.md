@@ -6,14 +6,14 @@ fallback runtime.
 ## Release tuple
 
 ```text
-scene-engine Python                 0.17.0
-@scene-engine/client               0.14.0
-@scene-engine/display              0.13.0
+scene-engine Python                 0.18.0
+@scene-engine/client               0.15.0
+@scene-engine/display              0.14.0
 @scene-engine/renderer-three       0.12.0
 wire                               scene-engine-wire@3
-display                            scene-engine-display-node@7
+display                            scene-engine-display-node@8
 scene definition                   scene-engine-scene-definition@2
-prefab definition                  scene-engine-prefab-definition@4
+prefab definition                  scene-engine-prefab-definition@5
 catalog manifest                   scene-engine-display-catalog-manifest@2
 packet log                         scene-engine-packet-log@3
 ```
@@ -208,7 +208,8 @@ the complete state contract consumed by its resolver. Multiple visual Prefabs ma
 replace operations carry an exact outer `prefabId`; lookup or implicit selection by gameplay type is forbidden on the
 production path.
 
-Schema `scene-engine-prefab-definition@4` defines matrix-native definition-owned composition:
+Schema `scene-engine-prefab-definition@5` defines matrix-native definition-owned composition and its public transient-event
+names:
 
 ```js
 const islandPrefab = definePrefab({
@@ -216,6 +217,7 @@ const islandPrefab = definePrefab({
   id: 'world/island',
   revision: 3,
   gameplayType: 'island',
+  events: ['explode', 'hit'],
   root: islandRoot,
   prefabInstances: [{
     key: 'harbour',
@@ -323,6 +325,9 @@ setNodeTransforms
 setNodeParent
 setNodeVisible
 setNodeState
+setNodeProperty
+unsetNodeProperty
+emitNodeEvent
 replaceNodePrefab
 removeNode
 ```
@@ -332,8 +337,21 @@ command's sequence position. Validation of every target completes before any row
 batch invokes the mutation hook once. New rows are not part of this call: their staged suffix rows are claimed by the ordered
 `createNode` records.
 
-`null` parent means `sys/authority-root`; a non-null parent ID must be an existing authority root. `setNodeState` is complete replacement,
-not merge patch, including when it causes nested add/remove/replace operations.
+`null` parent means `sys/authority-root`; a non-null parent ID must be an existing authority root. `setNodeState` is complete
+replacement, not merge patch, including when it causes nested add/remove/replace operations.
+
+`setNodeProperty` and `unsetNodeProperty` first construct a complete outer-state candidate and then reuse the exact
+`setNodeState` resolver/reconcile transaction. They address only one top-level name; dots are literal and do not form a path.
+JSON `null` remains a value, while unsetting a missing member fails closed. Names are at most 192 UTF-8 bytes, contain no Unicode
+whitespace or control/format/private/unassigned characters, and reject JavaScript prototype-pollution names. The complete
+candidate remains subject to the product Prefab resolver/state contract, so a schema may reject an otherwise syntactically
+valid field.
+
+`emitNodeEvent` requires the current outer Prefab to declare `eventName`. It routes only within that Prefab definition record,
+to enabled Behaviour components whose registered Component class explicitly includes the name in static `eventNames`.
+Recipients run in Node preorder and declaration order. The frozen handler record is
+`{eventName, payload, commandSeq, sourceTick}`; payload is a JSON object. A handler must return synchronously, and failure follows
+the normal no-ACK/projection-invalid path. Events do not mutate Authority state or appear in checkpoints.
 
 Checkpoint bootstrap may create authority roots after `installScene` and before `activate`. Once activated, every Authority call
 must occur between an exact `commitGate.begin(cursor)` and `commitGate.seal(cursor)`. Calls outside an open gate fail with no
@@ -370,11 +388,14 @@ Only synchronous optional lifecycle handlers exist:
 ```text
 onAttach(display)
 tick(frame)
+onEvent(display, event)
 onDispose(display, reason)
 ```
 
-Only BehaviourComponents tick. RenderComponents are declarative and cannot implement handlers. Promise-returning handlers fail.
-Attach order is Node preorder then declaration order; disposal is child-before-parent then reverse declaration order.
+Only BehaviourComponents tick or subscribe to events. A Behaviour declares subscriptions through static `eventNames`; a
+Prefab's `events` list is the public allowlist, so neither declaration alone exposes an event. RenderComponents are declarative
+and cannot implement handlers or subscriptions. Promise-returning handlers fail. Attach/event order is Node preorder then
+declaration order; disposal is child-before-parent then reverse declaration order.
 
 Component properties are deeply frozen and can change only through:
 
@@ -414,7 +435,8 @@ A checkpoint carries Scene name, three catalog hashes, command cursor, the compl
 metadata. Client creates a fresh session, verifies catalog identity, installs the Scene and pool, bootstraps roots by ID,
 activates and starts it, then swaps the session.
 
-A commit closes the draw gate, stages the one dirty matrix block and applies every command in order. One set-transforms command
+A commit closes the draw gate, stages the one dirty matrix block and applies every command in order. Property candidates reuse
+complete state reconciliation and events dispatch synchronously at their sequence positions. One set-transforms command
 atomically consumes the existing-row prefix at its sequence position; create commands claim new-row suffix rows. It then flushes
 transforms and seals the exact cursor. JavaScript run-to-completion
 prevents RAF from observing a partial transaction. The seal is not cross-command rollback; any command failure invalidates the

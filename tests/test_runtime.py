@@ -151,6 +151,28 @@ class Program:
         )
 
 
+class PropertyEventProgram(Program):
+    def build_commit(self, world: World, mutation, context) -> ProductCommit:
+        base = super().build_commit(world, mutation, context)
+        if context.commit.cause != "tick":
+            return base
+        return ProductCommit(
+            base.world_codec,
+            base.world_patch,
+            base.display_matrix_pool,
+            (
+                base.display_commands[0],
+                DisplayCommand.set_parent(self.display_node_id, None),
+                DisplayCommand.set_property(self.display_node_id, "coins", 7),
+                DisplayCommand.set_property(self.display_node_id, "flash", None),
+                DisplayCommand.emit_event(
+                    self.display_node_id, "explode", {"damage": 3}
+                ),
+                DisplayCommand.unset_property(self.display_node_id, "flash"),
+            ),
+        )
+
+
 class Transport:
     def __init__(self) -> None:
         self._condition = threading.Condition()
@@ -361,10 +383,10 @@ def stop_runtime_workers_after_each_test():
     _RUNTIMES_TO_STOP.clear()
 
 
-def make_runtime(*, config=None, recorder=None, transport=None):
+def make_runtime(*, config=None, recorder=None, transport=None, program=None):
     clock = ManualClock()
     world = World()
-    program = Program()
+    program = program or Program()
     transport = transport or Transport()
     runtime = SceneEngineRuntime(
         world=world,
@@ -838,6 +860,33 @@ def test_blocked_transport_does_not_block_pump_and_preserves_fifo_snapshots() ->
         )
         translations.append(float(command_stream["dirty_matrices"].reshape(-1)[12]))
     assert translations == [1.5, 3.0]
+
+
+def test_transform_reparent_properties_and_event_share_one_ordered_background_packet() -> None:
+    runtime, clock, _, _, transport = make_runtime(program=PropertyEventProgram())
+    runtime.client_connected("messages")
+    acknowledge(runtime, transport, "messages")
+
+    clock.advance(1 / TICKS_PER_SECOND)
+    runtime.pump()
+    packet = read_engine_packet(transport.wait_sent("messages", 2)[-1])
+    stream = decode_display_command_stream_binary(
+        packet.attachments[1].bytes,
+        expected_source_tick=packet.header["source_tick"],
+        expected_last_command_seq=packet.header["last_command_seq"],
+    )
+
+    assert [command["kind"] for command in stream["commands"]] == [
+        "node-set-transform-batch",
+        "node-set-parent",
+        "node-set-property",
+        "node-set-property",
+        "node-emit-event",
+        "node-unset-property",
+    ]
+    assert stream["commands"][2]["value"] == 7
+    assert stream["commands"][3]["value"] is None
+    assert stream["commands"][4]["payload"] == {"damage": 3}
 
 
 def test_transport_calls_use_worker_while_program_and_recorder_stay_on_owner() -> None:
