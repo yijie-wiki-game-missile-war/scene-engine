@@ -6,7 +6,7 @@ fallback runtime.
 ## Release tuple
 
 ```text
-scene-engine Python                 0.16.0
+scene-engine Python                 0.17.0
 @scene-engine/client               0.14.0
 @scene-engine/display              0.13.0
 @scene-engine/renderer-three       0.12.0

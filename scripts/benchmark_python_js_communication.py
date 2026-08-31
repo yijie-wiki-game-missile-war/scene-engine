@@ -4,17 +4,17 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 import hashlib
 import json
 import math
-import os
 from pathlib import Path
-import select
+import queue
 import shutil
 import struct
 import subprocess
 import sys
+import threading
 import time
 from typing import Any, Iterable
 
@@ -55,6 +55,9 @@ PROFILES = (PROFILE_ROUNDTRIP, PROFILE_WINDOWED)
 REPORT_SCHEMA = "scene-engine-python-js-communication@3"
 PEER_REPORT_SCHEMA = "scene-engine-python-js-communication-peer@3"
 TRANSFORM_DIGEST_ENCODING = "node-id-u32le-le-f32-matrix16"
+PIPE_CHUNK_BYTES = 64 * 1024
+_PIPE_EOF = object()
+_PIPE_WRITE_STOP = object()
 
 
 @dataclass
@@ -179,6 +182,13 @@ class CommunicationProgram:
         )
 
 
+@dataclass(slots=True)
+class _PipeWriteRequest:
+    value: bytes
+    completed: threading.Event = field(default_factory=threading.Event)
+    error: BaseException | None = None
+
+
 class LengthFramedPeer:
     """A local child whose frame payloads are untouched Engine/ACK packet bytes."""
 
@@ -198,8 +208,37 @@ class LengthFramedPeer:
         if self.process.stdin is None or self.process.stdout is None or self.process.stderr is None:
             self.abort()
             raise RuntimeError("failed to create communication peer pipes")
-        os.set_blocking(self.process.stdin.fileno(), False)
+        self._stdin_requests: queue.Queue[_PipeWriteRequest | object] = queue.Queue()
+        self._stdout_chunks: queue.Queue[bytes | BaseException | object] = queue.Queue()
+        self._stdout_buffer = bytearray()
+        self._stderr_chunks: list[bytes] = []
+        self._stderr_lock = threading.Lock()
+        self._stdout_failure: BaseException | None = None
+        self._stderr_failure: BaseException | None = None
+        self._stdin_stopping = False
         self._finished = False
+        self._stdin_thread = threading.Thread(
+            target=self._write_stdin,
+            name="scene-engine-communication-stdin",
+            daemon=True,
+        )
+        self._stdout_thread = threading.Thread(
+            target=self._read_stdout,
+            name="scene-engine-communication-stdout",
+            daemon=True,
+        )
+        self._stderr_thread = threading.Thread(
+            target=self._read_stderr,
+            name="scene-engine-communication-stderr",
+            daemon=True,
+        )
+        try:
+            self._stdin_thread.start()
+            self._stdout_thread.start()
+            self._stderr_thread.start()
+        except BaseException:
+            self.abort()
+            raise
 
     def send_packet(self, raw: bytes) -> None:
         payload = bytes(raw)
@@ -220,13 +259,18 @@ class LengthFramedPeer:
         self._finished = True
         self._write_all(FRAME_HEADER.pack(0))
         report = json.loads(self.read_packet().decode("utf-8"))
-        self.process.stdin.close()
+        self._stop_stdin_writer()
         try:
             return_code = self.process.wait(timeout=self.timeout_seconds)
         except subprocess.TimeoutExpired as exc:
             self.abort()
             raise RuntimeError("communication peer did not exit") from exc
-        stderr = self.process.stderr.read().decode("utf-8", errors="replace")
+        self._join_reader_threads()
+        stderr = self._stderr_text()
+        if self._stdout_failure is not None:
+            raise RuntimeError("communication peer stdout reader failed") from self._stdout_failure
+        if self._stderr_failure is not None:
+            raise RuntimeError("communication peer stderr reader failed") from self._stderr_failure
         if return_code != 0 or stderr:
             raise RuntimeError(
                 f"communication peer failed with status {return_code}: {stderr.strip()}"
@@ -234,55 +278,161 @@ class LengthFramedPeer:
         return report
 
     def abort(self) -> None:
-        if getattr(self, "process", None) is None or self.process.poll() is not None:
+        process = getattr(self, "process", None)
+        if process is None:
             return
-        self.process.terminate()
-        try:
-            self.process.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            self.process.kill()
-            self.process.wait(timeout=2)
+        if process.poll() is None:
+            try:
+                process.terminate()
+            except OSError:
+                pass
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                try:
+                    process.kill()
+                except OSError:
+                    pass
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    pass
+        self._signal_stdin_stop()
+        workers = []
+        for thread_name in ("_stdin_thread", "_stdout_thread", "_stderr_thread"):
+            thread = getattr(self, thread_name, None)
+            if thread is not None and thread is not threading.current_thread():
+                workers.append(thread)
+                thread.join(timeout=2)
+        for stream_name in ("stdin", "stdout", "stderr"):
+            stream = getattr(process, stream_name, None)
+            if stream is not None:
+                try:
+                    stream.close()
+                except OSError:
+                    pass
+        for thread in workers:
+            if thread.is_alive():
+                thread.join(timeout=2)
 
     def _write_all(self, value: bytes) -> None:
-        descriptor = self.process.stdin.fileno()
-        deadline = time.monotonic() + self.timeout_seconds
-        offset = 0
-        while offset < len(value):
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                self.abort()
-                raise RuntimeError("timed out writing to communication peer")
-            _, ready, _ = select.select([], [descriptor], [], remaining)
-            if not ready:
-                continue
-            try:
-                written = os.write(descriptor, value[offset:])
-            except BlockingIOError:
-                continue
-            if written <= 0:
-                raise RuntimeError("communication peer stdin closed")
-            offset += written
+        if self._stdin_stopping:
+            raise RuntimeError("communication peer stdin is closed")
+        request = _PipeWriteRequest(bytes(value))
+        self._stdin_requests.put_nowait(request)
+        if not request.completed.wait(timeout=self.timeout_seconds):
+            self.abort()
+            raise RuntimeError("timed out writing to communication peer")
+        if request.error is not None:
+            self.abort()
+            raise RuntimeError("communication peer stdin write failed") from request.error
 
     def _read_exact(self, length: int) -> bytes:
-        descriptor = self.process.stdout.fileno()
         deadline = time.monotonic() + self.timeout_seconds
-        result = bytearray()
-        while len(result) < length:
+        while len(self._stdout_buffer) < length:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 self.abort()
                 raise RuntimeError("timed out waiting for communication peer")
-            ready, _, _ = select.select([descriptor], [], [], remaining)
-            if not ready:
-                continue
-            chunk = os.read(descriptor, length - len(result))
-            if not chunk:
-                stderr = self.process.stderr.read().decode("utf-8", errors="replace")
+            try:
+                chunk = self._stdout_chunks.get(timeout=remaining)
+            except queue.Empty:
+                self.abort()
+                raise RuntimeError("timed out waiting for communication peer") from None
+            if chunk is _PIPE_EOF:
+                self.abort()
                 raise RuntimeError(
-                    f"communication peer closed stdout early: {stderr.strip()}"
+                    f"communication peer closed stdout early: {self._stderr_text().strip()}"
                 )
-            result.extend(chunk)
-        return bytes(result)
+            if isinstance(chunk, BaseException):
+                self.abort()
+                raise RuntimeError("communication peer stdout reader failed") from chunk
+            if not isinstance(chunk, bytes):
+                self.abort()
+                raise RuntimeError("communication peer stdout reader returned invalid data")
+            self._stdout_buffer.extend(chunk)
+        result = bytes(self._stdout_buffer[:length])
+        del self._stdout_buffer[:length]
+        return result
+
+    def _write_stdin(self) -> None:
+        stream = self.process.stdin
+        try:
+            while True:
+                request = self._stdin_requests.get()
+                if request is _PIPE_WRITE_STOP:
+                    return
+                if not isinstance(request, _PipeWriteRequest):
+                    continue
+                try:
+                    remaining = memoryview(request.value)
+                    while remaining:
+                        written = stream.write(remaining)
+                        if written is None or written <= 0:
+                            raise BrokenPipeError("communication peer stdin closed")
+                        remaining = remaining[written:]
+                    stream.flush()
+                except BaseException as exc:
+                    request.error = exc
+                finally:
+                    request.completed.set()
+        finally:
+            try:
+                stream.close()
+            except OSError:
+                pass
+
+    def _read_stdout(self) -> None:
+        stream = self.process.stdout
+        try:
+            while True:
+                chunk = stream.read(PIPE_CHUNK_BYTES)
+                if not chunk:
+                    self._stdout_chunks.put(_PIPE_EOF)
+                    return
+                self._stdout_chunks.put(bytes(chunk))
+        except BaseException as exc:
+            self._stdout_failure = exc
+            self._stdout_chunks.put(exc)
+
+    def _read_stderr(self) -> None:
+        stream = self.process.stderr
+        try:
+            while True:
+                chunk = stream.read(PIPE_CHUNK_BYTES)
+                if not chunk:
+                    return
+                with self._stderr_lock:
+                    self._stderr_chunks.append(bytes(chunk))
+        except BaseException as exc:
+            self._stderr_failure = exc
+
+    def _signal_stdin_stop(self) -> None:
+        if not getattr(self, "_stdin_stopping", True):
+            self._stdin_stopping = True
+            self._stdin_requests.put_nowait(_PIPE_WRITE_STOP)
+
+    def _stop_stdin_writer(self) -> None:
+        self._signal_stdin_stop()
+        self._stdin_thread.join(timeout=self.timeout_seconds)
+        if self._stdin_thread.is_alive():
+            self.abort()
+            raise RuntimeError("timed out closing communication peer stdin")
+
+    def _join_reader_threads(self) -> None:
+        for thread, label in (
+            (self._stdout_thread, "stdout"),
+            (self._stderr_thread, "stderr"),
+        ):
+            thread.join(timeout=self.timeout_seconds)
+            if thread.is_alive():
+                self.abort()
+                raise RuntimeError(f"timed out closing communication peer {label}")
+
+    def _stderr_text(self) -> str:
+        with self._stderr_lock:
+            raw = b"".join(self._stderr_chunks)
+        return raw.decode("utf-8", errors="replace")
 
 
 class FramedRuntimeTransport:

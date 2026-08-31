@@ -30,6 +30,7 @@ from .errors import (
 )
 from .json_tree import validate_json_patch, validate_json_value
 from .session import ClientSession, InputOutcome, PacketRef, SessionHealth
+from .transport_sender import TransportResult, TransportSender
 from .wire import (
     DEFAULT_ENGINE_LIMITS,
     MAXIMUM_SAFE_INTEGER,
@@ -47,6 +48,8 @@ RUNNING = "running"
 STOPPED = "stopped"
 FATAL = "fatal"
 TICKS_PER_SECOND = 60
+_SESSION_CLOSE_TOKEN = object()
+_REJECTION_CLOSE_TOKEN = object()
 
 
 @dataclass(frozen=True, slots=True)
@@ -275,6 +278,12 @@ class EngineProgram(Protocol):
 
 
 class EngineTransport(Protocol):
+    """Synchronous port called only by the Runtime's private sender thread.
+
+    ``client_id`` is an opaque connection-lifetime key. A transport must not
+    rebind it to another physical endpoint; reconnects use a fresh key.
+    """
+
     def send(self, client_id: Any, packet_bytes: bytes) -> Any: ...
 
     def close(self, client_id: Any, reason: str) -> Any: ...
@@ -303,6 +312,10 @@ class RuntimeConfig:
     maximum_session_pending_bytes: int = 64 * 1024 * 1024
     maximum_global_retained_packets: int = 4096
     maximum_global_retained_bytes: int = 256 * 1024 * 1024
+    maximum_transport_pending_count: int = 16_384
+    maximum_transport_pending_bytes: int = 512 * 1024 * 1024
+    maximum_transport_pending_control_count: int = 2_048
+    transport_shutdown_timeout_seconds: float = 5.0
     ack_timeout_ticks: int = 600
     maximum_packet_bytes: int = 64 * 1024 * 1024
     recording_checkpoint_interval_commits: int = 0
@@ -324,10 +337,22 @@ class RuntimeConfig:
             "maximum_session_pending_bytes",
             "maximum_global_retained_packets",
             "maximum_global_retained_bytes",
+            "maximum_transport_pending_count",
+            "maximum_transport_pending_bytes",
+            "maximum_transport_pending_control_count",
             "ack_timeout_ticks",
             "maximum_packet_bytes",
         ):
             _positive(getattr(self, field), field)
+        _positive_seconds(
+            self.transport_shutdown_timeout_seconds,
+            "transport_shutdown_timeout_seconds",
+        )
+        if self.maximum_transport_pending_control_count < 2 * self.maximum_clients:
+            raise ConfigurationError(
+                "maximum_transport_pending_control_count must be at least "
+                "twice maximum_clients"
+            )
         interval = self.recording_checkpoint_interval_commits
         if isinstance(interval, bool) or not isinstance(interval, int) or interval < 0:
             raise ConfigurationError(
@@ -447,6 +472,18 @@ class SceneEngineRuntime:
         self._world = world
         self._program = program
         self._transport = transport
+        self._transport_sender = (
+            None
+            if transport is None
+            else TransportSender(
+                transport,
+                maximum_pending_count=self._config.maximum_transport_pending_count,
+                maximum_pending_bytes=self._config.maximum_transport_pending_bytes,
+                maximum_pending_control_count=(
+                    self._config.maximum_transport_pending_control_count
+                ),
+            )
+        )
         self._recorder = recorder
         self._stream_id = identity
         self._commit_seq = initial_commit_seq
@@ -458,6 +495,9 @@ class SceneEngineRuntime:
         self._clock_origin = 0.0
         self._last_clock_seconds = 0.0
         self._sessions: dict[Any, ClientSession] = {}
+        self._session_epochs: dict[Any, int] = {}
+        self._pending_session_closes = 0
+        self._pending_rejection_closes = 0
         self._input_queue: deque[_QueuedInput] = deque()
         self._pending_input_ids: dict[Any, dict[str, bytes]] = {}
         self._retained: deque[PacketRef] = deque()
@@ -470,6 +510,7 @@ class SceneEngineRuntime:
         self._display_command_seq = 0
         self._fatal_cause: BaseException | None = None
         self._operation_lock = threading.Lock()
+        self._health_cache = self._build_health()
 
     @property
     def config(self) -> RuntimeConfig:
@@ -491,11 +532,14 @@ class SceneEngineRuntime:
     def health(self) -> RuntimeHealth:
         """Best-effort snapshot; never waits when another operation is active."""
         acquired = self._operation_lock.acquire(blocking=False)
+        if not acquired:
+            return self._health_cache
         try:
-            return self._build_health()
+            snapshot = self._build_health()
+            self._health_cache = snapshot
+            return snapshot
         finally:
-            if acquired:
-                self._operation_lock.release()
+            self._operation_lock.release()
 
     def _build_health(self) -> RuntimeHealth:
         return RuntimeHealth(
@@ -513,7 +557,7 @@ class SceneEngineRuntime:
         )
 
     def start(self, now_seconds: float | None = None) -> None:
-        with _serialized(self._operation_lock):
+        with self._operation():
             if self._state != CREATED:
                 raise RuntimeStateError("runtime can only start from CREATED")
             now = self._clock_time() if now_seconds is None else _finite_time(now_seconds)
@@ -526,6 +570,8 @@ class SceneEngineRuntime:
                         "initial checkpoint exceeds global retention capacity"
                     )
                 self._record_state_packet(checkpoint.raw_bytes, checkpoint=True)
+                if self._transport_sender is not None:
+                    self._transport_sender.start()
             except BaseException as exc:
                 self._mark_fatal(exc)
                 if not isinstance(exc, Exception):
@@ -534,7 +580,7 @@ class SceneEngineRuntime:
             self._state = RUNNING
 
     def pump(self, now_seconds: float | None = None) -> PumpResult:
-        with _serialized(self._operation_lock):
+        with self._operation():
             self._require_running()
             now = self._clock_time() if now_seconds is None else _finite_time(now_seconds)
             if now < self._last_clock_seconds and not math.isclose(
@@ -576,34 +622,51 @@ class SceneEngineRuntime:
             )
 
     def client_connected(self, client_id: Any) -> None:
-        with _serialized(self._operation_lock):
+        """Admit one connection-lifetime transport key or queue its rejection."""
+
+        with self._operation():
             self._require_running()
-            if self._transport is None:
+            sender = self._transport_sender
+            if sender is None:
                 raise ConfigurationError("client connections require a transport")
             if client_id in self._sessions:
                 self._drop_session(client_id, "client-replaced")
-            if len(self._sessions) >= self._config.maximum_clients:
-                try:
-                    self._transport.close(client_id, "maximum-clients")
-                except Exception:
-                    pass
+                return
+            if (
+                len(self._sessions) + self._pending_session_closes
+                >= self._config.maximum_clients
+            ):
+                self._reject_transport_client(client_id, "maximum-clients")
                 return
             try:
                 checkpoint, retained = self._get_or_build_current_checkpoint()
                 if not retained:
-                    try:
-                        self._transport.close(client_id, "global-retention-capacity")
-                    except Exception:
-                        pass
+                    self._reject_transport_client(
+                        client_id, "global-retention-capacity"
+                    )
                     return
+                epoch = sender.open_epoch(client_id)
+                self._session_epochs[client_id] = epoch
                 session = ClientSession(
                     client_id=client_id,
                     stream_id=self._stream_id,
                     baseline_commit_seq=self._commit_seq,
                     baseline_command_seq=checkpoint.last_command_seq,
                     current_tick=self._source_tick,
-                    send=self._transport.send,
-                    close=self._transport.close,
+                    send=lambda actual_client_id, raw_bytes, bound_epoch=epoch: (
+                        sender.submit_send(
+                            actual_client_id,
+                            bound_epoch,
+                            raw_bytes,
+                        )
+                    ),
+                    close=lambda actual_client_id, reason, bound_epoch=epoch: (
+                        self._close_transport_epoch(
+                            actual_client_id,
+                            bound_epoch,
+                            reason,
+                        )
+                    ),
                     limits=self._limits,
                 )
                 self._sessions[client_id] = session
@@ -618,11 +681,11 @@ class SceneEngineRuntime:
                 raise RuntimeFatalError("client checkpoint materialization failed") from exc
 
     def client_disconnected(self, client_id: Any) -> None:
-        with _serialized(self._operation_lock):
+        with self._operation():
             self._drop_session(client_id, "client-disconnected")
 
     def receive_client_packet(self, client_id: Any, raw_bytes: Any) -> None:
-        with _serialized(self._operation_lock):
+        with self._operation():
             self._require_running()
             session = self._sessions.get(client_id)
             if session is None or session.closed:
@@ -668,7 +731,7 @@ class SceneEngineRuntime:
                 self._drop_session(client_id, "client-packet-invalid")
 
     def stop(self) -> None:
-        with _serialized(self._operation_lock):
+        with self._operation():
             if self._state == STOPPED:
                 return
             if self._state == FATAL:
@@ -685,6 +748,17 @@ class SceneEngineRuntime:
             for client_id in tuple(self._sessions):
                 self._drop_session(client_id, "runtime-stopped")
             self._input_queue.clear()
+            sender = self._transport_sender
+            if sender is not None and not sender.shutdown(
+                drain=True,
+                timeout_seconds=self._config.transport_shutdown_timeout_seconds,
+            ):
+                failure = RuntimeError("transport sender shutdown timed out")
+                self._state = FATAL
+                self._fatal_cause = failure
+                raise RuntimeFatalError(
+                    "transport sender shutdown failed"
+                ) from failure
 
     def _commit_tick(self) -> None:
         before = self._assert_world_counters()
@@ -1010,6 +1084,7 @@ class SceneEngineRuntime:
 
     def _drop_session(self, client_id: Any, reason: str) -> None:
         session = self._sessions.pop(client_id, None)
+        epoch = self._session_epochs.pop(client_id, None)
         self._pending_input_ids.pop(client_id, None)
         if self._input_queue:
             self._input_queue = deque(
@@ -1017,6 +1092,78 @@ class SceneEngineRuntime:
             )
         if session is not None:
             session.close(reason)
+        elif epoch is not None:
+            self._close_transport_epoch(client_id, epoch, reason)
+
+    def _reject_transport_client(self, client_id: Any, reason: str) -> None:
+        sender = self._transport_sender
+        if sender is None:
+            return
+        rejection_capacity = (
+            self._config.maximum_transport_pending_control_count
+            - self._config.maximum_clients
+        )
+        if self._pending_rejection_closes >= rejection_capacity:
+            raise RuntimeBusyError(
+                "transport rejection close capacity is exhausted"
+            )
+        epoch = sender.open_epoch(client_id)
+        if not sender.cancel_epoch(
+            client_id,
+            epoch,
+            reason=reason,
+            token=_REJECTION_CLOSE_TOKEN,
+        ):
+            raise RuntimeBusyError(
+                "transport rejection close capacity is exhausted"
+            )
+        self._pending_rejection_closes += 1
+
+    def _close_transport_epoch(
+        self,
+        client_id: Any,
+        epoch: int,
+        reason: str,
+    ) -> bool:
+        sender = self._transport_sender
+        if sender is None:
+            return False
+        if reason == "runtime-stopped":
+            accepted = sender.submit_close(
+                client_id,
+                epoch,
+                reason,
+                token=_SESSION_CLOSE_TOKEN,
+            )
+        else:
+            accepted = sender.cancel_epoch(
+                client_id,
+                epoch,
+                reason=reason,
+                token=_SESSION_CLOSE_TOKEN,
+            )
+        if accepted:
+            self._pending_session_closes += 1
+        return accepted
+
+    def _drain_transport_results(self) -> None:
+        sender = self._transport_sender
+        if sender is None:
+            return
+        for result in sender.drain_results():
+            self._handle_transport_result(result)
+
+    def _handle_transport_result(self, result: TransportResult) -> None:
+        if result.kind == "close" and result.token is _SESSION_CLOSE_TOKEN:
+            self._pending_session_closes -= 1
+        elif result.kind == "close" and result.token is _REJECTION_CLOSE_TOKEN:
+            self._pending_rejection_closes -= 1
+        if (
+            result.kind == "send"
+            and result.status == "failed"
+            and self._session_epochs.get(result.client_id) == result.epoch
+        ):
+            self._drop_session(result.client_id, "transport-send-failed")
 
     def _read_world_counters(self) -> WorldCounters:
         value = self._program.read_counters(self._world)
@@ -1042,6 +1189,18 @@ class SceneEngineRuntime:
         except (TypeError, ValueError, OverflowError) as exc:
             raise ConfigurationError("clock.now() must return finite seconds") from exc
 
+    @contextmanager
+    def _operation(self):
+        if not self._operation_lock.acquire(blocking=False):
+            raise RuntimeBusyError("runtime operation is already active")
+        try:
+            self._drain_transport_results()
+            yield
+        finally:
+            self._drain_transport_results()
+            self._health_cache = self._build_health()
+            self._operation_lock.release()
+
     def _require_running(self) -> None:
         if self._state == FATAL:
             raise RuntimeFatalError("runtime is fatal") from self._fatal_cause
@@ -1053,6 +1212,12 @@ class SceneEngineRuntime:
         self._fatal_cause = exc
         for client_id in tuple(self._sessions):
             self._drop_session(client_id, "runtime-fatal")
+        sender = self._transport_sender
+        if sender is not None:
+            sender.shutdown(
+                drain=True,
+                timeout_seconds=self._config.transport_shutdown_timeout_seconds,
+            )
         close_incomplete = getattr(self._recorder, "close_incomplete", None)
         if callable(close_incomplete):
             try:
@@ -1086,6 +1251,15 @@ def _positive(value: Any, field: str) -> int:
     return value
 
 
+def _positive_seconds(value: Any, field: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ConfigurationError(f"{field} must be finite positive seconds")
+    result = float(value)
+    if not math.isfinite(result) or result <= 0:
+        raise ConfigurationError(f"{field} must be finite positive seconds")
+    return result
+
+
 def _text(value: Any, field: str) -> str:
     if not isinstance(value, str) or not value or value.strip() != value:
         raise ConfigurationError(f"{field} must be a non-empty canonical string")
@@ -1109,16 +1283,6 @@ def _finite_time(value: Any) -> float:
     if not math.isfinite(result):
         raise ConfigurationError("time must be finite seconds")
     return result
-
-
-@contextmanager
-def _serialized(lock: threading.Lock):
-    if not lock.acquire(blocking=False):
-        raise RuntimeBusyError("runtime operation is already active")
-    try:
-        yield
-    finally:
-        lock.release()
 
 
 __all__ = [

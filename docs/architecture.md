@@ -1,13 +1,14 @@
 # Current architecture
 
-Scene Engine 0.16 owns one deterministic publication and browser-projection boundary:
+Scene Engine 0.17 owns one deterministic publication and browser-projection boundary:
 
 ```text
 mutable product World
   -> EngineProgram at exactly 60 Hz
   -> ProductCheckpoint / ProductCommit
   -> scene-engine-wire@3 exact packet bytes
-  -> recorder + sessions
+  -> recorder + sessions / bounded outbox
+  -> one background transport sender
   -> SceneEngineClient 0.14
        -> immutable WorldState + cumulative ACK + O(1) DisplaySummary
        -> DisplayRuntime 0.13 AuthorityPort
@@ -26,6 +27,7 @@ root imports the Three backend. The current Display API is browser-oriented and 
 |---|---|---|
 | gameplay state and rules | product | six `EngineProgram` callbacks |
 | logical tick, revision, commit and command sequence | Python runtime | checkpoint/commit packet headers |
+| exact transport call order and connection epochs | Python transport sender thread | bounded immutable-byte outbox |
 | exact packet decode, WorldState pointer and ACK | JavaScript Client | `SceneEngineClient` |
 | authority IDs/matrix pool, parent graph and Prefab instances | DisplayRuntime | `AuthorityPort` plus read-only views |
 | Scene, Prefab, Resource, Component and state-schema catalog | DisplayRuntime composition | immutable definitions and registries |
@@ -35,6 +37,16 @@ root imports the Three backend. The current Display API is browser-oriented and 
 There is no second mutable World, product Node tree, Transform cache, application RAF, ACK cursor, packet decoder or fallback
 renderer. The private Prefab materialization ledger records definition-instance provenance and owned ordinary Nodes/Components;
 it is not a second hierarchy or a public child-Prefab object model.
+
+The Python runtime thread remains the sole owner of World mutation, packet construction, recording, sessions and matrix-pool
+lifecycle. After a packet is encoded and any configured recorder append succeeds, it may submit the same immutable byte object
+to one private transport thread. That worker owns only `EngineTransport.send/close`; a bounded queue, per-connection epochs and a
+runtime-drained result inbox prevent blocked I/O, stale session sends and background callbacks from crossing the authority
+boundary. This scheduling change does not alter Wire bytes, command cursors, ACK meaning or Replay.
+
+The transport key is unique for one physical connection lifetime and is never rebound to a replacement socket. Player/account
+identity remains product or network-host data. A reconnect therefore receives a fresh transport key; this keeps already-entered
+send/close calls attached to the endpoint for which they were accepted.
 
 ## Product and catalog boundary
 

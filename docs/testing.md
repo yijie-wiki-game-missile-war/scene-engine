@@ -29,6 +29,10 @@ TestRenderer，因此验证 CPU 侧绑定、矩阵、批处理、资源和生命
 checkpoint、commit、command、ACK、pending/in-flight 和最终状态一致性，不运行 RAF、draw 或 renderer 资源工作，
 因此时间中不混入渲染成本。
 
+Python 侧另用确定性的 Event/Condition 障碍测试后台 transport sender：阻塞 `send` 时 Runtime 仍可完成 tick、跨连接
+保持 FIFO、断开会取消旧 epoch、后台失败只移除对应 session、控制队列保持有界、停止会排空并回收 worker。测试不以
+`sleep` 推测调度，也不允许 worker 接触 World、Program、recorder、Session 或 MatrixPool。
+
 默认门禁只执行 32 roots 的确定性跨语言 smoke；更多 roots、commits、update ratio 和 roundtrip/windowed profile
 通过显式 benchmark runner 运行。
 

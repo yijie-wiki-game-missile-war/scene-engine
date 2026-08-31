@@ -14,12 +14,24 @@ from scene_engine import DisplayCatalogIdentity
 from scripts.benchmark_python_js_communication import (
     CommunicationProgram,
     CommunicationWorld,
+    LengthFramedPeer,
     PROFILE_ROUNDTRIP,
     run_benchmark,
 )
 
 
 ROOT = Path(__file__).parents[1]
+
+
+def test_length_framed_peer_owns_cross_platform_blocking_pipe_workers() -> None:
+    peer = LengthFramedPeer()
+    workers = (peer._stdin_thread, peer._stdout_thread, peer._stderr_thread)
+    try:
+        assert all(worker.is_alive() for worker in workers)
+        assert all(worker.daemon for worker in workers)
+    finally:
+        peer.abort()
+    assert all(not worker.is_alive() for worker in workers)
 
 
 def test_32_roots_cross_python_js_wire_and_ack_with_final_display_state() -> None:

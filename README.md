@@ -1,4 +1,4 @@
-# Scene Engine 0.16
+# Scene Engine 0.17
 
 Scene Engine 是面向**服务端权威浏览器游戏**的运行时基础设施。产品世界与玩法规则保留在 Python，按固定
 `60 tick/s` 推进；已提交的状态变化以完整基线和增量事务同步到浏览器，并投影为可渲染的 3D 场景。
@@ -10,8 +10,9 @@ Scene Engine 是面向**服务端权威浏览器游戏**的运行时基础设施
 
 - **权威世界发布**：以固定步进推进产品世界，按确定顺序独立发布每次已发生的状态变化，避免用渲染帧率或墙钟
   决定玩法结果。
-- **浏览器状态同步**：通过完整基线和增量提交同步逻辑状态与显示变化；只有在校验并通过提交屏障后才确认进度，
-  资源加载和绘制不会阻塞状态确认。
+- **浏览器状态同步**：通过完整基线和增量提交同步逻辑状态与显示变化；Python 将已录制的不可变 packet bytes 交给
+  有界后台发送器，阻塞的传输不会阻塞权威 tick；只有浏览器校验并通过提交屏障后才确认进度，资源加载和绘制不会
+  阻塞状态确认。
 - **声明式显示内容**：用 Scene、Prefab、Resource 和 Component 描述场景与表现，支持复用、嵌套和受约束的
   动态 Prefab 组合，并统一落入一棵显示节点树；Python 权威节点以稳定整数 ID 索引一个常驻 NumPy
   `(n,4,4)` Matrix4 池；一次更新先汇总 ID，再从池中一次抽取对齐的 `(m,4,4)` 连续矩阵块，并以一条批量
@@ -79,5 +80,6 @@ Scene Engine 不负责：
 - [Recording 与 Replay](docs/recording-replay.md)
 - [Wire 协议](docs/wire.md)
 - [Transform](docs/transform.md)
+- [开发环境](docs/development.md)
 - [测试方法与标准](docs/testing.md)
 - [测试项目](docs/tests/README.md)

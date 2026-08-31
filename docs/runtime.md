@@ -139,7 +139,7 @@ A tick transaction is:
 5. call `build_commit` with the mutation's `commit_context`;
 6. validate the World patch, matrix-pool lifecycle and every ID-targeted Display command;
 7. assign command sequence;
-8. encode/record once and publish shared immutable bytes;
+8. encode/record once and publish shared immutable bytes to the bounded transport outbox;
 9. expose the committed counters.
 
 Any uncaught mutation, build, validation, encoding or recorder error is fatal. The runtime does not retry the same tick against a
@@ -169,6 +169,33 @@ Sessions have bounded in-flight commits, pending bytes, input count and ACK time
 Checkpoints and commits occupy one global count/byte ring; eviction closes only lagging sessions, so slow clients never block
 simulation or recorder append.
 
+One private `TransportSender` thread owns every call to `EngineTransport.send` and `EngineTransport.close`. The runtime thread
+only submits already encoded immutable `bytes`; the worker never receives the World, `EngineProgram`, recorder,
+`ClientSession`, `DisplayMatrixPool` or Runtime itself. Submission order is FIFO across clients. Per-session epochs cancel queued
+packets after a disconnect and prevent a stale background result from removing another live session.
+
+`client_id` is an opaque, hashable connection-lifetime key, not a player, account or reusable socket-map name. The transport
+must keep it bound to the same physical endpoint until Engine's close call completes; a reconnect uses a fresh key. A duplicate
+`client_connected` call for a live key closes and removes that session but does not install another baseline under the reused
+key. This rule is what makes delayed worker calls safe on both Windows and Linux; an internal epoch cannot repair an adapter that
+has already rebound the same key to a different socket.
+
+The transport outbox is bounded independently by `RuntimeConfig.maximum_transport_pending_count`,
+`maximum_transport_pending_bytes` and `maximum_transport_pending_control_count`; counts include an operation currently blocked
+in the transport. The control limit must reserve at least one session-close and one rejected-connection-close slot per configured
+client. A full send outbox rejects the submitting session without blocking simulation. If the reserved rejected-connection close
+budget is already occupied, `client_connected` raises `RuntimeBusyError` and the network host remains responsible for closing
+that not-admitted endpoint. A background send failure cancels later sends in that epoch but preserves an already accepted close,
+and is reported through a thread-safe result inbox. The next serialized runtime boundary drops only the still-current matching
+session. Session `last_sent`/in-flight cursors mean
+accepted by this bounded outbox, not that an operating-system write has completed.
+
+`stop()` seals recording first, submits a graceful close after each session's accepted packets, then drains and joins the worker
+within `transport_shutdown_timeout_seconds`. Fatal shutdown first cancels session epochs and drains their close controls within
+the same finite bound. A transport method already executing cannot be pre-empted; failure to join during normal stop makes the
+runtime fatal instead of silently claiming a clean shutdown, while the daemon worker remains in draining state so a later
+transport recovery can still deliver the accepted packets and close.
+
 Input IDs are idempotent within a bounded session ledger. An identical completed request replays its exact result; a changed
-request never executes twice; conflicting bytes close that session. Disconnect or same-ID replacement removes queued input from
-the old session before a new baseline is installed.
+request never executes twice; conflicting bytes close that session. Dropping a session removes all of its queued input before a
+fresh connection-lifetime key may receive a baseline.

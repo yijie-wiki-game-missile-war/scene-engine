@@ -22,7 +22,8 @@ Python 测试由 `uv run python -m pytest -q` 按 `pyproject.toml` 的 `tests/` 
 
 | 测试项目 | 覆盖范围 |
 | --- | --- |
-| [`test_runtime.py`](../../tests/test_runtime.py) | 固定 60 Hz、tick 与 input 事务、commit/command cursor、会话幂等与隔离、checkpoint 缓存和全局保留、recorder 接入、fatal 边界、验证顺序与单次编码。 |
+| [`test_runtime.py`](../../tests/test_runtime.py) | 固定 60 Hz、tick 与 input 事务、commit/command cursor、会话幂等与隔离、checkpoint 缓存和全局保留、recorder 接入、后台 transport 集成、fatal 边界、验证顺序与单次编码。 |
+| [`test_transport_sender.py`](../../tests/test_transport_sender.py) | 有界 send/control 数量与字节 outbox、单 worker FIFO、不可变 bytes 共享、connection epoch 取消、失败 inbox、优雅/强制关闭、有限 shutdown 和元数据回收。 |
 | [`test_wire_v3.py`](../../tests/test_wire_v3.py) | Wire v3 packet、raw binary32 matrix Display attachment 布局、golden bytes、非法 corpus、大小与深度限制、安全整数、Display cursor 对齐、旧版本和旧布局拒绝。 |
 | [`test_display.py`](../../tests/test_display.py) | Python Display checkpoint、目录身份、parent-first baseline、流内单调且不复用的 uint32 Node ID、连续 `(n,4,4)` NumPy 矩阵池、增长与零墓碑、版本化 dirty 发布确认、严格命令序列、不可变编码、完整 state replacement，以及 Matrix4 便利构造和点/向量转换。 |
 | [`test_display_binary.py`](../../tests/test_display_binary.py) | SDCP/SDCS v3 的 Node ID 表、只读连续且 bytes-backed 的完整/dirty NumPy matrix tensor 与 dirty ID、空 tensor shape、全部 opcode、固定 65,536 command/payload 上限、跨 header cursor/tick seal、parent-first 父 ID 校验、state JSON、含 signaling NaN 的 opaque binary32 位模式 re-encode 保留与结构失败关闭。 |

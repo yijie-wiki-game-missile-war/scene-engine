@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass
 from decimal import Decimal
+import threading
 import pytest
 
 import scene_engine.runtime as runtime_module
@@ -58,17 +59,21 @@ class Program:
         self.mutate_checkpoint_pool = False
         self.world_codec = "example-world@1"
         self.callback_rates = defaultdict(list)
+        self.callback_thread_ids = defaultdict(list)
         self.display_matrix_pool = DisplayMatrixPool()
         self.display_node_id = self.display_matrix_pool.append(transform(World()))
 
     def read_counters(self, world: World) -> WorldCounters:
+        self.callback_thread_ids["read_counters"].append(threading.get_ident())
         return WorldCounters(world.tick, world.world_revision)
 
     def write_counters(self, world: World, counters: WorldCounters) -> None:
+        self.callback_thread_ids["write_counters"].append(threading.get_ident())
         world.tick = counters.source_tick
         world.world_revision = counters.world_revision
 
     def step(self, world: World, context) -> MutationResult:
+        self.callback_thread_ids["step"].append(threading.get_ident())
         self.steps += 1
         self.callback_rates["step"].append(context.ticks_per_second)
         if self.reenter:
@@ -79,6 +84,7 @@ class Program:
         return MutationResult.changed()
 
     def handle_input(self, world: World, request, context) -> MutationResult:
+        self.callback_thread_ids["handle_input"].append(threading.get_ident())
         self.input_calls += 1
         self.callback_rates["handle_input"].append(context.ticks_per_second)
         if request.command == "reject":
@@ -91,6 +97,7 @@ class Program:
         return MutationResult.changed()
 
     def build_checkpoint(self, world: World, context) -> ProductCheckpoint:
+        self.callback_thread_ids["build_checkpoint"].append(threading.get_ident())
         self.checkpoint_calls += 1
         self.callback_rates["build_checkpoint"].append(context.ticks_per_second)
         if self.mutate_checkpoint_pool:
@@ -105,6 +112,7 @@ class Program:
         )
 
     def build_commit(self, world: World, mutation, context) -> ProductCommit:
+        self.callback_thread_ids["build_commit"].append(threading.get_ident())
         self.callback_rates["build_commit"].append(context.ticks_per_second)
         if self.fail_build:
             raise RuntimeError("publication failed")
@@ -145,26 +153,129 @@ class Program:
 
 class Transport:
     def __init__(self) -> None:
+        self._condition = threading.Condition()
         self.sent = defaultdict(list)
         self.closed = []
+        self.failed = []
+        self.operations = []
+        self.send_thread_ids = []
+        self.close_thread_ids = []
+        self._fail_next = defaultdict(int)
 
     def send(self, client_id, raw):
-        self.sent[client_id].append(raw)
+        thread_id = threading.get_ident()
+        with self._condition:
+            self.send_thread_ids.append(thread_id)
+            if self._fail_next[client_id]:
+                self._fail_next[client_id] -= 1
+                self.failed.append((client_id, raw))
+                self.operations.append(("send-failed", client_id, raw))
+                self._condition.notify_all()
+                raise RuntimeError("synthetic transport send failure")
+            self.sent[client_id].append(raw)
+            self.operations.append(("send", client_id, raw))
+            self._condition.notify_all()
         return True
 
     def close(self, client_id, reason):
-        self.closed.append((client_id, reason))
+        thread_id = threading.get_ident()
+        with self._condition:
+            self.close_thread_ids.append(thread_id)
+            self.closed.append((client_id, reason))
+            self.operations.append(("close", client_id, reason))
+            self._condition.notify_all()
+
+    def fail_next_send(self, client_id) -> None:
+        with self._condition:
+            self._fail_next[client_id] += 1
+
+    def wait_sent(self, client_id, count, *, timeout=5.0):
+        with self._condition:
+            assert self._condition.wait_for(
+                lambda: len(self.sent[client_id]) >= count,
+                timeout=timeout,
+            ), f"timed out waiting for {count} sends to {client_id!r}"
+            return tuple(self.sent[client_id])
+
+    def sent_packets(self, client_id):
+        with self._condition:
+            return tuple(self.sent[client_id])
+
+    def wait_matching_sent(self, client_id, predicate, *, timeout=5.0):
+        with self._condition:
+            match = None
+
+            def matched():
+                nonlocal match
+                for packet in reversed(self.sent[client_id]):
+                    if predicate(packet):
+                        match = packet
+                        return True
+                return False
+
+            assert self._condition.wait_for(
+                matched,
+                timeout=timeout,
+            ), f"timed out waiting for a matching send to {client_id!r}"
+            return match
+
+    def wait_closed(self, count, *, timeout=5.0):
+        with self._condition:
+            assert self._condition.wait_for(
+                lambda: len(self.closed) >= count,
+                timeout=timeout,
+            ), f"timed out waiting for {count} transport closes"
+            return tuple(self.closed)
+
+    def closed_calls(self):
+        with self._condition:
+            return tuple(self.closed)
+
+    def wait_failed(self, count, *, timeout=5.0):
+        with self._condition:
+            assert self._condition.wait_for(
+                lambda: len(self.failed) >= count,
+                timeout=timeout,
+            ), f"timed out waiting for {count} transport failures"
+            return tuple(self.failed)
+
+    def operation_log(self):
+        with self._condition:
+            return tuple(self.operations)
+
+
+class BlockingFirstSendTransport(Transport):
+    def __init__(self) -> None:
+        super().__init__()
+        self.send_entered = threading.Event()
+        self.release_send = threading.Event()
+        self._block_lock = threading.Lock()
+        self._block_first_send = True
+
+    def send(self, client_id, raw):
+        with self._block_lock:
+            block = self._block_first_send
+            self._block_first_send = False
+        if block:
+            self.send_entered.set()
+            if not self.release_send.wait(30.0):
+                raise TimeoutError("test did not release blocked transport send")
+        return super().send(client_id, raw)
 
 
 class Recorder:
     def __init__(self) -> None:
         self.appended = []
         self.sealed = False
+        self.append_thread_ids = []
+        self.seal_thread_ids = []
 
     def append(self, packet_bytes, *, checkpoint):
+        self.append_thread_ids.append(threading.get_ident())
         self.appended.append((packet_bytes, checkpoint))
 
     def seal(self):
+        self.seal_thread_ids.append(threading.get_ident())
         self.sealed = True
 
 
@@ -235,11 +346,26 @@ def nodes(world: World, node_id: int = 0) -> tuple[DisplayNode, ...]:
     )
 
 
-def make_runtime(*, config=None, recorder=None):
+_RUNTIMES_TO_STOP = []
+
+
+@pytest.fixture(autouse=True)
+def stop_runtime_workers_after_each_test():
+    yield
+    for runtime in reversed(_RUNTIMES_TO_STOP):
+        try:
+            if runtime.health.state == "running":
+                runtime.stop()
+        except RuntimeFatalError:
+            pass
+    _RUNTIMES_TO_STOP.clear()
+
+
+def make_runtime(*, config=None, recorder=None, transport=None):
     clock = ManualClock()
     world = World()
     program = Program()
-    transport = Transport()
+    transport = transport or Transport()
     runtime = SceneEngineRuntime(
         world=world,
         program=program,
@@ -251,6 +377,7 @@ def make_runtime(*, config=None, recorder=None):
     )
     program.runtime = runtime
     runtime.start()
+    _RUNTIMES_TO_STOP.append(runtime)
     return runtime, clock, world, program, transport
 
 
@@ -260,6 +387,38 @@ def test_runtime_rate_is_fixed_by_contract_but_carried_as_config_value() -> None
     for invalid_rate in (30, True, 60.0, Decimal(60), 60 + 0j):
         with pytest.raises(ConfigurationError, match="must equal 60"):
             RuntimeConfig(ticks_per_second=invalid_rate)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("maximum_transport_pending_count", 0),
+        ("maximum_transport_pending_count", True),
+        ("maximum_transport_pending_count", 1.0),
+        ("maximum_transport_pending_bytes", -1),
+        ("maximum_transport_pending_bytes", False),
+        ("maximum_transport_pending_bytes", Decimal(1)),
+        ("maximum_transport_pending_control_count", 0),
+        ("maximum_transport_pending_control_count", True),
+        ("maximum_transport_pending_control_count", 1.0),
+        ("transport_shutdown_timeout_seconds", 0),
+        ("transport_shutdown_timeout_seconds", -1.0),
+        ("transport_shutdown_timeout_seconds", True),
+        ("transport_shutdown_timeout_seconds", float("inf")),
+        ("transport_shutdown_timeout_seconds", float("nan")),
+    ),
+)
+def test_transport_dispatcher_config_rejects_invalid_bounds(field, value) -> None:
+    with pytest.raises(ConfigurationError, match=field):
+        RuntimeConfig(**{field: value})
+
+
+def test_transport_control_capacity_reserves_session_and_rejection_closes() -> None:
+    with pytest.raises(ConfigurationError, match="twice maximum_clients"):
+        RuntimeConfig(
+            maximum_clients=2,
+            maximum_transport_pending_control_count=3,
+        )
 
 
 def test_every_product_callback_receives_the_contract_rate() -> None:
@@ -290,7 +449,16 @@ def test_every_product_callback_receives_the_contract_rate() -> None:
 
 
 def acknowledge(runtime, transport, client_id, packet=None):
-    state = read_engine_packet(packet or transport.sent[client_id][-1])
+    if packet is None:
+        packet = transport.wait_matching_sent(
+            client_id,
+            lambda raw: (
+                (decoded := read_engine_packet(raw)).kind
+                in {PacketKind.CHECKPOINT, PacketKind.COMMIT}
+                and decoded.header["commit_seq"] == runtime.commit_seq
+            ),
+        )
+    state = read_engine_packet(packet)
     runtime.receive_client_packet(
         client_id,
         encode_ack(
@@ -298,6 +466,30 @@ def acknowledge(runtime, transport, client_id, packet=None):
             commit_seq=state.header["commit_seq"],
             last_command_seq=state.header["last_command_seq"],
         ),
+    )
+
+
+def wait_engine_packet(
+    transport,
+    client_id,
+    *,
+    kind=None,
+    commit_seq=None,
+    input_id=None,
+):
+    def matches(raw):
+        packet = read_engine_packet(raw)
+        return (
+            (kind is None or packet.kind is kind)
+            and (
+                commit_seq is None
+                or packet.header.get("commit_seq") == commit_seq
+            )
+            and (input_id is None or packet.header.get("input_id") == input_id)
+        )
+
+    return read_engine_packet(
+        transport.wait_matching_sent(client_id, matches)
     )
 
 
@@ -320,7 +512,12 @@ def test_tick_and_changed_input_have_one_commit_cursor_and_display_seal() -> Non
     acknowledge(runtime, transport, "a")
     clock.advance(1 / 60)
     result = runtime.pump()
-    tick = read_engine_packet(transport.sent["a"][-1])
+    tick = wait_engine_packet(
+        transport,
+        "a",
+        kind=PacketKind.COMMIT,
+        commit_seq=1,
+    )
     assert result.ticks_committed == 1
     assert tick.kind is PacketKind.COMMIT
     assert tick.header["cause"] == "tick"
@@ -344,7 +541,12 @@ def test_tick_and_changed_input_have_one_commit_cursor_and_display_seal() -> Non
 
     send_input(runtime, "a", input_id="a:1", command="increment", args={"amount": 2.5})
     runtime.pump()
-    changed = read_engine_packet(transport.sent["a"][-1])
+    changed = wait_engine_packet(
+        transport,
+        "a",
+        kind=PacketKind.COMMIT,
+        commit_seq=2,
+    )
     assert changed.header["cause"] == "input"
     assert changed.header["causation_id"] == "a:1"
     assert changed.header["source_tick"] == 1
@@ -367,7 +569,12 @@ def test_noop_and_rejected_input_do_not_change_any_counter() -> None:
     for number, command in enumerate(("no-op", "reject"), 1):
         send_input(runtime, "a", input_id=f"a:{number}", command=command)
         runtime.pump()
-        response = read_engine_packet(transport.sent["a"][-1])
+        response = wait_engine_packet(
+            transport,
+            "a",
+            kind=PacketKind.INPUT_RESULT,
+            input_id=f"a:{number}",
+        )
         assert response.kind is PacketKind.INPUT_RESULT
         assert response.header["status"] in {"no-op", "rejected"}
         assert (world.tick, world.world_revision, runtime.commit_seq) == before
@@ -387,11 +594,17 @@ def test_input_idempotency_replays_noop_once_and_never_reexecutes_changed() -> N
     )
     runtime.receive_client_packet("a", no_op)
     runtime.pump()
-    first_response = transport.sent["a"][-1]
-    sent_count = len(transport.sent["a"])
+    first_response = transport.wait_matching_sent(
+        "a",
+        lambda raw: (
+            (packet := read_engine_packet(raw)).kind is PacketKind.INPUT_RESULT
+            and packet.header["input_id"] == "a:no-op"
+        ),
+    )
+    sent_count = len(transport.sent_packets("a"))
     runtime.receive_client_packet("a", no_op)
-    assert len(transport.sent["a"]) == sent_count + 1
-    assert transport.sent["a"][-1] == first_response
+    duplicate_packets = transport.wait_sent("a", sent_count + 1)
+    assert duplicate_packets[-1] == first_response
     assert program.input_calls == 1
 
     changed = encode_input(
@@ -428,37 +641,43 @@ def test_conflicting_duplicate_input_closes_only_its_session() -> None:
     )
     runtime.receive_client_packet("a", conflict)
     assert runtime.health.client_count == 0
-    assert transport.closed[-1] == ("a", "client-packet-invalid")
+    assert transport.wait_closed(1)[-1] == ("a", "client-packet-invalid")
 
 
-def test_disconnect_or_same_id_replacement_discards_queued_inputs() -> None:
+def test_duplicate_connect_or_disconnect_discards_queued_inputs() -> None:
     runtime, _, world, program, transport = make_runtime()
-    runtime.client_connected("same")
-    acknowledge(runtime, transport, "same")
+    runtime.client_connected("duplicate")
+    acknowledge(runtime, transport, "duplicate")
     send_input(
         runtime,
-        "same",
-        input_id="same:old",
+        "duplicate",
+        input_id="duplicate:old",
         command="increment",
         args={"amount": 7.0},
     )
-    runtime.client_connected("same")
-    acknowledge(runtime, transport, "same")
+    runtime.client_connected("duplicate")
+    assert runtime.health.client_count == 0
     runtime.pump()
     assert world.value == 0.0
     assert runtime.commit_seq == 0
     assert program.input_calls == 0
+    assert transport.wait_closed(1)[-1] == (
+        "duplicate",
+        "client-replaced",
+    )
 
+    runtime.client_connected("old-connection")
+    acknowledge(runtime, transport, "old-connection")
     send_input(
         runtime,
-        "same",
-        input_id="same:gone",
+        "old-connection",
+        input_id="old-connection:gone",
         command="increment",
         args={"amount": 9.0},
     )
-    runtime.client_disconnected("same")
-    runtime.client_connected("same")
-    acknowledge(runtime, transport, "same")
+    runtime.client_disconnected("old-connection")
+    runtime.client_connected("new-connection")
+    acknowledge(runtime, transport, "new-connection")
     runtime.pump()
     assert world.value == 0.0
     assert runtime.commit_seq == 0
@@ -488,8 +707,8 @@ def test_start_retains_one_checkpoint_shared_by_recorder_and_clients() -> None:
     runtime.client_connected("second")
 
     assert program.checkpoint_calls == 1
-    assert transport.sent["first"][0] is cached.raw_bytes
-    assert transport.sent["second"][0] is cached.raw_bytes
+    assert transport.wait_sent("first", 1)[0] is cached.raw_bytes
+    assert transport.wait_sent("second", 1)[0] is cached.raw_bytes
     assert runtime._sessions["first"].references_packet(cached)
     assert runtime._sessions["second"].references_packet(cached)
 
@@ -510,8 +729,8 @@ def test_commit_invalidates_checkpoint_and_next_revision_builds_once() -> None:
     assert program.checkpoint_calls == 2
     assert current is not None and current is not initial
     assert any(packet is current for packet in runtime._retained)
-    assert transport.sent["late-first"][0] is current.raw_bytes
-    assert transport.sent["late-second"][0] is current.raw_bytes
+    assert transport.wait_sent("late-first", 1)[0] is current.raw_bytes
+    assert transport.wait_sent("late-second", 1)[0] is current.raw_bytes
     assert runtime._sessions["late-first"].references_packet(current)
     assert runtime._sessions["late-second"].references_packet(current)
     checkpoint = read_engine_packet(current.raw_bytes)
@@ -546,7 +765,7 @@ def test_evicted_current_checkpoint_is_rebuilt_and_retained_safely() -> None:
     assert rebuilt is not None and rebuilt is not original
     assert rebuilt.raw_bytes == original.raw_bytes
     assert any(packet is rebuilt for packet in runtime._retained)
-    assert transport.sent["after-eviction"][0] is rebuilt.raw_bytes
+    assert transport.wait_sent("after-eviction", 1)[0] is rebuilt.raw_bytes
 
 
 def test_multiple_clients_share_commit_bytes_and_bad_ack_is_isolated() -> None:
@@ -554,10 +773,12 @@ def test_multiple_clients_share_commit_bytes_and_bad_ack_is_isolated() -> None:
     for client_id in ("a", "b"):
         runtime.client_connected(client_id)
         acknowledge(runtime, transport, client_id)
-    assert transport.sent["a"][0] is transport.sent["b"][0]
+    assert transport.sent_packets("a")[0] is transport.sent_packets("b")[0]
     clock.advance(1 / 60)
     runtime.pump()
-    assert transport.sent["a"][-1] is transport.sent["b"][-1]
+    a_packets = transport.wait_sent("a", 2)
+    b_packets = transport.wait_sent("b", 2)
+    assert a_packets[-1] is b_packets[-1]
     runtime.receive_client_packet(
         "b",
         encode_ack(
@@ -567,8 +788,314 @@ def test_multiple_clients_share_commit_bytes_and_bad_ack_is_isolated() -> None:
         ),
     )
     assert runtime.health.client_count == 1
-    assert transport.closed[-1][0] == "b"
+    assert transport.wait_closed(1)[-1][0] == "b"
     acknowledge(runtime, transport, "a")
+
+
+def test_blocked_transport_does_not_block_pump_and_preserves_fifo_snapshots() -> None:
+    transport = BlockingFirstSendTransport()
+    runtime, clock, _, _, _ = make_runtime(transport=transport)
+    runtime.client_connected("blocked")
+    assert transport.send_entered.wait(5.0)
+
+    clock.advance(2 / TICKS_PER_SECOND)
+    pump_done = threading.Event()
+    pump_results = []
+    pump_errors = []
+
+    def pump_runtime() -> None:
+        try:
+            pump_results.append(runtime.pump())
+        except BaseException as exc:
+            pump_errors.append(exc)
+        finally:
+            pump_done.set()
+
+    pump_thread = threading.Thread(target=pump_runtime)
+    pump_thread.start()
+    try:
+        assert pump_done.wait(5.0), "pump waited for the blocked transport"
+        assert not pump_errors
+        assert pump_results[0].ticks_committed == 2
+        assert not transport.release_send.is_set()
+    finally:
+        transport.release_send.set()
+        pump_thread.join(5.0)
+    assert not pump_thread.is_alive()
+
+    packets = tuple(read_engine_packet(raw) for raw in transport.wait_sent("blocked", 3))
+    assert [(packet.kind, packet.header["commit_seq"]) for packet in packets] == [
+        (PacketKind.CHECKPOINT, 0),
+        (PacketKind.COMMIT, 1),
+        (PacketKind.COMMIT, 2),
+    ]
+    translations = []
+    for packet in packets[1:]:
+        command_stream = decode_display_command_stream_binary(
+            packet.attachments[1].bytes,
+            expected_source_tick=packet.header["source_tick"],
+            expected_last_command_seq=packet.header["last_command_seq"],
+        )
+        translations.append(float(command_stream["dirty_matrices"].reshape(-1)[12]))
+    assert translations == [1.5, 3.0]
+
+
+def test_transport_calls_use_worker_while_program_and_recorder_stay_on_owner() -> None:
+    owner_thread_id = threading.get_ident()
+    recorder = Recorder()
+    runtime, clock, _, program, transport = make_runtime(recorder=recorder)
+
+    runtime.client_connected("a")
+    acknowledge(runtime, transport, "a")
+    clock.advance(1 / TICKS_PER_SECOND)
+    runtime.pump()
+    transport.wait_sent("a", 2)
+    runtime.stop()
+    transport.wait_closed(1)
+
+    callback_thread_ids = {
+        thread_id
+        for calls in program.callback_thread_ids.values()
+        for thread_id in calls
+    }
+    assert callback_thread_ids == {owner_thread_id}
+    assert set(recorder.append_thread_ids) == {owner_thread_id}
+    assert recorder.seal_thread_ids == [owner_thread_id]
+    transport_thread_ids = set(transport.send_thread_ids + transport.close_thread_ids)
+    assert len(transport_thread_ids) == 1
+    assert owner_thread_id not in transport_thread_ids
+
+
+def test_health_returns_cached_snapshot_while_runtime_operation_is_active() -> None:
+    runtime, clock, _, program, _ = make_runtime()
+    entered_step = threading.Event()
+    release_step = threading.Event()
+    original_step = program.step
+
+    def blocked_step(world, context):
+        entered_step.set()
+        if not release_step.wait(5.0):
+            raise TimeoutError("test did not release blocked step")
+        return original_step(world, context)
+
+    program.step = blocked_step
+    clock.advance(1 / TICKS_PER_SECOND)
+    pump_errors = []
+
+    def pump_runtime() -> None:
+        try:
+            runtime.pump()
+        except BaseException as exc:
+            pump_errors.append(exc)
+
+    pump_thread = threading.Thread(target=pump_runtime)
+    pump_thread.start()
+    assert entered_step.wait(5.0)
+    cached = runtime.health
+    assert cached.commit_seq == 0
+    assert cached.source_tick == 0
+
+    release_step.set()
+    pump_thread.join(5.0)
+    assert not pump_thread.is_alive()
+    assert not pump_errors
+    assert runtime.health.commit_seq == 1
+
+
+def test_async_send_failure_closes_only_the_failed_session() -> None:
+    runtime, clock, _, _, transport = make_runtime()
+    for client_id in ("failed", "healthy"):
+        runtime.client_connected(client_id)
+        acknowledge(runtime, transport, client_id)
+
+    transport.fail_next_send("failed")
+    clock.advance(1 / TICKS_PER_SECOND)
+    runtime.pump()
+    transport.wait_failed(1)
+    transport.wait_sent("healthy", 2)
+
+    runtime.pump()
+    assert runtime.health.client_count == 1
+    assert set(runtime._sessions) == {"healthy"}
+    closed = transport.wait_closed(1)
+    assert closed == (("failed", "transport-send-failed"),)
+    acknowledge(runtime, transport, "healthy")
+    assert all(client_id != "healthy" for client_id, _ in transport.closed_calls())
+
+
+def test_disconnect_cancels_old_epoch_before_a_new_connection_baseline() -> None:
+    transport = BlockingFirstSendTransport()
+    runtime, clock, _, _, _ = make_runtime(transport=transport)
+    runtime.client_connected("old-connection")
+    assert transport.send_entered.wait(5.0)
+
+    try:
+        clock.advance(1 / TICKS_PER_SECOND)
+        runtime.pump()
+        runtime.client_disconnected("old-connection")
+        runtime.client_connected("new-connection")
+        assert not transport.release_send.is_set()
+    finally:
+        transport.release_send.set()
+
+    old_sent = transport.wait_sent("old-connection", 1)
+    new_sent = transport.wait_sent("new-connection", 1)
+    closed = transport.wait_closed(1)
+    assert read_engine_packet(old_sent[0]).header["commit_seq"] == 0
+    new_checkpoint = read_engine_packet(new_sent[0])
+    assert new_checkpoint.kind is PacketKind.CHECKPOINT
+    assert new_checkpoint.header["commit_seq"] == 1
+    assert closed == (("old-connection", "client-disconnected"),)
+    assert [(kind, client_id) for kind, client_id, _ in transport.operation_log()] == [
+        ("send", "old-connection"),
+        ("close", "old-connection"),
+        ("send", "new-connection"),
+    ]
+
+
+def test_stop_drains_sender_and_joins_worker_without_leak() -> None:
+    transport = BlockingFirstSendTransport()
+    runtime, clock, _, _, _ = make_runtime(transport=transport)
+    sender = runtime._transport_sender
+    assert sender is not None
+    worker = sender._worker
+    assert worker is not None and worker.is_alive()
+
+    runtime.client_connected("a")
+    assert transport.send_entered.wait(5.0)
+    clock.advance(1 / TICKS_PER_SECOND)
+    runtime.pump()
+
+    stop_started = threading.Event()
+    stop_done = threading.Event()
+    stop_errors = []
+
+    def stop_runtime() -> None:
+        stop_started.set()
+        try:
+            runtime.stop()
+        except BaseException as exc:
+            stop_errors.append(exc)
+        finally:
+            stop_done.set()
+
+    stop_thread = threading.Thread(target=stop_runtime)
+    stop_thread.start()
+    try:
+        assert stop_started.wait(5.0)
+        with sender._condition:
+            assert sender._condition.wait_for(
+                lambda: sender._state == "draining",
+                timeout=5.0,
+            )
+        assert not stop_done.is_set()
+    finally:
+        transport.release_send.set()
+    assert stop_done.wait(5.0)
+    stop_thread.join(5.0)
+
+    assert not stop_errors
+    assert not stop_thread.is_alive()
+    packets = tuple(read_engine_packet(raw) for raw in transport.wait_sent("a", 2))
+    assert [(packet.kind, packet.header["commit_seq"]) for packet in packets] == [
+        (PacketKind.CHECKPOINT, 0),
+        (PacketKind.COMMIT, 1),
+    ]
+    assert transport.wait_closed(1) == (("a", "runtime-stopped"),)
+    assert sender.health.state == "stopped"
+    assert not sender.health.worker_alive
+    assert not worker.is_alive()
+
+
+def test_stop_still_closes_session_when_an_accepted_send_fails() -> None:
+    transport = BlockingFirstSendTransport()
+    transport.fail_next_send("a")
+    runtime, clock, _, _, _ = make_runtime(transport=transport)
+    runtime.client_connected("a")
+    assert transport.send_entered.wait(5.0)
+    clock.advance(1 / TICKS_PER_SECOND)
+    runtime.pump()
+
+    stop_done = threading.Event()
+    stop_errors = []
+
+    def stop_runtime() -> None:
+        try:
+            runtime.stop()
+        except BaseException as exc:
+            stop_errors.append(exc)
+        finally:
+            stop_done.set()
+
+    stop_thread = threading.Thread(target=stop_runtime)
+    stop_thread.start()
+    sender = runtime._transport_sender
+    assert sender is not None
+    with sender._condition:
+        assert sender._condition.wait_for(
+            lambda: sender._state == "draining",
+            timeout=5.0,
+        )
+    transport.release_send.set()
+    assert stop_done.wait(5.0)
+    stop_thread.join(5.0)
+
+    assert not stop_errors
+    assert transport.wait_closed(1) == (("a", "runtime-stopped"),)
+    assert [(kind, client_id) for kind, client_id, _ in transport.operation_log()] == [
+        ("send-failed", "a"),
+        ("close", "a"),
+    ]
+
+
+def test_stop_timeout_reports_fatal_but_keeps_graceful_drain_alive() -> None:
+    transport = BlockingFirstSendTransport()
+    config = RuntimeConfig(transport_shutdown_timeout_seconds=0.01)
+    runtime, clock, _, _, _ = make_runtime(config=config, transport=transport)
+    runtime.client_connected("a")
+    assert transport.send_entered.wait(5.0)
+    clock.advance(1 / TICKS_PER_SECOND)
+    runtime.pump()
+
+    with pytest.raises(RuntimeFatalError, match="shutdown failed"):
+        runtime.stop()
+    assert runtime.health.state == "fatal"
+    sender = runtime._transport_sender
+    assert sender is not None
+    assert sender.health.state == "draining"
+
+    transport.release_send.set()
+    packets = tuple(read_engine_packet(raw) for raw in transport.wait_sent("a", 2))
+    assert [packet.header["commit_seq"] for packet in packets] == [0, 1]
+    assert transport.wait_closed(1) == (("a", "runtime-stopped"),)
+    assert sender.shutdown(drain=True, timeout_seconds=5.0)
+
+
+def test_rejected_connection_closes_are_bounded_while_transport_is_blocked() -> None:
+    transport = BlockingFirstSendTransport()
+    config = RuntimeConfig(
+        maximum_clients=1,
+        maximum_transport_pending_control_count=2,
+    )
+    runtime, _, _, _, _ = make_runtime(config=config, transport=transport)
+    runtime.client_connected("admitted")
+    assert transport.send_entered.wait(5.0)
+
+    runtime.client_connected("first-rejected")
+    with pytest.raises(RuntimeBusyError, match="close capacity"):
+        runtime.client_connected("caller-must-close")
+    sender = runtime._transport_sender
+    assert sender is not None
+    assert sender.health.pending_control_count == 1
+
+    transport.release_send.set()
+    assert transport.wait_closed(1) == (
+        ("first-rejected", "maximum-clients"),
+    )
+    assert all(
+        client_id != "caller-must-close"
+        for client_id, _ in transport.closed_calls()
+    )
 
 
 def test_global_count_retention_evicts_only_lagging_session() -> None:
@@ -582,8 +1109,9 @@ def test_global_count_retention_evicts_only_lagging_session() -> None:
     acknowledge(runtime, transport, "healthy")
     clock.advance(1 / 60)
     runtime.pump()
+    closed = transport.wait_closed(1)
     assert any(client == "slow" and reason == "global-retention-evicted"
-               for client, reason in transport.closed)
+               for client, reason in closed)
     assert runtime.health.client_count == 1
     acknowledge(runtime, transport, "healthy")
 
@@ -619,20 +1147,26 @@ def test_staggered_slow_checkpoints_are_shared_and_globally_bounded() -> None:
     runtime, clock, _, _, transport = make_runtime(config=config)
     runtime.client_connected("zero-a")
     runtime.client_connected("zero-b")
-    assert transport.sent["zero-a"][0] is transport.sent["zero-b"][0]
+    zero_a = transport.wait_sent("zero-a", 1)
+    zero_b = transport.wait_sent("zero-b", 1)
+    assert zero_a[0] is zero_b[0]
     clock.advance(1 / 60)
     runtime.pump()
     runtime.client_connected("one")
     assert runtime.health.retained_packet_count <= 2
     assert runtime.health.retained_bytes <= config.maximum_global_retained_bytes
-    assert any(client in {"zero-a", "zero-b"} for client, _ in transport.closed)
+    assert any(
+        client in {"zero-a", "zero-b"}
+        for client, _ in transport.wait_closed(1)
+    )
     clock.advance(1 / 60)
     runtime.pump()
     runtime.client_connected("two")
     assert runtime.health.retained_packet_count <= 2
     assert runtime.health.retained_bytes <= config.maximum_global_retained_bytes
+    closed = transport.wait_closed(3)
     assert any(client == "one" and reason == "global-retention-evicted"
-               for client, reason in transport.closed)
+               for client, reason in closed)
 
 
 def test_recorder_starts_with_checkpoint_and_preserves_exact_commit(tmp_path) -> None:
@@ -681,7 +1215,7 @@ def test_periodic_recorder_uses_current_checkpoint_cache_after_commit() -> None:
     runtime.client_connected("after-periodic")
 
     assert program.checkpoint_calls == 2
-    assert transport.sent["after-periodic"][0] is cached.raw_bytes
+    assert transport.wait_sent("after-periodic", 1)[0] is cached.raw_bytes
 
 
 def test_oversized_periodic_checkpoint_records_anchor_and_evicts_session(
@@ -744,10 +1278,16 @@ def test_oversized_periodic_checkpoint_records_anchor_and_evicts_session(
     assert runtime.health.retained_packet_count == 1
     assert runtime._checkpoint_cache is not None
     assert program.checkpoint_calls == 2
-    assert transport.closed[-1] == ("active", "global-retention-evicted")
-    assert [
-        read_engine_packet(raw).kind for raw in transport.sent["active"]
-    ] == [PacketKind.CHECKPOINT, PacketKind.COMMIT]
+    assert transport.wait_closed(1)[-1] == (
+        "active",
+        "global-retention-evicted",
+    )
+    delivered_kinds = [
+        read_engine_packet(raw).kind for raw in transport.sent_packets("active")
+    ]
+    assert delivered_kinds[0] is PacketKind.CHECKPOINT
+    assert all(kind is PacketKind.COMMIT for kind in delivered_kinds[1:])
+    assert len(delivered_kinds) <= 2
 
     runtime.stop()
     log = read_packet_log(tmp_path)

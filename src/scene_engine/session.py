@@ -158,7 +158,14 @@ class ClientSession:
     def flush(self, *, current_tick: int) -> None:
         self._require_open()
         while self._pending and len(self._in_flight) < self._limits.maximum_in_flight_commits:
-            packet = self._pending[0]
+            packet = self._pending.popleft()
+            self._pending_bytes -= packet.byte_length
+            self._in_flight.append(packet)
+            self._in_flight_bytes += packet.byte_length
+            self.last_sent_seq = packet.commit_seq
+            self.last_sent_command_seq = packet.last_command_seq
+            if len(self._in_flight) == 1:
+                self.last_progress_tick = current_tick
             try:
                 accepted = self._send(self.client_id, packet.raw_bytes)
                 if accepted is False:
@@ -168,14 +175,6 @@ class ClientSession:
                 if not isinstance(exc, Exception):
                     raise
                 raise SessionError("transport send failed") from exc
-            self._pending.popleft()
-            self._pending_bytes -= packet.byte_length
-            self._in_flight.append(packet)
-            self._in_flight_bytes += packet.byte_length
-            self.last_sent_seq = packet.commit_seq
-            self.last_sent_command_seq = packet.last_command_seq
-            if len(self._in_flight) == 1:
-                self.last_progress_tick = current_tick
 
     def acknowledge(
         self,
