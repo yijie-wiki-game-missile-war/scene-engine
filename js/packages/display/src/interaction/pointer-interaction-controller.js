@@ -9,6 +9,11 @@ import {
   interactionTargetIdentity,
   interactionTargetIsCurrent,
 } from './interaction-picking.js';
+import {
+  POINTER_NODE_EVENT_NAMES,
+  normalizePointerNodeEvent,
+  pointerNodeEventInput,
+} from './pointer-node-events.js';
 import { registerInteractionRuntimeLifecycle } from './runtime-lifecycle.js';
 
 const DEFAULTS = Object.freeze({
@@ -31,6 +36,8 @@ const CALLBACK_NAMES = Object.freeze([
   'onProximityEnter',
   'onProximityMove',
   'onProximityLeave',
+  'onNodeEvent',
+  'sendInput',
   'onCancel',
   'onError',
 ]);
@@ -40,6 +47,7 @@ const OPTION_KEYS = Object.freeze({
   optional: Object.freeze([
     ...Object.keys(DEFAULTS),
     ...CALLBACK_NAMES,
+    'nodeEventHub',
   ]),
 });
 
@@ -130,11 +138,16 @@ function validateOptions(options) {
     { minimum: 0, maximum: 4 },
   );
   if (primaryButton === secondaryButton) fail('display-pointer-controller-options-invalid');
+  const nodeEventHub = record.nodeEventHub ?? null;
+  if (nodeEventHub !== null && typeof nodeEventHub.dispatch !== 'function') {
+    fail('display-pointer-controller-options-invalid');
+  }
   return Object.freeze({
     element,
     runtime: record.runtime,
     claim: record.claim,
     callbacks: Object.freeze(callbacks),
+    nodeEventHub,
     primaryButton,
     secondaryButton,
     dragThresholdPixels: nonnegativeNumber(
@@ -163,6 +176,7 @@ class PointerInteractionControllerImplementation {
     this._runtimeGetter = options.runtime;
     this._claim = options.claim;
     this._callbacks = options.callbacks;
+    this._nodeEventHub = options.nodeEventHub;
     this._primaryButton = options.primaryButton;
     this._secondaryButton = options.secondaryButton;
     this._dragThresholdPixels = options.dragThresholdPixels;
@@ -222,6 +236,7 @@ class PointerInteractionControllerImplementation {
     this._runtimeGetter = null;
     this._claim = null;
     this._callbacks = null;
+    this._nodeEventHub = null;
   }
 
   _createRemovalObserver() {
@@ -487,7 +502,10 @@ class PointerInteractionControllerImplementation {
           interaction: query.interaction, worldRay: query.worldRay,
         });
         active.lastSample = sample;
-        try { this._invokeCallback('onDragGrab', [active.token, sample]); } catch (error) {
+        try {
+          this._invokeCallback('onDragGrab', [active.token, sample]);
+          this._invokeNodeEvent(sample);
+        } catch (error) {
           this._cancelGesture('callback-error', event);
           this._reportError(error);
         }
@@ -502,7 +520,10 @@ class PointerInteractionControllerImplementation {
       });
       active.lastSample = sample;
       if (!active.dragging) return;
-      try { this._invokeCallback('onDragMove', [active.token, sample]); } catch (error) {
+      try {
+        this._invokeCallback('onDragMove', [active.token, sample]);
+        this._invokeNodeEvent(sample);
+      } catch (error) {
         this._cancelGesture('callback-error', event);
         this._reportError(error);
       }
@@ -549,7 +570,10 @@ class PointerInteractionControllerImplementation {
         interaction: query.interaction, worldRay: query.worldRay,
       });
       active.lastSample = sample;
-      try { this._invokeCallback('onDragDrop', [active.token, sample]); } catch (error) {
+      try {
+        this._invokeCallback('onDragDrop', [active.token, sample]);
+        this._invokeNodeEvent(sample);
+      } catch (error) {
         this._cancelGesture('callback-error', event);
         this._reportError(error);
         return;
@@ -590,9 +614,11 @@ class PointerInteractionControllerImplementation {
       if (active.button === this._secondaryButton) {
         this._lastClick = null;
         this._invokeCallback('onContextClick', [active.token, sample]);
+        this._invokeNodeEvent(sample);
         this._completeContextMenuClaim(active, sample, event);
       } else {
         this._invokeCallback('onClick', [active.token, sample]);
+        this._invokeNodeEvent(sample);
         this._dispatchDoubleClick(active, sample, event);
       }
     } catch (error) {
@@ -641,6 +667,7 @@ class PointerInteractionControllerImplementation {
     );
     active.lastSample = sample;
     this._invokeCallback('onDoubleClick', [active.token, sample]);
+    this._invokeNodeEvent(sample);
   }
 
   _pointerCancel(event) {
@@ -692,7 +719,10 @@ class PointerInteractionControllerImplementation {
       });
       current.lastSample = sample;
       current.identity = identity;
-      try { this._invokeCallback('onProximityMove', [sample]); } catch (error) {
+      try {
+        this._invokeCallback('onProximityMove', [sample]);
+        this._invokeNodeEvent(sample);
+      } catch (error) {
         this._leaveProximity('callback-error', event);
         this._reportError(error);
       }
@@ -708,7 +738,10 @@ class PointerInteractionControllerImplementation {
       startSample: sample,
       lastSample: sample,
     };
-    try { this._invokeCallback('onProximityEnter', [sample]); } catch (error) {
+    try {
+      this._invokeCallback('onProximityEnter', [sample]);
+      this._invokeNodeEvent(sample);
+    } catch (error) {
       this._leaveProximity('callback-error', event);
       this._reportError(error);
     }
@@ -727,7 +760,10 @@ class PointerInteractionControllerImplementation {
       interaction: interaction === undefined ? previous.currentInteraction : interaction,
       worldRay: worldRay === undefined ? previous.worldRay : worldRay,
     });
-    try { this._invokeCallback('onProximityLeave', [sample]); } catch (error) {
+    try {
+      this._invokeCallback('onProximityLeave', [sample]);
+      this._invokeNodeEvent(sample);
+    } catch (error) {
       this._reportError(error);
     }
   }
@@ -843,6 +879,26 @@ class PointerInteractionControllerImplementation {
     const callback = this._callbacks?.[name] ?? null;
     if (callback === null) return undefined;
     return this._invokeSynchronous(name, callback, args);
+  }
+
+  _invokeNodeEvent(sample) {
+    if (!POINTER_NODE_EVENT_NAMES.includes(sample.phase)) return;
+    const nodeId = sample.startInteraction?.target?.authorityNodeId ?? null;
+    if (nodeId === null) return;
+    const nodeEvent = normalizePointerNodeEvent({
+      nodeId,
+      eventName: sample.phase,
+      payload: sample,
+    });
+    if (this._nodeEventHub !== null) {
+      this._invokeSynchronous(
+        'nodeEventHub.dispatch',
+        this._nodeEventHub.dispatch.bind(this._nodeEventHub),
+        [nodeEvent],
+      );
+    }
+    this._invokeCallback('onNodeEvent', [nodeEvent]);
+    this._invokeCallback('sendInput', [pointerNodeEventInput(nodeEvent)]);
   }
 
   _reportError(error) {

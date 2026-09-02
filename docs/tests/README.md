@@ -31,6 +31,7 @@ Python 测试由 `uv run python -m pytest -q` 按 `pyproject.toml` 的 `tests/` 
 | [`test_recording_v3.py`](../../tests/test_recording_v3.py) | packet-log 精确 packet bytes、command cursor 索引、每包 Display payload 单次解码、INCOMPLETE/seal 生命周期、stream/MatrixPool progression、周期 checkpoint 的 pool/active-ID 一致性、稀疏增长放大防护和损坏记录拒绝。 |
 | [`test_catalog_identity.py`](../../tests/test_catalog_identity.py) | Python 公开 API 与 `ProductCheckpoint` 不再包含 Arts catalog identity。 |
 | [`test_import_surface.py`](../../tests/test_import_surface.py) | Python 根包公开导出、版本和当前模块集合，防止旧模块或额外 API 回流。 |
+| [`test_pointer_events.py`](../../tests/test_pointer_events.py) | 九种 authority Node 指针事件经现有 input 的编解码、同一 Node ID/name、Python 同步分发、作用域和监听移除。 |
 | [`test_python_js_communication_e2e.py`](../../tests/test_python_js_communication_e2e.py) | 32 roots checkpoint、多次 transform commit、exact Wire/ACK bytes、长度帧本地 Node 子进程、浏览器本地 Display Kind/catalog、Client/Display cursor、最终 World 与 Transform digest；另以小规模 windowed CLI smoke 检查 in-flight/pending 峰值和最终归零。 |
 
 ## JavaScript Client
@@ -50,7 +51,7 @@ Python 测试由 `uv run python -m pytest -q` 按 `pyproject.toml` 的 `tests/` 
 
 | 测试项目 | 覆盖范围 |
 | --- | --- |
-| [`public.test.mjs`](../../js/packages/display/test/public.test.mjs) | Display 根包精确公开导出（含 pointer-target、interaction query 与 controller）和内部 Authority mutation 类型隔离。 |
+| [`public.test.mjs`](../../js/packages/display/test/public.test.mjs) | Display 根包精确公开导出（含 pointer target/query/controller 与 Node event hub/input adapter）和内部 Authority mutation 类型隔离。 |
 | [`authority-matrix-pool.test.mjs`](../../js/packages/display/test/authority-matrix-pool.test.mjs) | Authority 连续矩阵池的安装、几何增长、ID 行绑定、dirty batch 暂存与按命令序列消费、墓碑归零和失败关闭。 |
 | [`display-transform.test.mjs`](../../js/packages/display/test/display-transform.test.mjs) | 公共不可变 Matrix4 便利 API、float32 canonicalization、self/parent 乘法次序、shear 保留、点/向量及完整 affine inverse。 |
 | [`node-core.test.mjs`](../../js/packages/display/test/node-core.test.mjs) | Node 名称语法、float32 Matrix4 规范化、真实 NodeGraph `parentWorld*local`、shear、派生 world 溢出拒绝、NodeIndex、dirty-root 合并、最大深度、Billboard 和 LookAt。 |
@@ -59,7 +60,7 @@ Python 测试由 `uv run python -m pytest -q` 按 `pyproject.toml` 的 `tests/` 
 | [`display-kind.test.mjs`](../../js/packages/display/test/display-kind.test.mjs) | Display Kind 0..N Prefab 映射、显式 selector/default、unknown/unimplemented/unresolved 空根、父子层级、有界 diagnostics、state/property 驱动替换/失去/恢复，以及 selector 异常失败关闭。 |
 | [`catalog-identity.test.mjs`](../../js/packages/display/test/catalog-identity.test.mjs) | canonical manifest、构建 artifact、SHA-256、注册顺序独立性、hash domain 隔离和 authority-state schema coverage。 |
 | [`component.test.mjs`](../../js/packages/display/test/component.test.mjs) | Component 同步生命周期、只读能力、pointer-target 封闭角色/JSON data、scheduler 快照、显式事件订阅与同步 handler、final 方法、transform driver 唯一性和资源校验后的原子属性替换。 |
-| [`pointer-interaction.test.mjs`](../../js/packages/display/test/pointer-interaction.test.mjs) | 最近启用 target 解析、点击/右键/双击、严格 drag-grab/move/drop、带半径 proximity、claim/相机隔离、目标/Session/捕获生命周期和监听器清理。 |
+| [`pointer-interaction.test.mjs`](../../js/packages/display/test/pointer-interaction.test.mjs) | 最近启用 target 解析、点击/右键/双击、严格 drag-grab/move/drop、带半径 proximity、claim/相机隔离、九事件同一 authority Node 路由/input、目标/Session/捕获生命周期和监听器清理。 |
 | [`runtime.test.mjs`](../../js/packages/display/test/runtime.test.mjs) | Authority commit gate、Transform、完整 state 与顶层 property reconcile、Prefab event allowlist/路由/失败、world 溢出、Scene 安装、kind-driven materialization replacement、exact/radius interaction query、world ray、summary/currentView、health、backend rebuild 和批量 dispose。 |
 | [`nested-prefab.test.mjs`](../../js/packages/display/test/nested-prefab.test.mjs) | 固定与动态嵌套 Prefab 展开、0..N diff、same-key/id 身份保留、失败零变更、递归释放和静态 Scene 初始化。 |
 | [`nested-prefab-runtime-audit.test.mjs`](../../js/packages/display/test/nested-prefab-runtime-audit.test.mjs) | 深度边界、路径冲突、事务最终候选可见性、attach 失败、NodeIndex 注册失败、复杂 rollback 和兄弟顺序恢复。 |

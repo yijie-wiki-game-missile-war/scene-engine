@@ -3,7 +3,9 @@ import test from 'node:test';
 
 import {
   PREFAB_DEFINITION_SCHEMA,
+  POINTER_NODE_EVENT_NAMES,
   POINTER_TARGET_ROLES,
+  PointerNodeEventHub,
   PointerTargetComponent,
   createComponentRegistry,
   createPointerInteractionController,
@@ -19,6 +21,7 @@ const WORLD_RAY = Object.freeze({
 
 function exactInteraction({
   nodeName = 'scene/main/target',
+  authorityNodeId = null,
   roles = ['select', 'drag-source'],
   data = { id: 'target' },
 } = {}) {
@@ -31,7 +34,8 @@ function exactInteraction({
     }),
     target: roles === null ? null : Object.freeze({
       nodeName,
-      authorityOwnerName: null,
+      authorityOwnerName: authorityNodeId === null ? null : `py/${authorityNodeId}`,
+      authorityNodeId,
       roles: Object.freeze([...roles]),
       data: Object.freeze({ ...data }),
     }),
@@ -40,6 +44,7 @@ function exactInteraction({
 
 function proximityInteraction({
   nodeName = 'scene/main/target',
+  authorityNodeId = null,
   roles = ['proximity', 'select'],
   distance = 3,
 } = {}) {
@@ -52,7 +57,8 @@ function proximityInteraction({
     }),
     target: roles === null ? null : Object.freeze({
       nodeName,
-      authorityOwnerName: null,
+      authorityOwnerName: authorityNodeId === null ? null : `py/${authorityNodeId}`,
+      authorityNodeId,
       roles: Object.freeze([...roles]),
       data: Object.freeze({ id: nodeName }),
     }),
@@ -217,7 +223,7 @@ test('Display interaction queries resolve the nearest enabled ancestor without c
   assert.deepEqual(picked, {
     hit: rawPick,
     target: {
-      nodeName: 'scene/main/target', authorityOwnerName: null,
+      nodeName: 'scene/main/target', authorityOwnerName: null, authorityNodeId: null,
       roles: ['select'], data: { owner: true },
     },
   });
@@ -241,6 +247,95 @@ test('Display interaction queries resolve the nearest enabled ancestor without c
   assert.deepEqual(runtime.pickInteraction({ clientX: 5, clientY: 6 }).target, null);
   runtime.currentView = originalCurrentView;
   await runtime.dispose();
+});
+
+test('all nine pointer events address the same authority Node on Display and input', () => {
+  const { runtime } = controllerRuntime({
+    exact: exactInteraction({ authorityNodeId: 7 }),
+    proximity: proximityInteraction({ authorityNodeId: 7 }),
+  });
+  const element = new FakePointerElement();
+  const hub = new PointerNodeEventHub();
+  const heard = [];
+  const inputs = [];
+  for (const eventName of POINTER_NODE_EVENT_NAMES) {
+    hub.addEventListener(7, eventName, (event) => heard.push(event));
+  }
+  const controller = createPointerInteractionController({
+    element,
+    runtime: () => runtime,
+    claim: () => 'claimed',
+    nodeEventHub: hub,
+    sendInput: (input) => inputs.push(input),
+  });
+
+  element.dispatch('pointermove', { pointerId: 1, pointerType: 'mouse', buttons: 0 });
+  element.dispatch('pointermove', { pointerId: 1, pointerType: 'mouse', buttons: 0 });
+  element.dispatch('pointerleave', { pointerId: 1, pointerType: 'mouse', buttons: 0 });
+  for (const [pointerId, timeStamp] of [[2, 100], [3, 200]]) {
+    element.dispatch('pointerdown', { pointerId, button: 0, buttons: 1, timeStamp });
+    element.dispatch('pointerup', { pointerId, button: 0, buttons: 0, timeStamp: timeStamp + 1 });
+  }
+  element.dispatch('pointerdown', { pointerId: 4, button: 2, buttons: 2 });
+  element.dispatch('pointerup', { pointerId: 4, button: 2, buttons: 0 });
+  element.dispatch('pointerdown', {
+    pointerId: 5, button: 0, buttons: 1, clientX: 0, clientY: 0,
+  });
+  element.dispatch('pointermove', {
+    pointerId: 5, button: -1, buttons: 1, clientX: 5, clientY: 0,
+  });
+  element.dispatch('pointermove', {
+    pointerId: 5, button: -1, buttons: 1, clientX: 7, clientY: 0,
+  });
+  element.dispatch('pointerup', {
+    pointerId: 5, button: 0, buttons: 0, clientX: 7, clientY: 0,
+  });
+
+  assert.deepEqual(heard.map((event) => event.eventName), [
+    'proximity-enter', 'proximity-move', 'proximity-leave',
+    'click', 'click', 'double-click', 'context-click',
+    'drag-grab', 'drag-move', 'drag-drop',
+  ]);
+  assert(heard.every((event) => event.nodeId === 7));
+  assert(heard.every((event) => Object.isFrozen(event.payload)));
+  assert.deepEqual(inputs[3], {
+    command: 'display.pointer-event',
+    args: {
+      node_id: 7,
+      event_name: 'click',
+      payload: heard[3].payload,
+    },
+  });
+  controller.dispose();
+});
+
+test('pointer node listeners are synchronous, node-scoped, and removable', async () => {
+  const hub = new PointerNodeEventHub();
+  const event = {
+    nodeId: 4,
+    eventName: 'click',
+    payload: {
+      phase: 'click',
+      startInteraction: { target: { authorityNodeId: 4 } },
+    },
+  };
+  let deliveries = 0;
+  const listener = () => { deliveries += 1; };
+  const remove = hub.addEventListener(4, 'click', listener);
+  hub.addEventListener(4, 'click', listener);
+  hub.addEventListener(5, 'click', () => { deliveries += 100; });
+  hub.dispatch(event);
+  assert.equal(deliveries, 1);
+  remove();
+  hub.dispatch(event);
+  assert.equal(deliveries, 1);
+
+  hub.addEventListener(4, 'click', async () => {});
+  assert.throws(
+    () => hub.dispatch(event),
+    (error) => error.code === 'display-pointer-node-listener-async',
+  );
+  await Promise.resolve();
 });
 
 test('Display rejects malformed interaction hits, radius results, rays, and query shapes', async () => {
@@ -665,6 +760,13 @@ test('live pointer-target data is refreshed while role removal cancels proximity
     visible: true,
     state: { roles: ['proximity', 'select', 'drag-source'], revision: 1 },
   }), { sourceTickDelta: 1 });
+  assert.deepEqual(runtime.pickInteraction({ clientX: 0, clientY: 0 }).target, {
+    nodeName,
+    authorityOwnerName: 'py/0',
+    authorityNodeId: 0,
+    roles: ['proximity', 'select', 'drag-source'],
+    data: { revision: 1 },
+  });
 
   const element = new FakePointerElement();
   const events = [];

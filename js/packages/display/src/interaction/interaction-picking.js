@@ -62,9 +62,12 @@ function findTarget(nodeIndex, nodeName) {
 }
 
 function targetSnapshot(node, component) {
+  const authorityOwnerName = node._authorityOwnerName;
   return Object.freeze({
     nodeName: node.name,
-    authorityOwnerName: node._authorityOwnerName,
+    authorityOwnerName,
+    authorityNodeId: authorityOwnerName === null
+      ? null : Number.parseInt(authorityOwnerName.slice('py/'.length), 10),
     roles: component.properties.roles,
     data: component.properties.data,
   });

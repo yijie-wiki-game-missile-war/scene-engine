@@ -14,7 +14,8 @@ mutable product World
        -> DisplayRuntime 0.16 AuthorityPort + DisplayKindRegistry
             -> one NodeIndex / one NodeGraph / one Component scheduler / one RAF
             -> one private flat Prefab materialization ledger
-            -> pointer interaction controller
+            -> pointer interaction controller -> Display PointerNodeEventHub
+                 -> optional existing engine.input -> product PointerNodeEventHub
             -> RenderSystem
                  -> flat ThreeRenderBackend 0.13.0 bindings
 ```
@@ -33,6 +34,7 @@ root imports the Three backend. The current Display API is browser-oriented and 
 | authority IDs/matrix pool, parent graph and Prefab instances | DisplayRuntime | `AuthorityPort` plus read-only views |
 | Display Kind, Scene, Prefab, Resource, Component and state-schema catalog | DisplayRuntime composition | immutable definitions and registries |
 | pointer gesture state, claiming and renderer-neutral samples | Display pointer controller | Pointer Events plus interaction callbacks |
+| authority-Node pointer listener routing | application composition/product | same numeric Node ID plus existing `engine.input` |
 | renderer bindings, batching and GPU resources | Three backend | flat `RenderBackendPort` |
 | recorded bytes and Replay seek | packet-log@3 | exact Engine packets |
 
@@ -157,8 +159,10 @@ targets are ordinary Components in the one runtime graph.
 The backend owns only renderer resources and flat `(nodeName, componentKey)` bindings. It also owns the screen-space bounds or
 pick proxy used for proximity queries, because only the renderer knows the effective ordinary, batched and compensated
 representation. Display resolves the returned binding through its one Node graph and owns click, context-click, double-click,
-drag and proximity state. Neither layer interprets product metadata or returns Three objects. Pointer callbacks run outside the
-commit/ACK barrier and any product input they cause follows the existing input path; local samples add no Wire or Replay record.
+drag and proximity state. Neither layer interprets product metadata or returns Three objects. For an authority-owned target,
+Display exposes the outer numeric Node ID on one frozen pointer-node event. Display and Python listener hubs key on that same ID
+and event name; optional Python forwarding uses the existing `engine.input` path and no new Wire or Replay record kind. Pointer
+recognition and Display listeners remain outside the commit/ACK barrier.
 
 Disposal stops scheduling, aborts pending work, unloads Scene and Prefab materializations, clears the
 private ledger, releases Components, resource leases and backend bindings, and is idempotent.

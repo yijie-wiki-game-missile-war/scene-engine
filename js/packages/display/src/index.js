@@ -43,6 +43,13 @@ export {
   PointerTargetComponent,
 } from './interaction/pointer-target-component.js';
 export { createPointerInteractionController } from './interaction/pointer-interaction-controller.js';
+export {
+  POINTER_NODE_EVENT_INPUT_COMMAND,
+  POINTER_NODE_EVENT_NAMES,
+  PointerNodeEventHub,
+  normalizePointerNodeEvent,
+  pointerNodeEventInput,
+} from './interaction/pointer-node-events.js';
 
 export {
   ANIMATION_RESOURCE_SCHEMA,

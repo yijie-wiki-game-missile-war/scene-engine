@@ -39,6 +39,12 @@ from .runtime import (
     TickContext,
     WorldCounters,
 )
+from .pointer import (
+    POINTER_NODE_EVENT_INPUT_COMMAND,
+    POINTER_NODE_EVENT_NAMES,
+    PointerNodeEvent,
+    PointerNodeEventHub,
+)
 
 
 __version__ = "0.19.0"
@@ -62,6 +68,10 @@ __all__ = [
     "MutationResult",
     "ProductCheckpoint",
     "ProductCommit",
+    "POINTER_NODE_EVENT_INPUT_COMMAND",
+    "POINTER_NODE_EVENT_NAMES",
+    "PointerNodeEvent",
+    "PointerNodeEventHub",
     "PumpResult",
     "RecordingError",
     "RuntimeBusyError",

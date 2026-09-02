@@ -350,6 +350,11 @@ possibly partially mutated World.
 
 Inputs are decoded, bounded and queued per client, then serialized on the runtime thread. `rejected` and `no-op` leave counters
 unchanged. `changed` keeps tick fixed, increments revision/commit once and records the input ID as causation.
+The optional pointer bridge uses this same path: command `display.pointer-event` carries exact
+`{node_id,event_name,payload}` JSON args. `PointerNodeEvent.from_engine_input` validates the shared authority Node ID and one of
+the nine fixed names, while `PointerNodeEventHub.dispatch_engine_input` provides synchronous product-side routing from inside
+`handle_input`. It is not a second runtime callback or transport channel; the product still owns validation and the returned
+`MutationResult`.
 
 `start()` always builds and validates a checkpoint, even without clients or a recorder. Scene name, World codec, Display codec
 and catalog identities are frozen for one stream. Later checkpoints must match them and are read-only with respect to the

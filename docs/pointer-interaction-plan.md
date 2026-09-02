@@ -22,21 +22,23 @@ The spelling of the drag lifecycle is strict: `drag-grab`, `drag-move`, and `dra
 notification after a claim succeeds; `cancel` and `onError` are lifecycle and failure notifications, not additional completed
 gestures.
 
-The capability is generic. Applications decide what a target means, whether to claim it, whether a drop is valid, what local
-preview to show, and which product input to send. Display never moves an Authority Node or interprets gameplay metadata.
+The capability is generic. Applications decide what a target means, whether to claim it, whether a drop is valid and what local
+preview to show. Display never moves an Authority Node or interprets gameplay metadata.
 
-This work changes browser packages only:
+The implementation surface is:
 
 ```text
 @scene-engine/display              0.16.0
 @scene-engine/renderer-three       0.13.0
+scene-engine                       0.19.0
 ```
 
-Python `scene-engine==0.19.0`, `@scene-engine/client@0.16.0`, `scene-engine-wire@3`,
-`scene-engine-display-node@9`, catalog/Prefab schemas, packet-log and Replay formats remain unchanged. Pointer event time is
-used only for local recognition. It never advances or rewrites the authoritative integer 60 Hz tick, enters a checkpoint or
-commit, changes ACK meaning, or creates a Replay record. A product input emitted by an application callback follows the
-existing input, commit and recording path.
+`@scene-engine/client@0.16.0`, `scene-engine-wire@3`, `scene-engine-display-node@9`, catalog/Prefab schemas, packet-log and
+Replay formats remain unchanged. Pointer event time is used only for local recognition. It never advances or rewrites the
+authoritative integer 60 Hz tick, enters a checkpoint or commit, changes ACK meaning, or creates a Replay record. For an
+authority-owned target, Display produces one common `{nodeId, eventName, payload}` record. A configured `sendInput` forwards
+that record through the existing `engine.input` path; Python decodes and dispatches it by the same numeric Node ID and event
+name. No second transport or message kind exists.
 
 ## Ownership boundary
 
@@ -45,7 +47,8 @@ existing input, commit and recording path.
 | DOM listeners, one-pointer state machine, thresholds, claiming, capture, context-menu suppression and callbacks | Display pointer controller |
 | Pointer-target declaration, nearest-enabled-ancestor resolution and frozen product metadata | Display |
 | Exact picking, screen-space pick proxies, active-camera projection and world-ray calculation | RenderBackend implementation |
-| Gesture eligibility, local preview, drop validation, camera policy and product-input mapping | application |
+| Per-authority-Node listener registration and optional existing-input forwarding | application composition |
+| Gesture eligibility, local preview, drop validation and camera policy | application |
 | Gameplay validation and mutation | product runtime |
 
 Only the browser composition root imports the Three backend. The renderer receives no product callback or pointer-target data;
@@ -128,6 +131,7 @@ binding is selected, otherwise it is:
   target: {
     nodeName,
     authorityOwnerName,
+    authorityNodeId,
     roles,
     data,
   } // or null
@@ -142,9 +146,11 @@ controller uses exact interaction queries for press, click and drag, and the rad
 Display exports one controller factory. Defaults are part of the contract:
 
 ```js
+const nodeEventHub = new PointerNodeEventHub();
 const controller = createPointerInteractionController({
   element,
   runtime: () => currentDisplayRuntime,
+  nodeEventHub,
 
   primaryButton: 0,
   secondaryButton: 2,
@@ -167,6 +173,8 @@ const controller = createPointerInteractionController({
   onProximityEnter(sample) {},
   onProximityMove(sample) {},
   onProximityLeave(sample) {},
+  onNodeEvent(event) {},
+  sendInput(input) {},
   onCancel(token, sample) {},
   onError(error) {},
 });
@@ -199,6 +207,56 @@ Coordinates and deltas are CSS pixels. `startInteraction` is the exact press res
 for a proximity interval. `currentInteraction` is the current event's result and may be `null`, including a drag-drop over
 empty space. `worldRay` belongs to the current accepted Pointer Event. Samples contain no DOM Event, live Component, mutable
 Node, backend binding or renderer object.
+
+## Authority Node listeners and Python input
+
+The nine completion/observation phases, but not `press` or `cancel`, also produce one `PointerNodeEvent` when the selected
+target belongs to a Python authority root:
+
+```js
+{
+  nodeId: 7,
+  eventName: 'click',
+  payload: sample,
+}
+```
+
+`nodeId` is the same stream-stable numeric ID used by Python `DisplayNode` and Display `py/<id>`. A Scene-local target has
+`authorityNodeId: null`, has no Python counterpart and therefore stays on the phase callbacks. Drag lifecycle events remain
+addressed to the grabbed source Node; the payload's `currentInteraction` can name a different drop target. Proximity leave
+remains addressed to the Node whose interval is ending.
+
+`PointerNodeEventHub.addEventListener(nodeId, eventName, listener)` provides synchronous Display-side per-Node delivery. Passing
+the hub as `nodeEventHub` makes the controller dispatch directly to it; `onNodeEvent` may additionally observe the same frozen
+record. If `sendInput` is supplied, the controller also calls it with the canonical descriptor returned by
+`pointerNodeEventInput(event)`:
+
+```js
+{
+  command: 'display.pointer-event',
+  args: { node_id: 7, event_name: 'click', payload: sample },
+}
+```
+
+The composition root can pass its existing connection's `sendInput` method directly; the controller does not own a socket or
+an input ID allocator. In Python, `PointerNodeEvent.from_engine_input(request)` decodes that command and
+`PointerNodeEventHub.dispatch_engine_input(request)` performs the same synchronous `(node_id, event_name)` lookup from inside
+`EngineProgram.handle_input`. The product still returns the transaction's `MutationResult` and remains responsible for all
+gameplay validation. Listener exceptions follow the surrounding callback/input failure boundary, and Promise/awaitable
+listeners fail because delivery is synchronous on both ends.
+
+The Python program owns its hub and invokes it at its existing input boundary:
+
+```python
+pointer_events = PointerNodeEventHub()
+pointer_events.add_event_listener(node_id, "click", on_click)
+
+def handle_input(world, request, context):
+    event = pointer_events.dispatch_engine_input(request)
+    if event is not None:
+        return MutationResult.no_op(reason_code="pointer-observed")
+    # Continue with the product's other input commands.
+```
 
 The first version owns at most one active pointer. Other pointer IDs are ignored until it completes or cancels.
 
@@ -323,9 +381,10 @@ deterministic and permits a later spatial index without changing the public cont
 3. Implement the single-pointer controller, fixed event names, parameters, claiming, capture, native-menu policy and bounded
    state machine.
 4. Connect Component, session, backend-rebuild and disposal lifecycle invalidation without entering commit/ACK logic.
-5. Publish `@scene-engine/display@0.16.0` and `@scene-engine/renderer-three@0.13.0`; keep Python, Client, Wire and all data
-   schemas unchanged.
-6. Run the focused tests, strict TypeScript interop, package public-surface tests and the full Python/JavaScript gates.
+5. Add the common authority-Node event record, Display/Python listener hubs and the adapter for the existing input command.
+6. Publish `@scene-engine/display@0.16.0` and `@scene-engine/renderer-three@0.13.0`; keep Client, Wire and all data schemas
+   unchanged.
+7. Run the focused tests, strict TypeScript interop, package public-surface tests and the full Python/JavaScript gates.
 
 Expected implementation areas are:
 
@@ -359,6 +418,8 @@ Display tests must cover:
 - proximity-to-claim ordering, no proximity callbacks during a claim and no stale re-entry after completion;
 - source/target role changes, disable/removal, session replacement, backend rebuild, lost capture and idempotent disposal;
 - callback/query failures, exact-once cancel/leave, listener/capture cleanup and no commit/ACK effects;
+- all nine Node events use the same authority Node ID in Display and the canonical Python input, with synchronous scoped
+  listeners on both ends;
 - at most one interaction query and one world-ray query for every accepted DOM event.
 
 Three backend tests must cover:

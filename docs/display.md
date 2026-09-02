@@ -615,11 +615,20 @@ then double-click. Crossing threshold on a drag source emits exactly one drag-gr
 release emits exactly one drag-drop. Cancellation never masquerades as drop. Drag move/drop expose the current exact target;
 the application inspects `drop-target` or `drop-surface` and decides validity.
 
+For an authority-owned target, every one of the nine completion/observation phases also emits a frozen
+`{nodeId, eventName, payload}` record. `nodeId` is the same numeric ID as Python's `DisplayNode.node_id`; nested visual targets
+resolve to their outer authority owner. `PointerNodeEventHub` registers Display listeners by that ID and name. Passing the
+hub as `nodeEventHub` routes those events directly; passing the existing connection's `sendInput` forwards the canonical
+`display.pointer-event` input without adding a Wire kind. Python `PointerNodeEventHub.dispatch_engine_input(request)` performs
+the same lookup inside product `handle_input`. Scene-local targets expose `authorityNodeId: null` and remain browser-only
+because no Python Node corresponds to them.
+
 Idle mouse and hovering-pen moves can emit proximity; touch and a pen in contact never synthesize it. Proximity has no token,
 capture or propagation side effect. Each accepted Pointer Event performs at most one interaction query and one world-ray query,
 retains only bounded active state, schedules no RAF, and mutates no Node. Component/session/backend/disposal boundaries clear
-active state exactly once. Samples and callbacks are browser-local, outside the commit/ACK barrier, and create no Wire or Replay
-record. See the [complete implementation contract and tests](pointer-interaction-plan.md).
+active state exactly once. Recognition and Display listeners remain outside the commit/ACK barrier. Only a configured existing
+input sender crosses to Python, where normal input transaction and recording rules apply. See the
+[complete implementation contract and tests](pointer-interaction-plan.md).
 
 ## Render-state validation before seal
 

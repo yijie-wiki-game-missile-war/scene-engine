@@ -550,6 +550,7 @@ export type PointerTargetRole = 'proximity' | 'select' | 'drag-source'
 export interface InteractionTarget {
   readonly nodeName: string;
   readonly authorityOwnerName: string | null;
+  readonly authorityNodeId: number | null;
   readonly roles: readonly PointerTargetRole[];
   readonly data: JSONRecord;
 }
@@ -703,10 +704,48 @@ export interface PointerInteractionSample {
   readonly worldRay: WorldRay;
 }
 
+export type PointerNodeEventName = 'click' | 'context-click' | 'double-click'
+  | 'drag-grab' | 'drag-move' | 'drag-drop'
+  | 'proximity-enter' | 'proximity-move' | 'proximity-leave';
+
+export interface PointerNodeEvent {
+  readonly nodeId: number;
+  readonly eventName: PointerNodeEventName;
+  readonly payload: PointerInteractionSample & { readonly phase: PointerNodeEventName };
+}
+
+export const POINTER_NODE_EVENT_INPUT_COMMAND: 'display.pointer-event';
+export const POINTER_NODE_EVENT_NAMES: readonly [
+  'click', 'context-click', 'double-click',
+  'drag-grab', 'drag-move', 'drag-drop',
+  'proximity-enter', 'proximity-move', 'proximity-leave',
+];
+
+export function normalizePointerNodeEvent(value: PointerNodeEvent): PointerNodeEvent;
+export function pointerNodeEventInput(value: PointerNodeEvent): Readonly<{
+  command: typeof POINTER_NODE_EVENT_INPUT_COMMAND;
+  args: JSONRecord & Readonly<{
+    node_id: number;
+    event_name: PointerNodeEventName;
+    payload: JSONRecord;
+  }>;
+}>;
+
+export class PointerNodeEventHub {
+  addEventListener(
+    nodeId: number,
+    eventName: PointerNodeEventName,
+    listener: (event: PointerNodeEvent) => void,
+  ): () => void;
+  dispatch(event: PointerNodeEvent): void;
+  clear(): void;
+}
+
 export interface PointerInteractionControllerOptions<Token = unknown> {
   readonly element: Element;
   readonly runtime: () => DisplayRuntime | null;
   readonly claim: (sample: PointerInteractionSample) => Token | null;
+  readonly nodeEventHub?: PointerNodeEventHub | null;
   readonly primaryButton?: number;
   readonly secondaryButton?: number;
   readonly dragThresholdPixels?: number;
@@ -723,6 +762,8 @@ export interface PointerInteractionControllerOptions<Token = unknown> {
   readonly onProximityEnter?: (sample: PointerInteractionSample) => void;
   readonly onProximityMove?: (sample: PointerInteractionSample) => void;
   readonly onProximityLeave?: (sample: PointerInteractionSample) => void;
+  readonly onNodeEvent?: (event: PointerNodeEvent) => void;
+  readonly sendInput?: (input: ReturnType<typeof pointerNodeEventInput>) => unknown;
   readonly onCancel?: (token: Token, sample: PointerInteractionSample) => void;
   readonly onError?: (error: unknown) => void;
 }

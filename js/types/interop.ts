@@ -9,6 +9,7 @@ import {
 import {
   DisplayTransform,
   PREFAB_DEFINITION_SCHEMA,
+  PointerNodeEventHub,
   createComponentRegistry,
   createDisplayKindRegistry,
   createDisplayRuntime,
@@ -152,9 +153,16 @@ const runtimeRayDirection: Vec3 = runtime.screenPointToWorldRay({
 void [interaction?.target?.data, nearbyInteraction?.hit.screenDistancePixels,
   runtimeRayDirection];
 
+const pointerNodeEvents = new PointerNodeEventHub();
+const removePointerListener = pointerNodeEvents.addEventListener(7, 'click', (event) => {
+  void event.payload.currentInteraction;
+});
+removePointerListener();
+
 const pointerController = createPointerInteractionController({
   element: pointerElement,
   runtime: () => runtime,
+  nodeEventHub: pointerNodeEvents,
   claim(sample) {
     const phase: PointerInteractionSample['phase'] = sample.phase;
     return phase === 'press' ? { selected: true } : null;
@@ -168,6 +176,10 @@ const pointerController = createPointerInteractionController({
   onProximityEnter(sample) { void sample.currentInteraction; },
   onProximityMove(sample) { void sample.deltaClientX; },
   onProximityLeave(sample) { void sample.reason; },
+  onNodeEvent(event) { void [event.nodeId, event.eventName, event.payload.phase]; },
+  sendInput(input) {
+    void client.encodeInput({ inputId: 'pointer:1', ...input });
+  },
 });
 pointerController.dispose();
 
