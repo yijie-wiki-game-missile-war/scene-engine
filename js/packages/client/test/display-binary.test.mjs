@@ -16,9 +16,6 @@ import {
 } from '../src/display.js';
 import { readEnginePacket } from '../src/wire.js';
 
-const HASH_A = '01'.repeat(32);
-const HASH_B = 'a5'.repeat(32);
-const HASH_C = 'ff'.repeat(32);
 const PYTHON_FIXTURES = fileURLToPath(new URL('../../../../fixtures/wire-v3/', import.meta.url));
 const MATRIX_LENGTH = 16;
 const MATRIX_BYTES = MATRIX_LENGTH * 4;
@@ -57,7 +54,7 @@ function baselineNode(nodeId, parentNodeId = null) {
   return {
     node_id: nodeId,
     parent_node_id: parentNodeId,
-    prefab_id: 'unit.example',
+    display_kind_id: 'unit.example',
     transform_mode: 'live',
     visible: true,
     state: { mode: 'idle', nested: { value: 3 } },
@@ -72,9 +69,6 @@ function checkpoint({
   return {
     schema: DISPLAY_CHECKPOINT_SCHEMA,
     scene_name: 'main',
-    scene_catalog_hash: HASH_A,
-    prefab_catalog_hash: HASH_B,
-    state_schema_hash: HASH_C,
     last_command_seq: 7,
     matrix_pool_size: poolSize,
     matrix_pool: matrices,
@@ -114,16 +108,13 @@ function parsedCheckpointToRecord(value) {
   return {
     schema: DISPLAY_CHECKPOINT_SCHEMA,
     scene_name: value.sceneName,
-    scene_catalog_hash: value.sceneCatalogHash,
-    prefab_catalog_hash: value.prefabCatalogHash,
-    state_schema_hash: value.stateSchemaHash,
     last_command_seq: value.lastCommandSeq,
     matrix_pool_size: value.matrixPoolSize,
     matrix_pool: value.matrixPool,
     nodes: value.nodes.map((node) => ({
       node_id: node.nodeId,
       parent_node_id: node.parentNodeId,
-      prefab_id: node.prefabId,
+      display_kind_id: node.displayKindId,
       transform_mode: node.transformMode,
       visible: node.visible,
       state: node.state,
@@ -147,7 +138,7 @@ function parsedCommandToRecord(value) {
       return {
         ...nodeCommon,
         parent_node_id: value.parentNodeId,
-        prefab_id: value.prefabId,
+        display_kind_id: value.displayKindId,
         transform_mode: value.transformMode,
         visible: value.visible,
         state: value.state,
@@ -164,8 +155,8 @@ function parsedCommandToRecord(value) {
       return { ...nodeCommon, property_name: value.propertyName };
     case 'node-emit-event':
       return { ...nodeCommon, event_name: value.eventName, payload: value.payload };
-    case 'node-replace-prefab':
-      return { ...nodeCommon, prefab_id: value.prefabId, state: value.state };
+    case 'node-set-display-kind':
+      return { ...nodeCommon, display_kind_id: value.displayKindId, state: value.state };
     case 'node-remove':
       return nodeCommon;
     default:
@@ -189,7 +180,7 @@ function rawAttachment(packet, kind) {
   return packet.attachments.find((attachment) => attachment.kind === kind).value;
 }
 
-test('binary Display v5 checkpoint decodes one owned pool tensor and ID metadata', () => {
+test('binary Display v6 checkpoint decodes one owned pool tensor and ID metadata', () => {
   const source = matrixPool(3, [[0, shearMatrix(17.75)], [2, matrix(4)]]);
   const bytes = encodeDisplayCheckpoint(checkpoint({
     poolSize: 3,
@@ -197,10 +188,10 @@ test('binary Display v5 checkpoint decodes one owned pool tensor and ID metadata
     nodes: [baselineNode(0), { ...baselineNode(2, 0), transform_mode: 'initial', visible: false }],
   }));
   assert.equal(new TextDecoder().decode(bytes.subarray(0, 4)), 'SDCP');
-  assert.equal(bytes[4], 5);
+  assert.equal(bytes[4], 6);
 
   const parsed = parseDisplayCheckpoint(bytes, { header: { last_command_seq: 7 } });
-  assert.equal(parsed.schema, 'scene-engine-display-checkpoint@8');
+  assert.equal(parsed.schema, 'scene-engine-display-checkpoint@9');
   assert.equal(parsed.matrixPoolSize, 3);
   assert.ok(parsed.matrixPool instanceof Float32Array);
   assert.equal(parsed.matrixPool.length, 3 * MATRIX_LENGTH);
@@ -221,12 +212,12 @@ test('binary Display v5 checkpoint decodes one owned pool tensor and ID metadata
   assert.equal(parsed.matrixPool[0], first, 'packet mutation cannot alias the decoded tensor');
 });
 
-test('binary Display v5 command stream carries ordered transform, property, and event commands', () => {
+test('binary Display v6 command stream carries ordered transform, property, and event commands', () => {
   const commands = [
     command('node-create', 8, {
       node_id: 2,
       parent_node_id: null,
-      prefab_id: 'unit.example',
+      display_kind_id: 'unit.example',
       transform_mode: 'live',
       visible: true,
       state: { created: true },
@@ -246,8 +237,8 @@ test('binary Display v5 command stream carries ordered transform, property, and 
       event_name: 'combat.爆炸🔥',
       payload: { damage: 3, critical: false },
     }),
-    command('node-replace-prefab', 16, {
-      node_id: 0, prefab_id: 'unit.replacement', state: { level: 2 },
+    command('node-set-display-kind', 16, {
+      node_id: 0, display_kind_id: 'unit.replacement', state: { level: 2 },
     }),
     command('node-remove', 17, { node_id: 0 }),
   ];
@@ -261,7 +252,7 @@ test('binary Display v5 command stream carries ordered transform, property, and 
     baseCommandSeq: 7,
   });
 
-  assert.equal(parsed.schema, 'scene-engine-display-command-stream@8');
+  assert.equal(parsed.schema, 'scene-engine-display-command-stream@9');
   assert.deepEqual(parsed.commands.map(({ kind }) => kind), commands.map(({ kind }) => kind));
   assert.deepEqual(
     parsed.commands.map(({ commandSeq }) => commandSeq),

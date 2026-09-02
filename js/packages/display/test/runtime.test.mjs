@@ -8,16 +8,17 @@ import {
   PREFAB_DEFINITION_SCHEMA,
   RenderComponent,
   defineFrameAnimation,
+  defineDisplayKind,
   definePrefab,
 } from '../src/index.js';
 import { createFakeRenderBackend } from '../src/testing/fake-render-backend.js';
 import { IDENTITY, commitAuthority, createHarness, emptyPrefab,
   matrixPosition, matrixTransform } from './helpers.mjs';
 
-function createCommand(nodeId, prefabId = 'target.test.item', parentNodeId = null,
+function createCommand(nodeId, displayKindId = 'target.test.item', parentNodeId = null,
   transformMode = 'live') {
   return {
-    nodeId, parentNodeId, prefabId, transformMode, transform: IDENTITY, visible: true, state: {},
+    nodeId, parentNodeId, displayKindId, transformMode, transform: IDENTITY, visible: true, state: {},
   };
 }
 
@@ -347,17 +348,14 @@ test('direct Authority property depth 255 fits the complete state depth limit', 
   ), true);
 });
 
-test('direct Authority unset validates the complete remaining state', async (t) => {
+test('direct Authority create rejects non-canonical complete state', async (t) => {
   const { runtime } = await createHarness();
   t.after(() => runtime.dispose());
   const command = createCommand(0);
   command.state = { legacyBigint: 1n, removable: true };
-  commitAuthority(runtime, () => runtime.authority.createNode(command));
-  expectAuthorityFailure(runtime, () => runtime.authority.unsetNodeProperty({
-    nodeId: 0, propertyName: 'removable',
-  }), 'display-authority-state-invalid');
-  assert.deepEqual(runtime._nodeIndex.require('py/0').requireComponent('authority').state,
-    { legacyBigint: 1n, removable: true });
+  expectAuthorityFailure(runtime, () => runtime.authority.createNode(command),
+    'display-authority-state-invalid');
+  assert.equal(runtime._nodeIndex.get('py/0'), null);
 });
 
 test('Authority events use explicit Prefab and Behaviour allowlists, deterministic root-record routing',
@@ -711,7 +709,7 @@ test('validated state patches install normalized properties exactly once before 
   assert.equal(runtime.currentView().getComponentState('prefab/py/0/body', 'state').properties.value, 2);
 });
 
-test('replaceNodePrefab stages a private shadow scope and preserves authority children', async (t) => {
+test('setNodeDisplayKind stages a private shadow scope and preserves authority children', async (t) => {
   const first = emptyPrefab({ id: 'target.first', gameplayType: 'test.first', childName: 'first' });
   const second = emptyPrefab({ id: 'target.second', gameplayType: 'test.second', childName: 'second' });
   const { runtime } = await createHarness({ prefabEntries: [
@@ -722,7 +720,7 @@ test('replaceNodePrefab stages a private shadow scope and preserves authority ch
   commitAuthority(runtime, () => {
     runtime.authority.createNode(createCommand(0, first.id));
     runtime.authority.createNode(createCommand(1, first.id, 0));
-    runtime.authority.replaceNodePrefab({ nodeId: 0, prefabId: second.id, state: {} });
+    runtime.authority.setNodeDisplayKind({ nodeId: 0, displayKindId: second.id, state: {} });
   }, { sourceTickDelta: 1, commandCount: 3 });
   assert.equal(runtime.currentView().getNode('prefab/py/0/first'), null);
   assert.equal(runtime.currentView().getNode('prefab/py/0/second').parentName, 'py/0');
@@ -769,8 +767,8 @@ test('replacement onAttach sees the final root childNames including preserved au
       runtime.authority.createNode(createCommand(1, original.id, 0));
     }, { sourceTickDelta: 1, commandCount: 2 });
 
-    commitAuthority(runtime, () => runtime.authority.replaceNodePrefab({
-      nodeId: 0, prefabId: replacement.id, state: {},
+    commitAuthority(runtime, () => runtime.authority.setNodeDisplayKind({
+      nodeId: 0, displayKindId: replacement.id, state: {},
     }), { sourceTickDelta: 1 });
 
     const expected = ['prefab/py/0/new', 'py/1'];
@@ -850,8 +848,8 @@ test('shadow adoption uses the non-virtual live registration path for every comp
     commitAuthority(runtime, () => runtime.authority.createNode(
       createCommand(0, original.id),
     ), { sourceTickDelta: 1 });
-    commitAuthority(runtime, () => runtime.authority.replaceNodePrefab({
-      nodeId: 0, prefabId: replacement.id, state: {},
+    commitAuthority(runtime, () => runtime.authority.setNodeDisplayKind({
+      nodeId: 0, displayKindId: replacement.id, state: {},
     }), { sourceTickDelta: 1 });
 
     const root = runtime._nodeIndex.require('py/0');
@@ -911,8 +909,8 @@ test('replacement adoption failure restores the complete old live scope', async 
   runtime.commitGate.begin(cursor);
   let caught = null;
   try {
-    runtime.authority.replaceNodePrefab({
-      nodeId: 0, prefabId: replacement.id, state: {},
+    runtime.authority.setNodeDisplayKind({
+      nodeId: 0, displayKindId: replacement.id, state: {},
     });
   } catch (error) { caught = error; }
   runtime._componentAttached = originalAttached;
@@ -1019,8 +1017,8 @@ test('replacement adoption rollback restores interleaved Prefab and authority si
     };
     let caught;
     try {
-      caught = expectAuthorityFailure(runtime, () => runtime.authority.replaceNodePrefab({
-        nodeId: 0, prefabId: replacement.id, state: {},
+      caught = expectAuthorityFailure(runtime, () => runtime.authority.setNodeDisplayKind({
+        nodeId: 0, displayKindId: replacement.id, state: {},
       }), Error);
     } finally {
       runtime._componentAttached = originalAttached;
@@ -1058,8 +1056,8 @@ test('replacement shadow handlers cannot mutate live nodes through lookup capabi
   commitAuthority(runtime, () => runtime.authority.createNode(
     createCommand(0, first.id),
   ), { sourceTickDelta: 1 });
-  expectAuthorityFailure(runtime, () => runtime.authority.replaceNodePrefab({
-    nodeId: 0, prefabId: escaping.id, state: {},
+  expectAuthorityFailure(runtime, () => runtime.authority.setNodeDisplayKind({
+    nodeId: 0, displayKindId: escaping.id, state: {},
   }), TypeError);
   assert.equal(runtime.currentView().getNode('scene/main/camera').visibleSelf, true);
   assert(runtime.currentView().getNode('prefab/py/0/old'));
@@ -1124,8 +1122,8 @@ test('same binding identity waits for a pending old create and its stale cleanup
   t.after(() => runtime.dispose());
   commitAuthority(runtime, () => {
     runtime.authority.createNode(createCommand(0, first.id));
-    runtime.authority.replaceNodePrefab({
-      nodeId: 0, prefabId: second.id, state: {},
+    runtime.authority.setNodeDisplayKind({
+      nodeId: 0, displayKindId: second.id, state: {},
     });
   }, { sourceTickDelta: 1, commandCount: 2 });
   await runtime.whenReady();
@@ -1165,7 +1163,7 @@ test('same binding identity waits for asynchronous old destroy before replacemen
   t.after(() => runtime.dispose());
   commitAuthority(runtime, () => {
     runtime.authority.createNode(createCommand(0, first.id));
-    runtime.authority.replaceNodePrefab({ nodeId: 0, prefabId: second.id, state: {} });
+    runtime.authority.setNodeDisplayKind({ nodeId: 0, displayKindId: second.id, state: {} });
   }, { sourceTickDelta: 1, commandCount: 2 });
   await runtime.whenReady();
   const relevant = fake.calls.filter((call) => call[1] === 'prefab/py/0/body' && call[2] === 'model');
@@ -1684,10 +1682,16 @@ test('dispose cancels a rebuild after its candidate backend is installed', async
 });
 
 test('runtime construction seals the catalog registries', async (t) => {
-  const { runtime, prefabRegistry, resourceRegistry } = await createHarness();
+  const { runtime, displayKindRegistry, prefabRegistry, resourceRegistry } = await createHarness();
   t.after(() => runtime.dispose());
   const late = emptyPrefab({ id: 'target.late', gameplayType: 'test.late' });
   assert.throws(() => prefabRegistry.register(late), { code: 'display-registry-sealed' });
+  assert.throws(() => displayKindRegistry.register(defineDisplayKind({
+    id: 'display.test/late@1',
+    gameplayType: 'test.late',
+    revision: 1,
+    authorityPrefabIds: [],
+  })), { code: 'display-registry-sealed' });
   assert.throws(() => resourceRegistry.register({ id: 'model/late', kind: 'model', url: './late.glb' }),
     { code: 'display-registry-sealed' });
 });

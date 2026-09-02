@@ -2,11 +2,13 @@ import {
   PREFAB_DEFINITION_SCHEMA,
   SCENE_DEFINITION_SCHEMA,
   createComponentRegistry,
+  createDisplayKindRegistry,
   createDisplayRuntime,
   createPrefabRegistry,
   createResourceRegistry,
   createSceneRegistry,
   definePrefab,
+  defineDisplayKind,
   defineScene,
 } from '../src/index.js';
 import { createFakeRenderBackend } from '../src/testing/fake-render-backend.js';
@@ -84,7 +86,8 @@ function createNumericAuthorityTestAdapter(authority) {
     setNodeProperty: (record) => authority.setNodeProperty(record),
     unsetNodeProperty: (record) => authority.unsetNodeProperty(record),
     emitNodeEvent: (record) => authority.emitNodeEvent(record),
-    replaceNodePrefab: (record) => authority.replaceNodePrefab(record),
+    setNodeDisplayKind: (record) => authority.setNodeDisplayKind(record),
+    currentDiagnostics: () => authority.currentDiagnostics(),
     removeNode: (record) => authority.removeNode(record),
     _assertMatrixPoolSettled: () => authority._assertMatrixPoolSettled(),
     _release: () => authority._release(),
@@ -139,6 +142,7 @@ export function emptyPrefab({ id = 'target.test.item', gameplayType = 'test.item
 export async function createHarness({ prefabEntries = null, resources = [], sceneNodes = [],
   prefabInstances = [], backendFactory = null, onHealth = null, configureComponents = null,
   bootstrapAuthority = null, runtimeOptions = {}, rawAuthority = false,
+  displayKindEntries = null,
 } = {}) {
   const componentRegistry = createComponentRegistry();
   configureComponents?.(componentRegistry);
@@ -146,6 +150,14 @@ export async function createHarness({ prefabEntries = null, resources = [], scen
   const defaultPrefab = emptyPrefab();
   const entries = prefabEntries ?? [defaultPrefab];
   const prefabRegistry = createPrefabRegistry(entries);
+  const kinds = displayKindEntries ?? entries.map((entry) => defineDisplayKind({
+    id: entry.id,
+    gameplayType: entry.gameplayType,
+    revision: 1,
+    authorityPrefabIds: [entry.id],
+    defaultPrefabId: entry.id,
+  }));
+  const displayKindRegistry = createDisplayKindRegistry(kinds);
   const scene = defineScene({
     schema: SCENE_DEFINITION_SCHEMA,
     id: 'main',
@@ -172,6 +184,7 @@ export async function createHarness({ prefabEntries = null, resources = [], scen
   });
   const runtime = createDisplayRuntime({
     sceneRegistry,
+    displayKindRegistry,
     prefabRegistry,
     resourceRegistry,
     componentRegistry,
@@ -190,7 +203,7 @@ export async function createHarness({ prefabEntries = null, resources = [], scen
   bootstrapAuthority?.(runtime.authority);
   runtime.activate();
   return { runtime, frames, fakeBackends, componentRegistry, resourceRegistry,
-    prefabRegistry, sceneRegistry, installReturn };
+    displayKindRegistry, prefabRegistry, sceneRegistry, installReturn };
 }
 
 /** Apply one synchronous Authority transaction using the same begin/apply/seal boundary as Client. */

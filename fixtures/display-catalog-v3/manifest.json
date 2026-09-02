@@ -1,5 +1,5 @@
 {
-  "schema": "scene-engine-display-catalog-manifest@2",
+  "schema": "scene-engine-display-catalog-manifest@3",
   "scenes": [
     {
       "schema": "scene-engine-scene-definition@2",
@@ -40,6 +40,15 @@
         }
       ],
       "prefabInstances": []
+    }
+  ],
+  "displayKinds": [
+    {
+      "id": "unit.basic",
+      "gameplayType": "unit.basic",
+      "revision": 1,
+      "authorityPrefabIds": ["unit.basic"],
+      "defaultPrefabId": "unit.basic"
     }
   ],
   "prefabs": [

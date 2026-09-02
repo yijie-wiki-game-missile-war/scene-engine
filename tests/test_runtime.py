@@ -22,7 +22,6 @@ from scene_engine import (
 )
 from scene_engine.recording import PacketLogWriter, read_packet_log
 from scene_engine.display import (
-    DisplayCatalogIdentity,
     DisplayCommand,
     DisplayMatrixPool,
     DisplayNode,
@@ -106,7 +105,6 @@ class Program:
             self.world_codec,
             {"tick": world.tick, "value": world.value, "world_revision": world.world_revision},
             "main",
-            catalog(),
             self.display_matrix_pool,
             nodes(world, self.display_node_id),
         )
@@ -328,10 +326,6 @@ def test_mutation_result_commit_context_is_changed_only() -> None:
         MutationResult.rejected("denied", marker)  # type: ignore[call-arg]
 
 
-def catalog() -> DisplayCatalogIdentity:
-    return DisplayCatalogIdentity("a" * 64, "b" * 64, "c" * 64)
-
-
 def transform(world: World) -> DisplayTransform:
     return DisplayTransform.from_matrix(
         (
@@ -360,7 +354,7 @@ def nodes(world: World, node_id: int = 0) -> tuple[DisplayNode, ...]:
         DisplayNode(
             node_id=node_id,
             parent_node_id=None,
-            prefab_id="example.node",
+            display_kind_id="example.node",
             transform_mode="live",
             visible=True,
             state={"tick": world.tick, "value": world.value},
@@ -1401,7 +1395,6 @@ def test_product_display_port_is_structured_and_has_no_legacy_alias() -> None:
         "example-world@1",
         {"tick": 0},
         "main",
-        catalog(),
         pool,
         list(nodes(World())),
     )
@@ -1421,7 +1414,6 @@ def test_product_display_port_is_structured_and_has_no_legacy_alias() -> None:
             "example-world@1",
             {"tick": 0},
             "main",
-            catalog(),
             pool,
             scene_frame=b"legacy",
         )

@@ -7,7 +7,6 @@ import * as publicApi from '../src/index.js';
 import { applyJsonPatch } from '../src/json-tree.js';
 import { encodePacket } from '../src/wire.js';
 import {
-  HASH_A,
   STREAM_ID,
   WORLD_CODEC,
   baselineNode,
@@ -58,9 +57,9 @@ test('root export surface remains the exact client allowlist', () => {
   assert.equal('maximumNodeStateBytes' in DEFAULT_ENGINE_LIMITS, false);
 });
 
-test('client package and Display codec versions are the property-and-event release', async () => {
+test('client package and Display codec versions are the Display Kind release', async () => {
   const packageJson = JSON.parse(await readFile(new URL('../package.json', import.meta.url)));
-  assert.equal(packageJson.version, '0.15.0');
+  assert.equal(packageJson.version, '0.16.0');
   assert.throws(() => encodePacket('engine.checkpoint', {
     schema: 'scene-engine-wire@3',
     type: 'engine.checkpoint',
@@ -80,7 +79,7 @@ test('wire v3 fixture has binary display checkpoint and ACK command cursor', asy
   const raw = new Uint8Array(await readFile(`${FIXTURES}/checkpoint.bin`));
   const decoded = readEnginePacket(raw);
   assert.equal(decoded.header.schema, 'scene-engine-wire@3');
-  assert.equal(decoded.header.display_codec, 'scene-engine-display-node@8');
+  assert.equal(decoded.header.display_codec, 'scene-engine-display-node@9');
   assert.deepEqual(decoded.attachments.map(({ kind, encoding }) => [kind, encoding]), [
     ['world_snapshot', 'json'],
     ['display_checkpoint', 'raw'],
@@ -88,16 +87,9 @@ test('wire v3 fixture has binary display checkpoint and ACK command cursor', asy
 
   const result = client.applyPacket(raw);
   const ack = readEnginePacket(result.ackPacket);
-  const identity = JSON.parse(await readFile(new URL(
-    '../../../../fixtures/display-catalog-v2/identity.json', import.meta.url,
-  )));
   assert.equal(ack.header.last_command_seq, 0);
   assert.deepEqual(client.currentDisplayView(), { sessionId: 1 });
-  assert.deepEqual({
-    scene_catalog_hash: sessions[0].metadata.sceneCatalogHash,
-    prefab_catalog_hash: sessions[0].metadata.prefabCatalogHash,
-    state_schema_hash: sessions[0].metadata.stateSchemaHash,
-  }, identity);
+  assert.deepEqual(Object.keys(sessions[0].metadata).sort(), ['commit', 'sceneName']);
   assert.deepEqual(sessions[0].log.map(([kind]) => kind), [
     'installScene', 'installNodeMatrixPool', 'createNode', 'createNode', 'createNode',
     'activate', 'start', 'summary',
@@ -107,7 +99,7 @@ test('wire v3 fixture has binary display checkpoint and ACK command cursor', asy
     commitSeq: 0, sourceTick: 0, lastCommandSeq: 0,
   });
   assert.deepEqual(Object.keys(sessions[0].log.find(([kind]) => kind === 'createNode')[1]), [
-    'nodeId', 'parentNodeId', 'prefabId', 'transformMode', 'visible', 'state',
+    'nodeId', 'parentNodeId', 'displayKindId', 'transformMode', 'visible', 'state',
   ]);
   assert.equal('currentView' in client, false);
   assert.equal('getNode' in client, false);
@@ -176,7 +168,7 @@ test('applies canonical Python wire@3 fixtures through exact Authority payloads'
     'activate', 'start', 'summary',
     'begin', 'applyNodeTransformBatch', 'createNode', 'setNodeTransforms',
     'setNodeParent', 'setNodeVisible',
-    'setNodeState', 'replaceNodePrefab', 'setNodeProperty', 'setNodeProperty',
+    'setNodeState', 'setNodeDisplayKind', 'setNodeProperty', 'setNodeProperty',
     'unsetNodeProperty', 'emitNodeEvent', 'removeNode', 'seal', 'summary',
     'begin', 'applyNodeTransformBatch', 'seal', 'summary',
   ]);
@@ -484,7 +476,7 @@ test('commit stages one contiguous tensor then applies ID commands in order befo
     command('node-create', 1, 1, {
       node_id: 1,
       parent_node_id: null,
-      prefab_id: 'unit.example',
+      display_kind_id: 'unit.example',
       transform_mode: 'live',
       matrix: transform(2),
       visible: true,
@@ -504,8 +496,8 @@ test('commit stages one contiguous tensor then applies ID commands in order befo
     command('node-emit-event', 8, 1, {
       event_name: 'combat.exploded', payload: { damage: 3 },
     }),
-    command('node-replace-prefab', 9, 1, {
-      prefab_id: 'unit.variant/prefab@1', state: { variant: 2 },
+    command('node-set-display-kind', 9, 1, {
+      display_kind_id: 'unit.variant/prefab@1', state: { variant: 2 },
     }),
     command('node-remove', 10, 1),
   ];
@@ -517,7 +509,7 @@ test('commit stages one contiguous tensor then applies ID commands in order befo
     'begin', 'applyNodeTransformBatch', 'createNode', 'setNodeTransforms',
     'setNodeParent', 'setNodeVisible',
     'setNodeState', 'setNodeProperty', 'unsetNodeProperty', 'emitNodeEvent',
-    'replaceNodePrefab', 'removeNode', 'seal', 'summary',
+    'setNodeDisplayKind', 'removeNode', 'seal', 'summary',
   ]);
   const batch = sessions[0].log.find(([kind]) => kind === 'applyNodeTransformBatch')[1];
   assert.deepEqual([...batch.nodeIds], [0, 1]);
@@ -783,22 +775,17 @@ test('display session accepts wrapper fields but extracts only the four required
   assert.equal(missingAuthority.sessions[0].log.at(-1)[0], 'dispose');
 });
 
-test('checkpoint rejects a Display catalog identity mismatch before scene installation', () => {
+test('checkpoint does not read or compare the runtime-local Display catalog identity', () => {
   const mismatch = createMockDisplayFactory();
   const client = new SceneEngineClient({
     createDisplaySession(metadata) {
       const session = mismatch.factory(metadata);
-      session.runtime.catalogIdentity = () => Object.freeze({
-        sceneCatalogHash: 'f'.repeat(64),
-        prefabCatalogHash: metadata.prefabCatalogHash,
-        stateSchemaHash: metadata.stateSchemaHash,
-      });
+      session.runtime.catalogIdentity = () => { throw new Error('must stay local'); };
       return session;
     },
   });
-  assert.throws(() => client.applyPacket(checkpointPacket()),
-    (error) => error.code === 'display-catalog-identity-mismatch');
-  assert.deepEqual(mismatch.sessions[0].log.map(([kind]) => kind), ['dispose']);
+  assert.ok(client.applyPacket(checkpointPacket()).ackPacket instanceof Uint8Array);
+  assert.equal(mismatch.sessions[0].log[0][0], 'installScene');
 });
 
 test('failed replacement checkpoint disposes only candidate and does not swap old display', () => {

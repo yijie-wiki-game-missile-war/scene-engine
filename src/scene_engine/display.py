@@ -21,21 +21,20 @@ from .errors import ConfigurationError, JsonTreeError
 from .json_tree import validate_json_value
 
 
-DISPLAY_CODEC = "scene-engine-display-node@8"
-DISPLAY_CHECKPOINT_SCHEMA = "scene-engine-display-checkpoint@8"
-DISPLAY_COMMAND_STREAM_SCHEMA = "scene-engine-display-command-stream@8"
-DISPLAY_COMMAND_SCHEMA = "scene-engine-node-command@8"
+DISPLAY_CODEC = "scene-engine-display-node@9"
+DISPLAY_CHECKPOINT_SCHEMA = "scene-engine-display-checkpoint@9"
+DISPLAY_COMMAND_STREAM_SCHEMA = "scene-engine-display-command-stream@9"
+DISPLAY_COMMAND_SCHEMA = "scene-engine-node-command@9"
 MAXIMUM_NODE_ID = 0xFFFFFFFE
 NULL_NODE_ID = 0xFFFFFFFF
-MAXIMUM_PREFAB_ID_BYTES = 192
+MAXIMUM_DISPLAY_KIND_ID_BYTES = 192
 MAXIMUM_SCENE_NAME_BYTES = 96
 MAXIMUM_PROPERTY_NAME_BYTES = 192
 MAXIMUM_EVENT_NAME_BYTES = 192
 MAXIMUM_NODE_DEPTH = 128
 
 _NODE_SEGMENT = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
-_PREFAB_ID = re.compile(r"^[a-z0-9][a-z0-9._@-]*(?:/[a-z0-9][a-z0-9._@-]*)*$")
-_HASH = re.compile(r"^[0-9a-f]{64}$")
+_DISPLAY_KIND_ID = re.compile(r"^[a-z0-9][a-z0-9._@-]*(?:/[a-z0-9][a-z0-9._@-]*)*$")
 _MATRIX4_F32 = struct.Struct("<16f")
 _IDENTITY_MATRIX4_F32 = np.eye(4, dtype="<f4", order="F")
 _IDENTITY_MATRIX4_F32.flags.writeable = False
@@ -86,46 +85,10 @@ _COMMAND_KINDS = frozenset(
         "node-set-property",
         "node-unset-property",
         "node-emit-event",
-        "node-replace-prefab",
+        "node-set-display-kind",
         "node-remove",
     }
 )
-
-
-@dataclass(frozen=True, slots=True)
-class DisplayCatalogIdentity:
-    """Exact Arts catalog identities loaded from the Display build artifact."""
-
-    scene_catalog_hash: str
-    prefab_catalog_hash: str
-    state_schema_hash: str
-
-    def __post_init__(self) -> None:
-        for field in self.__dataclass_fields__:
-            value = getattr(self, field)
-            if not isinstance(value, str) or _HASH.fullmatch(value) is None:
-                raise ConfigurationError(f"{field} must be a lowercase SHA-256")
-
-    @classmethod
-    def from_record(cls, value: Mapping[str, Any]) -> "DisplayCatalogIdentity":
-        if not isinstance(value, Mapping) or set(value) != {
-            "scene_catalog_hash",
-            "prefab_catalog_hash",
-            "state_schema_hash",
-        }:
-            raise ConfigurationError("display catalog identity fields are invalid")
-        return cls(
-            scene_catalog_hash=value["scene_catalog_hash"],
-            prefab_catalog_hash=value["prefab_catalog_hash"],
-            state_schema_hash=value["state_schema_hash"],
-        )
-
-    def to_record(self) -> dict[str, str]:
-        return {
-            "scene_catalog_hash": self.scene_catalog_hash,
-            "prefab_catalog_hash": self.prefab_catalog_hash,
-            "state_schema_hash": self.state_schema_hash,
-        }
 
 
 @dataclass(frozen=True, slots=True, init=False, eq=False)
@@ -821,7 +784,7 @@ class DisplayMatrixPool:
                     parent = self._require_allocated(parent, "parent_node_id")
                     if not is_active(parent) or self._retired[parent]:
                         raise ConfigurationError("node-set-parent parent is not active")
-            elif command.kind in {"node-set-state", "node-replace-prefab"}:
+            elif command.kind in {"node-set-state", "node-set-display-kind"}:
                 maximum_json_depth = max(
                     maximum_json_depth,
                     _maximum_json_depth(command.fields["state"]),
@@ -868,7 +831,7 @@ class DisplayNode:
 
     node_id: int
     parent_node_id: int | None
-    prefab_id: str
+    display_kind_id: str
     transform_mode: str
     visible: bool
     state: Mapping[str, Any]
@@ -878,7 +841,7 @@ class DisplayNode:
         *,
         node_id: int,
         parent_node_id: int | None,
-        prefab_id: str,
+        display_kind_id: str,
         transform_mode: str,
         visible: bool,
         state: Mapping[str, Any],
@@ -888,7 +851,7 @@ class DisplayNode:
         if normalized_parent_id is not None:
             if normalized_parent_id == normalized_node_id:
                 raise ConfigurationError("authority Node cannot parent itself")
-        _prefab_id(prefab_id)
+        _display_kind_id(display_kind_id)
         if transform_mode not in {"initial", "live"}:
             raise ConfigurationError("transform_mode must be initial or live")
         if not isinstance(visible, bool):
@@ -896,7 +859,7 @@ class DisplayNode:
         normalized_state = _plain_state(state)
         object.__setattr__(self, "node_id", normalized_node_id)
         object.__setattr__(self, "parent_node_id", normalized_parent_id)
-        object.__setattr__(self, "prefab_id", prefab_id)
+        object.__setattr__(self, "display_kind_id", display_kind_id)
         object.__setattr__(self, "transform_mode", transform_mode)
         object.__setattr__(self, "visible", visible)
         object.__setattr__(self, "state", normalized_state)
@@ -905,7 +868,7 @@ class DisplayNode:
         return {
             "node_id": self.node_id,
             "parent_node_id": self.parent_node_id,
-            "prefab_id": self.prefab_id,
+            "display_kind_id": self.display_kind_id,
             "transform_mode": self.transform_mode,
             "visible": self.visible,
             "state": _thaw(self.state),
@@ -948,7 +911,7 @@ class DisplayCommand:
             kind="node-create",
             node_id=node.node_id,
             parent_node_id=node.parent_node_id,
-            prefab_id=node.prefab_id,
+            display_kind_id=node.display_kind_id,
             transform_mode=node.transform_mode,
             visible=node.visible,
             state=node.state,
@@ -1020,13 +983,13 @@ class DisplayCommand:
         )
 
     @classmethod
-    def replace_prefab(
-        cls, node_id: int, prefab_id: str, state: Mapping[str, Any]
+    def set_display_kind(
+        cls, node_id: int, display_kind_id: str, state: Mapping[str, Any]
     ) -> "DisplayCommand":
         return _new_display_command(
-            kind="node-replace-prefab",
+            kind="node-set-display-kind",
             node_id=node_id,
-            prefab_id=prefab_id,
+            display_kind_id=display_kind_id,
             state=state,
         )
 
@@ -1055,7 +1018,6 @@ class ValidatedDisplayCheckpoint:
     """Typed seal owning one full, immutable MatrixPool snapshot."""
 
     scene_name: str
-    catalog: DisplayCatalogIdentity
     last_command_seq: int
     matrix_pool_size: int
     matrix_pool: np.ndarray
@@ -1065,8 +1027,6 @@ class ValidatedDisplayCheckpoint:
 
     def __post_init__(self) -> None:
         _scene_name(self.scene_name)
-        if not isinstance(self.catalog, DisplayCatalogIdentity):
-            raise ConfigurationError("catalog must be DisplayCatalogIdentity")
         _safe_integer(self.last_command_seq, "last_command_seq")
         _validate_matrix_tensor(
             self.matrix_pool, self.matrix_pool_size, "matrix_pool"
@@ -1084,7 +1044,6 @@ class ValidatedDisplayCheckpoint:
         return {
             "schema": DISPLAY_CHECKPOINT_SCHEMA,
             "scene_name": self.scene_name,
-            **self.catalog.to_record(),
             "last_command_seq": self.last_command_seq,
             "matrix_pool_size": self.matrix_pool_size,
             "matrix_pool": self.matrix_pool.tolist(),
@@ -1210,7 +1169,6 @@ def _new_display_transform_batch_command(node_ids: Any) -> DisplayCommand:
 def encode_display_checkpoint(
     *,
     scene_name: str,
-    catalog: DisplayCatalogIdentity,
     last_command_seq: int,
     matrix_pool: DisplayMatrixPool,
     nodes: Sequence[DisplayNode],
@@ -1218,8 +1176,6 @@ def encode_display_checkpoint(
     """Seal one parent-first baseline and a full MatrixPool tensor."""
 
     _scene_name(scene_name)
-    if not isinstance(catalog, DisplayCatalogIdentity):
-        raise ConfigurationError("catalog must be DisplayCatalogIdentity")
     _safe_integer(last_command_seq, "last_command_seq")
     if not isinstance(matrix_pool, DisplayMatrixPool):
         raise ConfigurationError("matrix_pool must be DisplayMatrixPool")
@@ -1227,7 +1183,6 @@ def encode_display_checkpoint(
     snapshot, token = matrix_pool._snapshot_full()
     return ValidatedDisplayCheckpoint(
         scene_name=scene_name,
-        catalog=catalog,
         last_command_seq=last_command_seq,
         matrix_pool_size=len(matrix_pool),
         matrix_pool=snapshot,
@@ -1303,9 +1258,6 @@ def validate_display_checkpoint(
     fields = {
         "schema",
         "scene_name",
-        "scene_catalog_hash",
-        "prefab_catalog_hash",
-        "state_schema_hash",
         "last_command_seq",
         "matrix_pool_size",
         "matrix_pool",
@@ -1316,11 +1268,6 @@ def validate_display_checkpoint(
     if value["schema"] != DISPLAY_CHECKPOINT_SCHEMA:
         raise ConfigurationError("display checkpoint schema is invalid")
     _scene_name(value["scene_name"])
-    DisplayCatalogIdentity(
-        scene_catalog_hash=value["scene_catalog_hash"],
-        prefab_catalog_hash=value["prefab_catalog_hash"],
-        state_schema_hash=value["state_schema_hash"],
-    )
     cursor = _safe_integer(value["last_command_seq"], "last_command_seq")
     if expected_last_command_seq is not None and cursor != expected_last_command_seq:
         raise ConfigurationError("display checkpoint command cursor is invalid")
@@ -1330,7 +1277,7 @@ def validate_display_checkpoint(
     if not isinstance(nodes_value, list):
         raise ConfigurationError("display checkpoint nodes must be an array")
     fields = {
-        "node_id", "parent_node_id", "prefab_id", "transform_mode", "visible", "state"
+        "node_id", "parent_node_id", "display_kind_id", "transform_mode", "visible", "state"
     }
     nodes = []
     for record in nodes_value:
@@ -1397,14 +1344,14 @@ def _command_from_record(value: Any) -> DisplayCommand:
         return _new_display_transform_batch_command(value["node_ids"])
     common = metadata | {"node_id"}
     expected_by_kind = {
-        "node-create": {"parent_node_id", "prefab_id", "transform_mode", "visible", "state"},
+        "node-create": {"parent_node_id", "display_kind_id", "transform_mode", "visible", "state"},
         "node-set-parent": {"parent_node_id"},
         "node-set-visible": {"visible"},
         "node-set-state": {"state"},
         "node-set-property": {"property_name", "value"},
         "node-unset-property": {"property_name"},
         "node-emit-event": {"event_name", "payload"},
-        "node-replace-prefab": {"prefab_id", "state"},
+        "node-set-display-kind": {"display_kind_id", "state"},
         "node-remove": set(),
     }
     if kind not in expected_by_kind or set(value) != common | expected_by_kind[kind]:
@@ -1451,13 +1398,13 @@ def _normalize_command_fields(
 ) -> dict[str, Any]:
     actual = set(fields)
     if kind == "node-create":
-        required = {"parent_node_id", "prefab_id", "transform_mode", "visible", "state"}
+        required = {"parent_node_id", "display_kind_id", "transform_mode", "visible", "state"}
         if actual != required:
             raise ConfigurationError("node-create fields are invalid")
         node = DisplayNode(node_id=node_id, **fields)
         return {
             "parent_node_id": node.parent_node_id,
-            "prefab_id": node.prefab_id,
+            "display_kind_id": node.display_kind_id,
             "transform_mode": node.transform_mode,
             "visible": node.visible,
             "state": node.state,
@@ -1497,11 +1444,14 @@ def _normalize_command_fields(
             "event_name": _event_name(fields["event_name"]),
             "payload": _plain_state(fields["payload"], label="event payload"),
         }
-    if kind == "node-replace-prefab":
-        if actual != {"prefab_id", "state"}:
-            raise ConfigurationError("node-replace-prefab fields are invalid")
-        _prefab_id(fields["prefab_id"])
-        return {"prefab_id": fields["prefab_id"], "state": _plain_state(fields["state"])}
+    if kind == "node-set-display-kind":
+        if actual != {"display_kind_id", "state"}:
+            raise ConfigurationError("node-set-display-kind fields are invalid")
+        _display_kind_id(fields["display_kind_id"])
+        return {
+            "display_kind_id": fields["display_kind_id"],
+            "state": _plain_state(fields["state"]),
+        }
     if actual:
         raise ConfigurationError("node-remove fields are invalid")
     return {}
@@ -1735,13 +1685,13 @@ def _validate_maximum_depth(maximum_json_depth: Any, values: Sequence[Any]) -> N
         raise ConfigurationError("validated Display JSON depth is invalid")
 
 
-def _prefab_id(value: Any) -> str:
+def _display_kind_id(value: Any) -> str:
     if (
         not isinstance(value, str)
-        or len(value.encode("utf-8")) > MAXIMUM_PREFAB_ID_BYTES
-        or _PREFAB_ID.fullmatch(value) is None
+        or len(value.encode("utf-8")) > MAXIMUM_DISPLAY_KIND_ID_BYTES
+        or _DISPLAY_KIND_ID.fullmatch(value) is None
     ):
-        raise ConfigurationError("prefab_id is invalid")
+        raise ConfigurationError("display_kind_id is invalid")
     return value
 
 
@@ -1990,7 +1940,7 @@ def _thaw(value: Any) -> Any:
 
 
 def _command_json_depth(command: DisplayCommand) -> int:
-    if command.kind in {"node-create", "node-set-state", "node-replace-prefab"}:
+    if command.kind in {"node-create", "node-set-state", "node-set-display-kind"}:
         return _maximum_json_depth(command.fields["state"])
     if command.kind == "node-set-property":
         return _maximum_json_depth(command.fields["value"]) + 1
@@ -2046,7 +1996,6 @@ __all__ = [
     "DISPLAY_CODEC",
     "DISPLAY_COMMAND_SCHEMA",
     "DISPLAY_COMMAND_STREAM_SCHEMA",
-    "DisplayCatalogIdentity",
     "DisplayCommand",
     "DisplayMatrixPool",
     "DisplayNode",

@@ -8,11 +8,13 @@ import {
   PREFAB_DEFINITION_SCHEMA,
   SCENE_DEFINITION_SCHEMA,
   createComponentRegistry,
+  createDisplayKindRegistry,
   createDisplayRuntime,
   createPrefabRegistry,
   createResourceRegistry,
   createSceneRegistry,
   defineFrameAnimation,
+  defineDisplayKind,
   definePrefab,
   defineScene,
 } from '../js/packages/display/src/index.js';
@@ -141,15 +143,25 @@ function stageAuthorityMatrices(runtime, matrixRows) {
   authorityMatrixPoolSizes.set(runtime, poolSize);
 }
 
-function createAuthorityNode(runtime, { nodeId, prefabId, state = {} }) {
+function createAuthorityNode(runtime, { nodeId, displayKindId, state = {} }) {
   return runtime.authority.createNode({
     nodeId,
     parentNodeId: null,
-    prefabId,
+    displayKindId,
     transformMode: 'live',
     visible: true,
     state,
   });
+}
+
+function kindRegistry(prefab) {
+  return createDisplayKindRegistry([defineDisplayKind({
+    id: prefab.id,
+    gameplayType: prefab.gameplayType,
+    revision: 1,
+    authorityPrefabIds: [prefab.id],
+    defaultPrefabId: prefab.id,
+  })]);
 }
 
 const originalImageBitmap = globalThis.createImageBitmap;
@@ -256,6 +268,7 @@ async function verifyAuthorityAndRebuildLifecycle() {
     hostElement,
     canvas,
     sceneRegistry: createSceneRegistry([scene]),
+    displayKindRegistry: kindRegistry(prefab),
     prefabRegistry,
     resourceRegistry,
     componentRegistry,
@@ -282,7 +295,7 @@ async function verifyAuthorityAndRebuildLifecycle() {
   for (let cycle = 0; cycle < 100; cycle += 1) {
     commitAuthority(runtime, authorityCursor, () => createAuthorityNode(runtime, {
       nodeId: cycle,
-      prefabId: prefab.id,
+      displayKindId: prefab.id,
     }), { matrixRows: [[cycle, IDENTITY]] });
     await runtime.whenReady();
     const root = runtime._nodeIndex.require(`py/${cycle}`);
@@ -439,6 +452,7 @@ async function verifyAnimationPlayerLifecycle() {
   const runtime = createDisplayRuntime({
     hostElement: host(), canvas: { getContext: () => ({}) },
     sceneRegistry: createSceneRegistry([scene]),
+    displayKindRegistry: kindRegistry(prefab),
     prefabRegistry: createPrefabRegistry([prefab]),
     resourceRegistry: createResourceRegistry([...RESOURCES, atlas, walk]),
     componentRegistry: createComponentRegistry(),
@@ -462,7 +476,7 @@ async function verifyAnimationPlayerLifecycle() {
   for (let cycle = 0; cycle < 25; cycle += 1) {
     commitAuthority(runtime, cursor, () => createAuthorityNode(runtime, {
       nodeId: cycle,
-      prefabId: prefab.id,
+      displayKindId: prefab.id,
     }), { matrixRows: [[cycle, IDENTITY]] });
     await runtime.whenReady();
     const sprite = runtime._nodeIndex.require(`prefab/py/${cycle}/visual`)
@@ -640,6 +654,7 @@ async function verifyPendingBindingDispose() {
   const runtime = createDisplayRuntime({
     hostElement: host(), canvas: { getContext: () => ({}) },
     sceneRegistry: createSceneRegistry([scene]),
+    displayKindRegistry: kindRegistry(prefab),
     prefabRegistry: createPrefabRegistry([prefab]),
     resourceRegistry,
     componentRegistry,
@@ -663,7 +678,7 @@ async function verifyPendingBindingDispose() {
   const authorityCursor = { commitSeq: 0, sourceTick: 0, lastCommandSeq: 0 };
   commitAuthority(runtime, authorityCursor, () => createAuthorityNode(runtime, {
     nodeId: 0,
-    prefabId: prefab.id,
+    displayKindId: prefab.id,
   }), { matrixRows: [[0, IDENTITY]] });
   await loadStarted;
   const pendingBeforeDispose = runtimeMetrics(runtime, backendRows[0].backend, frames);

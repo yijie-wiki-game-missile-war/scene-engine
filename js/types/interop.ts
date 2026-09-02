@@ -10,6 +10,7 @@ import {
   DisplayTransform,
   PREFAB_DEFINITION_SCHEMA,
   createComponentRegistry,
+  createDisplayKindRegistry,
   createDisplayRuntime,
   createPrefabRegistry,
   createResourceRegistry,
@@ -46,6 +47,7 @@ const worldPointFromF64: Vec3 = DisplayTransform.transformPoint(worldMatrix64, [
 void [authoredTransform, movedTransform, transformedPoint, localPoint, worldPointFromF64];
 
 const sceneRegistry = createSceneRegistry();
+const displayKindRegistry = createDisplayKindRegistry();
 const prefabRegistry = createPrefabRegistry();
 const resourceRegistry = createResourceRegistry();
 const componentRegistry = createComponentRegistry();
@@ -61,6 +63,7 @@ function createProductDisplaySession() {
     hostElement,
     canvas,
     sceneRegistry,
+    displayKindRegistry,
     prefabRegistry,
     resourceRegistry,
     componentRegistry,

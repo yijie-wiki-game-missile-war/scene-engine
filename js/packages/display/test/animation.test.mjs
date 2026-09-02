@@ -11,6 +11,7 @@ import {
   buildDisplayCatalogManifest,
   computeDisplayCatalogIdentity,
   createComponentRegistry,
+  createDisplayKindRegistry,
   createPrefabRegistry,
   createResourceRegistry,
   createSceneRegistry,
@@ -126,11 +127,11 @@ async function animationHarness({ prefab = animatedPrefab(),
   return harness;
 }
 
-function authorityNode(nodeId = 0, prefabId = 'target.animated', state = {}) {
+function authorityNode(nodeId = 0, displayKindId = 'target.animated', state = {}) {
   return {
     nodeId,
     parentNodeId: null,
-    prefabId,
+    displayKindId,
     transformMode: 'live',
     transform: IDENTITY,
     visible: true,
@@ -326,7 +327,8 @@ test('animation resource content changes the catalog identity', () => {
       prefabInstances: [],
     })]);
     return computeDisplayCatalogIdentity(buildDisplayCatalogManifest({
-      sceneRegistry: scenes, prefabRegistry: prefabs, resourceRegistry: resources,
+      sceneRegistry: scenes, displayKindRegistry: createDisplayKindRegistry(),
+      prefabRegistry: prefabs, resourceRegistry: resources,
       componentRegistry: components, authorityStateSchemas: [
         { gameplayType: 'test.animated', schemaId: 'test.animated.state', revision: 1 },
       ],
@@ -1334,7 +1336,7 @@ test('declarative animationId patches follow the documented switch semantics', a
   void player;
 });
 
-test('prefab replacement adopts animation players exactly once', async (t) => {
+test('an unchanged kind selection retains animation player identity', async (t) => {
   const harness = await animationHarness();
   t.after(() => harness.runtime.dispose());
   commitAuthority(harness.runtime, () => harness.runtime.authority.createNode(authorityNode()),
@@ -1345,14 +1347,14 @@ test('prefab replacement adopts animation players exactly once', async (t) => {
   harness.frames.step(100);
   assert.equal(effectiveFrame(harness), 1);
 
-  commitAuthority(harness.runtime, () => harness.runtime.authority.replaceNodePrefab({
-    nodeId: 0, prefabId: 'target.animated', state: {},
+  commitAuthority(harness.runtime, () => harness.runtime.authority.setNodeDisplayKind({
+    nodeId: 0, displayKindId: 'target.animated', state: {},
   }), { sourceTickDelta: 1 });
   await harness.runtime.whenReady();
   harness.frames.step(0);
-  assert.equal(effectiveFrame(harness), 0, 'the replacement instance restarts from zero');
+  assert.equal(effectiveFrame(harness), 1, 'the retained instance keeps its phase');
   harness.frames.step(100);
-  assert.equal(effectiveFrame(harness), 1);
+  assert.equal(effectiveFrame(harness), 2);
 });
 
 test('replacement shadow preflights resolver animation targets before destroying the old scope',
@@ -1392,8 +1394,8 @@ test('replacement shadow preflights resolver animation targets before destroying
     harness.runtime.commitGate.begin(cursor);
     let failure = null;
     try {
-      harness.runtime.authority.replaceNodePrefab({
-        nodeId: 0, prefabId: replacement.id, state: { animationId: badTarget.id },
+      harness.runtime.authority.setNodeDisplayKind({
+        nodeId: 0, displayKindId: replacement.id, state: { animationId: badTarget.id },
       });
     } catch (error) { failure = error; }
     assert.equal(failure?.code, 'display-animation-target-missing');

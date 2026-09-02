@@ -12,7 +12,6 @@ from scene_engine.display import (
     DISPLAY_CHECKPOINT_SCHEMA,
     DISPLAY_COMMAND_SCHEMA,
     DISPLAY_COMMAND_STREAM_SCHEMA,
-    DisplayCatalogIdentity,
     DisplayCommand,
     DisplayMatrixPool,
     DisplayNode,
@@ -23,11 +22,6 @@ from scene_engine.display import (
 )
 from scene_engine.display_binary import encode_display_command_stream_binary
 from scene_engine.errors import ConfigurationError, JsonTreeError
-
-
-HASH_A = "a" * 64
-HASH_B = "b" * 64
-HASH_C = "c" * 64
 
 
 def transform(x: float = 0.0) -> DisplayTransform:
@@ -57,7 +51,7 @@ def node(node_id: int, *, parent_node_id: int | None = None) -> DisplayNode:
     return DisplayNode(
         node_id=node_id,
         parent_node_id=parent_node_id,
-        prefab_id="flight.aircraft/prefab@1",
+        display_kind_id="flight.aircraft/prefab@1",
         transform_mode="live",
         visible=True,
         state={"animation": {"state": "idle", "start_tick": 0}},
@@ -79,7 +73,6 @@ def test_checkpoint_is_a_typed_parent_first_full_pool_snapshot() -> None:
     child = node(child_id, parent_node_id=parent_id)
     result = encode_display_checkpoint(
         scene_name="main",
-        catalog=DisplayCatalogIdentity(HASH_A, HASH_B, HASH_C),
         last_command_seq=41,
         matrix_pool=pool,
         nodes=(parent, child),
@@ -102,13 +95,11 @@ def test_checkpoint_is_a_typed_parent_first_full_pool_snapshot() -> None:
 
 
 def test_checkpoint_rejects_duplicate_missing_parent_and_pool_mismatch() -> None:
-    catalog = DisplayCatalogIdentity(HASH_A, HASH_B, HASH_C)
     pool = DisplayMatrixPool()
     pool.append(transform())
     with pytest.raises(ConfigurationError, match="duplicate"):
         encode_display_checkpoint(
             scene_name="main",
-            catalog=catalog,
             last_command_seq=0,
             matrix_pool=pool,
             nodes=(node(0), node(0)),
@@ -116,7 +107,6 @@ def test_checkpoint_rejects_duplicate_missing_parent_and_pool_mismatch() -> None
     with pytest.raises(ConfigurationError, match="parent-before-child"):
         encode_display_checkpoint(
             scene_name="main",
-            catalog=catalog,
             last_command_seq=0,
             matrix_pool=pool,
             nodes=(node(0, parent_node_id=1),),
@@ -125,7 +115,6 @@ def test_checkpoint_rejects_duplicate_missing_parent_and_pool_mismatch() -> None
     with pytest.raises(ConfigurationError, match="exactly match"):
         encode_display_checkpoint(
             scene_name="main",
-            catalog=catalog,
             last_command_seq=0,
             matrix_pool=pool,
             nodes=(node(0),),
@@ -148,7 +137,6 @@ def test_matrix_pool_is_contiguous_monotonic_and_retirement_never_reuses_ids() -
 
     checkpoint = encode_display_checkpoint(
         scene_name="main",
-        catalog=DisplayCatalogIdentity(HASH_A, HASH_B, HASH_C),
         last_command_seq=0,
         matrix_pool=pool,
         nodes=(node(first), node(second)),
@@ -171,7 +159,6 @@ def test_matrix_pool_public_snapshot_cannot_bypass_dirty_tracking() -> None:
     node_id = pool.append(transform(1.0))
     checkpoint = encode_display_checkpoint(
         scene_name="main",
-        catalog=DisplayCatalogIdentity(HASH_A, HASH_B, HASH_C),
         last_command_seq=0,
         matrix_pool=pool,
         nodes=(node(node_id),),
@@ -196,7 +183,6 @@ def test_matrix_pool_set_batch_preserves_id_row_alignment_and_exact_bits() -> No
     node_ids = tuple(pool.append(transform(float(index))) for index in range(3))
     baseline = encode_display_checkpoint(
         scene_name="main",
-        catalog=DisplayCatalogIdentity(HASH_A, HASH_B, HASH_C),
         last_command_seq=0,
         matrix_pool=pool,
         nodes=tuple(node(node_id) for node_id in node_ids),
@@ -241,7 +227,6 @@ def test_matrix_pool_set_batch_validates_everything_before_mutation() -> None:
     node_ids = tuple(pool.append(transform(float(index))) for index in range(2))
     baseline = encode_display_checkpoint(
         scene_name="main",
-        catalog=DisplayCatalogIdentity(HASH_A, HASH_B, HASH_C),
         last_command_seq=0,
         matrix_pool=pool,
         nodes=tuple(node(node_id) for node_id in node_ids),
@@ -285,7 +270,6 @@ def test_command_stream_assigns_sequences_and_gathers_sorted_dirty_rows() -> Non
     existing_id = pool.append(transform())
     checkpoint = encode_display_checkpoint(
         scene_name="main",
-        catalog=DisplayCatalogIdentity(HASH_A, HASH_B, HASH_C),
         last_command_seq=7,
         matrix_pool=pool,
         nodes=(node(existing_id),),
@@ -358,7 +342,6 @@ def test_command_lifecycle_rejects_uncreated_set_transform_and_duplicate_remove(
     existing_id = pool.append(transform())
     checkpoint = encode_display_checkpoint(
         scene_name="main",
-        catalog=DisplayCatalogIdentity(HASH_A, HASH_B, HASH_C),
         last_command_seq=0,
         matrix_pool=pool,
         nodes=(node(existing_id),),
@@ -395,7 +378,6 @@ def test_command_stream_rejects_more_than_one_transform_batch() -> None:
     node_ids = tuple(pool.append(transform(float(index))) for index in range(2))
     baseline = encode_display_checkpoint(
         scene_name="main",
-        catalog=DisplayCatalogIdentity(HASH_A, HASH_B, HASH_C),
         last_command_seq=0,
         matrix_pool=pool,
         nodes=tuple(node(node_id) for node_id in node_ids),
@@ -429,7 +411,7 @@ def test_mutation_command_construction_uses_uint32_node_ids() -> None:
         DisplayCommand.set_property(target, "status.health", None),
         DisplayCommand.unset_property(target, "status.health"),
         DisplayCommand.emit_event(target, "combat.Exploded", {}),
-        DisplayCommand.replace_prefab(target, "world/replacement", {}),
+        DisplayCommand.set_display_kind(target, "world/replacement", {}),
         DisplayCommand.remove(target),
     )
 
@@ -552,7 +534,6 @@ def test_property_and_event_commands_are_owned_closed_and_ordered() -> None:
     node_id = pool.append(transform())
     baseline = encode_display_checkpoint(
         scene_name="main",
-        catalog=DisplayCatalogIdentity(HASH_A, HASH_B, HASH_C),
         last_command_seq=4,
         matrix_pool=pool,
         nodes=(node(node_id),),
@@ -715,7 +696,6 @@ def test_property_value_depth_reserves_one_level_for_complete_state() -> None:
     node_id = pool.append(transform())
     checkpoint = encode_display_checkpoint(
         scene_name="main",
-        catalog=DisplayCatalogIdentity(HASH_A, HASH_B, HASH_C),
         last_command_seq=0,
         matrix_pool=pool,
         nodes=(node(node_id),),
@@ -743,7 +723,6 @@ def test_property_and_event_commands_require_an_active_node() -> None:
     active_id = pool.append(transform())
     baseline = encode_display_checkpoint(
         scene_name="main",
-        catalog=DisplayCatalogIdentity(HASH_A, HASH_B, HASH_C),
         last_command_seq=0,
         matrix_pool=pool,
         nodes=(node(active_id),),
@@ -828,7 +807,6 @@ def test_stale_publish_token_cannot_clear_a_newer_pool_mutation() -> None:
     node_id = pool.append(transform())
     baseline = encode_display_checkpoint(
         scene_name="main",
-        catalog=DisplayCatalogIdentity(HASH_A, HASH_B, HASH_C),
         last_command_seq=0,
         matrix_pool=pool,
         nodes=(node(node_id),),

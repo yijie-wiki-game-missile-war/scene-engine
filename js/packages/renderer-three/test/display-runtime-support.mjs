@@ -4,11 +4,13 @@ import {
   PREFAB_DEFINITION_SCHEMA,
   SCENE_DEFINITION_SCHEMA,
   createComponentRegistry,
+  createDisplayKindRegistry,
   createDisplayRuntime,
   createPrefabRegistry,
   createResourceRegistry,
   createSceneRegistry,
   defineFrameAnimation,
+  defineDisplayKind,
   definePrefab,
   defineScene,
 } from '../../display/src/index.js';
@@ -168,7 +170,7 @@ export function transformAt(position, {
 
 export function createAuthorityNode({
   nodeId,
-  prefabId = GEOMETRY_PREFAB_ID,
+  displayKindId = GEOMETRY_PREFAB_ID,
   parentNodeId = null,
   visible = true,
   state = {},
@@ -176,7 +178,7 @@ export function createAuthorityNode({
   return {
     nodeId,
     parentNodeId,
-    prefabId,
+    displayKindId,
     transformMode: 'live',
     visible,
     state,
@@ -251,6 +253,22 @@ export async function createFoundationHarness() {
   const geometryPrefab = createGeometryPrefab();
   const nestedPrefab = createNestedPrefab();
   const prefabRegistry = createPrefabRegistry([geometryPrefab, nestedPrefab]);
+  const displayKindRegistry = createDisplayKindRegistry([
+    defineDisplayKind({
+      id: geometryPrefab.id,
+      gameplayType: geometryPrefab.gameplayType,
+      revision: 1,
+      authorityPrefabIds: [geometryPrefab.id],
+      defaultPrefabId: geometryPrefab.id,
+    }),
+    defineDisplayKind({
+      id: nestedPrefab.id,
+      gameplayType: nestedPrefab.gameplayType,
+      revision: 1,
+      authorityPrefabIds: [nestedPrefab.id],
+      defaultPrefabId: nestedPrefab.id,
+    }),
+  ]);
   const sceneRegistry = createSceneRegistry([createFoundationScene()]);
   const frames = new DeterministicFrameAdapter();
   const backends = [];
@@ -287,6 +305,7 @@ export async function createFoundationHarness() {
     hostElement,
     canvas,
     sceneRegistry,
+    displayKindRegistry,
     prefabRegistry,
     resourceRegistry,
     componentRegistry,

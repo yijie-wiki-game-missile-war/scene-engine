@@ -1,6 +1,6 @@
-# JavaScript Client 0.15
+# JavaScript Client 0.16
 
-`@scene-engine/client@0.15.0` is the only browser packet decoder, immutable WorldState owner, cumulative ACK barrier and Display
+`@scene-engine/client@0.16.0` is the only browser packet decoder, immutable WorldState owner, cumulative ACK barrier and Display
 session bridge. Its root exports:
 
 ```text
@@ -21,11 +21,11 @@ The constructor requires synchronous `createDisplaySession(metadata)`. The retur
 
 ```text
 runtime
-  catalogIdentity / installScene / activate / start / summary / currentView
+  installScene / activate / start / summary / currentView
 authorityPort
   installNodeMatrixPool / applyNodeTransformBatch
   createNode / setNodeTransforms / setNodeParent / setNodeVisible / setNodeState
-  setNodeProperty / unsetNodeProperty / emitNodeEvent / replaceNodePrefab / removeNode
+  setNodeProperty / unsetNodeProperty / emitNodeEvent / setNodeDisplayKind / removeNode
 commitGate
   begin / seal / fail
 dispose
@@ -34,7 +34,7 @@ dispose
 A product wrapper may contain extra fields. Client validates the required capabilities, extracts only these four fields into its
 own frozen session wrapper and ignores the extras. A missing required field fails closed.
 
-The transaction barrier is synchronous. `createDisplaySession`, `catalogIdentity`, `installScene`, `activate`, `start`, every
+The transaction barrier is synchronous. `createDisplaySession`, `installScene`, `activate`, `start`, every
 Authority operation, `commitGate.begin`, `commitGate.seal`, `summary`, and `currentView` must return directly; a Promise from any
 of them fails closed. Cleanup is deliberately different: `dispose` and error-path `commitGate.fail` may return a Promise, but the
 Client observes it only to suppress an unhandled rejection and never waits for it before replacement, failure propagation, or
@@ -48,20 +48,19 @@ already completed replacement.
 
 Checkpoint processing:
 
-1. validates the packet, World snapshot, numeric IDs and parent-first binary Display metadata, including every active float32
+1. validates the packet, World snapshot, numeric IDs, opaque `displayKindId` and parent-first binary Display metadata, including every active float32
    matrix row; for a later checkpoint in the same stream it also rejects pool shrinkage or resurrection of any historical
    tombstone ID;
 2. creates a fresh candidate session;
-3. reads `runtime.catalogIdentity()` and compares all three SHA-256 values with the checkpoint;
-4. installs `sceneName` only after identity matches;
-5. transfers the one owned full matrix tensor, then creates every authority root parent-first by ID;
-6. activates the exact cursor and starts the runtime;
-7. reads O(1) summary and builds ACK bytes;
-8. atomically swaps session, WorldState and cursors;
-9. disposes the previous session and queues the observer.
+3. installs `sceneName` without reading browser-local catalog identity;
+4. transfers the one owned full matrix tensor, then creates every authority root parent-first by ID;
+5. activates the exact cursor and starts the runtime;
+6. reads O(1) summary and builds ACK bytes;
+7. atomically swaps session, WorldState and cursors;
+8. disposes the previous session and queues the observer.
 
-Any pre-swap failure disposes the candidate and leaves the previous active session untouched. A catalog mismatch therefore
-cannot partially install the wrong Scene.
+Any pre-swap failure disposes the candidate and leaves the previous active session untouched. Display artifact selection and
+pinning are host/Replay concerns, not producer packet validation.
 
 ## Commit
 
@@ -91,6 +90,10 @@ parallel callback queue exists: all three new operations remain ordinary ordered
 
 ACK means WorldState, all synchronous Authority operations and the cursor were accepted. It does not wait for resources,
 DisplayView construction, HUD, observers, RAF or draw.
+
+An Authority operation that leaves an unknown, unimplemented or selection-unresolved Display Kind as an empty root is a
+successful degraded projection and remains ACKable. A selector exception, malformed complete state or invalid selected Prefab
+still fails the gate and emits no ACK.
 
 ## Observation and explicit queries
 

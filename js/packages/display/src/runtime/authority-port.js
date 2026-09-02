@@ -2,7 +2,6 @@ import { AuthorityComponent } from '../component/authority-component.js';
 import { BehaviourComponent } from '../component/behaviour-component.js';
 import { dispatchComponentEvent } from '../component/component.js';
 import {
-  cloneAndFreeze,
   cloneAndFreezeJson,
   exactKeys,
   plainRecord,
@@ -18,14 +17,16 @@ export class AuthorityPort {
   #authorityEntries = [];
 
   constructor({ scene, prefabInstantiator, componentContext, onMutation, onCleanupErrors,
-    assertMutable }) {
+    assertMutable, onDiagnostic }) {
     this._scene = scene;
     this._prefabInstantiator = prefabInstantiator;
     this._componentContext = componentContext;
     this._onMutation = onMutation;
     this._onCleanupErrors = onCleanupErrors;
     this._assertMutable = assertMutable;
+    this._onDiagnostic = onDiagnostic;
     this._matrixPool = new AuthorityMatrixPool();
+    this._gaps = new Map();
   }
 
   installNodeMatrixPool(value) {
@@ -47,7 +48,7 @@ export class AuthorityPort {
 
   createNode(command) {
     this._assertMutable?.();
-    const record = exactKeys(command, ['nodeId', 'parentNodeId', 'prefabId', 'transformMode',
+    const record = exactKeys(command, ['nodeId', 'parentNodeId', 'displayKindId', 'transformMode',
       'visible', 'state'], [], 'display-authority-command-invalid');
     const nodeId = authorityNodeId(record.nodeId);
     const name = authorityNodeName(nodeId);
@@ -55,7 +56,7 @@ export class AuthorityPort {
     return this._createNode({
       name,
       parent,
-      prefabId: record.prefabId,
+      displayKindId: record.displayKindId,
       transformMode: record.transformMode,
       visible: record.visible,
       state: record.state,
@@ -63,22 +64,25 @@ export class AuthorityPort {
     });
   }
 
-  _createNode({ name, parent, prefabId, transformMode, visible, state: stateValue, nodeId }) {
+  _createNode({ name, parent, displayKindId, transformMode, visible, state: stateValue, nodeId }) {
     if (this._scene.nodeIndex.has(name)) fail('display-node-name-duplicate');
-    const definition = this._resolvePrefab(prefabId);
-    const compiled = this._scene.registries.compiledPrefabCatalog.require(definition.id);
-    const state = cloneAndFreeze(stateValue, 'display-authority-state-invalid');
-    // Resolver/schema validation occurs before the first live mutation.
-    const validatedPatch = this._prefabInstantiator.resolveAndValidateState(
-      compiled,
-      state,
-      null,
-      {},
-      { ownerName: name },
-    );
-    this._scene.nodeGraph.validateSubtreePlacement(parent, validatedPatch.graphHeight);
+    const state = cloneAndFreezeJson(stateValue, 'display-authority-state-invalid');
+    const resolution = this._resolveDisplayKind(displayKindId, state, nodeId);
+    let validatedPatch = null;
+    if (resolution.compiled !== null) {
+      // Selector and Prefab resolver/schema validation happen before live mutation.
+      validatedPatch = this._prefabInstantiator.resolveAndValidateState(
+        resolution.compiled,
+        state,
+        null,
+        {},
+        { ownerName: name },
+      );
+      this._scene.nodeGraph.validateSubtreePlacement(parent, validatedPatch.graphHeight);
+    }
     const authority = new AuthorityComponent({
-      prefabId: definition.id,
+      displayKindId,
+      prefabId: resolution.prefabId,
       transformMode,
       state,
     });
@@ -94,19 +98,23 @@ export class AuthorityPort {
         visible,
       });
       root.addComponent(authority);
+      root._setAuthorityOwner(name);
       this._scene.nodeIndex.register(root);
       this._scene.nodeGraph.attach(root, parent);
       authority.attach(root, this._componentContext);
-      scope = this._prefabInstantiator.prepareExistingRoot({
-        root,
-        compiled,
-        initialState: state,
-        authorityOwnerName: name,
-        validatedPatch,
-      });
+      if (resolution.compiled !== null) {
+        scope = this._prefabInstantiator.prepareExistingRoot({
+          root,
+          compiled: resolution.compiled,
+          initialState: state,
+          authorityOwnerName: name,
+          validatedPatch,
+        });
+      }
       this._scene.nodeGraph.flushWorldTransforms();
       this._onMutation?.();
       this.#authorityEntries[nodeId] = { node: root, authority };
+      this._setGap(nodeId, resolution.gap);
       return nodeId;
     } catch (error) {
       if (scope) this._onCleanupErrors?.(this._prefabInstantiator.disposeScope(scope, 'create-rollback'));
@@ -225,7 +233,13 @@ export class AuthorityPort {
         minimum: 0,
       }),
     });
-    const { node } = this._requireAuthority(record.nodeId);
+    const { node, authority } = this._requireAuthority(record.nodeId);
+    if (authority.prefabId === null) {
+      // A known or unknown visual gap has no event surface. The ordered event is a
+      // successful empty delivery so missing art cannot withhold the Engine ACK.
+      this._onMutation?.();
+      return;
+    }
     const rootRecord = this._prefabInstantiator.requireRootRecord(node);
     if (!rootRecord.compiled.definition.events.includes(eventName)) {
       fail('display-authority-event-unknown');
@@ -246,27 +260,81 @@ export class AuthorityPort {
   }
 
   _setNodeState(reference, stateValue) {
-    const { node, authority } = this._requireAuthority(reference);
-    const state = cloneAndFreeze(stateValue, 'display-authority-state-invalid');
-    const scope = this._prefabInstantiator.getScope(node);
-    if (!scope) fail('display-prefab-scope-missing');
-    this._prefabInstantiator.reconcileState(scope, state);
-    authority._setState(state);
-    this._onMutation?.();
+    const { authority } = this._requireAuthority(reference);
+    return this._setNodeDisplayKindAndState(reference, authority.displayKindId, stateValue);
   }
 
-  replaceNodePrefab(command) {
+  setNodeDisplayKind(command) {
     this._assertMutable?.();
-    const record = exactKeys(command, ['nodeId', 'prefabId', 'state'], [],
+    const record = exactKeys(command, ['nodeId', 'displayKindId', 'state'], [],
       'display-authority-command-invalid');
-    return this._replaceNodePrefab(record.nodeId, record.prefabId, record.state);
+    return this._setNodeDisplayKindAndState(
+      record.nodeId,
+      record.displayKindId,
+      record.state,
+    );
   }
 
-  _replaceNodePrefab(reference, prefabId, stateValue) {
+  _setNodeDisplayKindAndState(reference, displayKindId, stateValue) {
     const { node, authority, nodeId } = this._requireAuthority(reference);
-    const definition = this._resolvePrefab(prefabId);
-    const compiled = this._scene.registries.compiledPrefabCatalog.require(definition.id);
-    const state = cloneAndFreeze(stateValue, 'display-authority-state-invalid');
+    const state = cloneAndFreezeJson(stateValue, 'display-authority-state-invalid');
+    const resolution = this._resolveDisplayKind(displayKindId, state, nodeId);
+    const currentScope = this._prefabInstantiator.getScope(node);
+    if (resolution.compiled === null) {
+      if (currentScope !== null) {
+        this._onCleanupErrors?.(this._prefabInstantiator.disposeScope(
+          currentScope,
+          'display-kind-unmaterialized',
+        ));
+      }
+      authority._setDisplayKind(displayKindId, null, state);
+      this._setGap(nodeId, resolution.gap);
+      this._scene.nodeGraph.flushWorldTransforms();
+      this._onMutation?.();
+      return;
+    }
+    if (authority.prefabId === resolution.prefabId && currentScope !== null) {
+      this._prefabInstantiator.reconcileState(currentScope, state);
+      authority._setDisplayKind(displayKindId, resolution.prefabId, state);
+      this._setGap(nodeId, null);
+      this._onMutation?.();
+      return;
+    }
+    if (currentScope === null) {
+      const validatedPatch = this._prefabInstantiator.resolveAndValidateState(
+        resolution.compiled,
+        state,
+        null,
+        {},
+        { ownerName: node.name },
+      );
+      this._scene.nodeGraph.validateSubtreePlacement(node.parent, validatedPatch.graphHeight);
+      this._prefabInstantiator.prepareExistingRoot({
+        root: node,
+        compiled: resolution.compiled,
+        initialState: state,
+        authorityOwnerName: node.name,
+        validatedPatch,
+      });
+      authority._setDisplayKind(displayKindId, resolution.prefabId, state);
+      this._setGap(nodeId, null);
+      this._scene.nodeGraph.flushWorldTransforms();
+      this._onMutation?.();
+      return;
+    }
+    this._replaceMaterialization({
+      node,
+      authority,
+      nodeId,
+      displayKindId,
+      state,
+      prefabId: resolution.prefabId,
+      compiled: resolution.compiled,
+    });
+  }
+
+  _replaceMaterialization({ node, authority, nodeId, displayKindId, state,
+    prefabId, compiled }) {
     const validatedPatch = this._prefabInstantiator.resolveAndValidateState(
       compiled,
       state,
@@ -275,7 +343,8 @@ export class AuthorityPort {
       { ownerName: node.name },
     );
     const replacementAuthority = new AuthorityComponent({
-      prefabId: definition.id,
+      displayKindId,
+      prefabId,
       transformMode: authority.transformMode,
       state,
     });
@@ -336,6 +405,7 @@ export class AuthorityPort {
       node: shadow.root,
       authority: replacementAuthority,
     };
+    this._setGap(nodeId, null);
     for (const child of authorityChildren) this._scene.nodeGraph.reparent(child, shadow.root);
     this._scene.nodeGraph.flushWorldTransforms();
     this._onMutation?.();
@@ -359,6 +429,7 @@ export class AuthorityPort {
     this._matrixPool.release(nodeId);
     node._markDisposed();
     this.#authorityEntries[nodeId] = null;
+    this._setGap(nodeId, null);
     this._onMutation?.();
   }
 
@@ -385,8 +456,64 @@ export class AuthorityPort {
     if (reference === null) return this._scene.authorityRootNode;
     return this._requireAuthority(authorityNodeId(reference)).node;
   }
-  _resolvePrefab(prefabId) {
-    return this._scene.registries.prefabRegistry.require(prefabId);
+  _resolveDisplayKind(displayKindId, state, nodeId) {
+    const definition = this._scene.registries.displayKindRegistry.get(displayKindId);
+    if (definition === null) {
+      return {
+        prefabId: null,
+        compiled: null,
+        gap: this._gap(nodeId, displayKindId,
+          'display-kind-unknown-requirement', 'warning'),
+      };
+    }
+    if (definition.authorityPrefabIds.length === 0) {
+      return {
+        prefabId: null,
+        compiled: null,
+        gap: this._gap(nodeId, displayKindId,
+          'display-kind-unimplemented', 'warning'),
+      };
+    }
+    const prefabId = definition.resolvePrefab(state);
+    if (prefabId === null) {
+      return {
+        prefabId: null,
+        compiled: null,
+        gap: this._gap(nodeId, displayKindId,
+          'display-kind-selection-unresolved', 'error'),
+      };
+    }
+    return {
+      prefabId,
+      compiled: this._scene.registries.compiledPrefabCatalog.require(prefabId),
+      gap: null,
+    };
+  }
+
+  _gap(nodeId, displayKindId, code, severity) {
+    return Object.freeze({ nodeId, displayKindId, code, severity });
+  }
+
+  _setGap(nodeId, current) {
+    const previous = this._gaps.get(nodeId) ?? null;
+    if (previous?.code === current?.code
+        && previous?.displayKindId === current?.displayKindId) return;
+    if (current === null) this._gaps.delete(nodeId);
+    else this._gaps.set(nodeId, current);
+    try {
+      this._onDiagnostic?.(Object.freeze({ nodeId, previous, current }));
+    } catch { /* diagnostics observers are best-effort */ }
+  }
+
+  currentDiagnostics() {
+    const gaps = Object.freeze([...this._gaps.values()]
+      .sort((left, right) => left.nodeId - right.nodeId));
+    return Object.freeze({
+      schema: 'scene-engine-display-diagnostics@1',
+      warningCount: gaps.filter((entry) => entry.severity === 'warning').length,
+      errorCount: gaps.filter((entry) => entry.severity === 'error').length,
+      gaps,
+    });
   }
   _hasAuthorityDescendant(node) {
     const visit = (current) => current._children.some((child) => child.name.startsWith(AUTHORITY_PREFIX) || visit(child));
@@ -397,5 +524,6 @@ export class AuthorityPort {
   _release() {
     this._matrixPool.releaseOwner();
     this.#authorityEntries.length = 0;
+    this._gaps.clear();
   }
 }

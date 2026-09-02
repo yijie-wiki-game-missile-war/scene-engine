@@ -6,15 +6,15 @@ fallback runtime.
 ## Release tuple
 
 ```text
-scene-engine Python                 0.18.0
-@scene-engine/client               0.15.0
-@scene-engine/display              0.14.0
+scene-engine Python                 0.19.0
+@scene-engine/client               0.16.0
+@scene-engine/display              0.15.0
 @scene-engine/renderer-three       0.12.0
 wire                               scene-engine-wire@3
-display                            scene-engine-display-node@8
+display                            scene-engine-display-node@9
 scene definition                   scene-engine-scene-definition@2
 prefab definition                  scene-engine-prefab-definition@5
-catalog manifest                   scene-engine-display-catalog-manifest@2
+catalog manifest                   scene-engine-display-catalog-manifest@3
 packet log                         scene-engine-packet-log@3
 ```
 
@@ -151,9 +151,10 @@ animation scope, rollback and disposal, not a second tree or a caller-visible ch
 ## Catalog and identity
 
 All definitions and registries are complete before runtime construction. `DisplayRuntime` builds a canonical manifest, computes
-its identity, then seals Scene, Prefab, Resource and Component registries.
+its browser-local identity, then seals Display Kind, Scene, Prefab, Resource and Component registries.
 
-Required constructor input includes one state-schema identity for each gameplay type used by a Prefab:
+Required constructor input includes a `displayKindRegistry` and one state-schema identity for each gameplay type used by a
+Display Kind or Prefab:
 
 ```js
 const authorityStateSchemas = [
@@ -165,6 +166,7 @@ The manifest contains sorted, closed descriptions of:
 
 ```text
 scenes
+displayKinds
 prefabs
 resources
 components
@@ -174,12 +176,12 @@ authorityStateSchemas
 `computeDisplayCatalogIdentity(manifest)` generates three independent lowercase SHA-256 values:
 
 - Scene catalog hash;
-- Prefab/Resource/Component catalog hash;
+- Display Kind/Prefab/Resource/Component catalog hash;
 - authority-state schema hash.
 
-`toDisplayCatalogIdentityRecord(identity)` converts them to the snake-case JSON record loaded by Python. Registration order does
-not change identity; duplicate IDs, duplicate gameplay-type schemas or incomplete schema coverage fail. Client compares
-`runtime.catalogIdentity()` with checkpoint identity before `installScene`.
+`toDisplayCatalogIdentityRecord(identity)` remains an optional local artifact-tooling conversion. Python does not load these
+hashes and Client does not compare them with producer bytes. Registration order does not change identity; duplicate IDs,
+invalid Kind-to-Prefab mappings, duplicate gameplay-type schemas or incomplete schema coverage fail.
 
 Prefab compilation is registry-aware. Its dependency graph includes every fixed child reference and every dynamic slot
 allowlist entry. Missing definitions, self/mutual cycles, illegal mounts, duplicate keys, name/depth expansion failures and
@@ -190,6 +192,7 @@ depth and 192-byte canonical-name limits.
 The manifest contains declarative data, not JavaScript function source. Therefore:
 
 - changing a Prefab resolver or its state-to-patch semantics requires increasing that Prefab's `revision`;
+- changing a Display Kind selector's semantics requires increasing that Kind's `revision` because function source is not hashed;
 - changing fixed child declarations, slot allowlists or slot limits changes the Prefab catalog hash through the canonical
   declaration;
 - changing a custom Component normalizer, resource-reference contract or behaviour semantics requires a new versioned `typeId`;
@@ -204,9 +207,30 @@ ACKed and repaired later. Runtime animation switches repeat the same checks with
 ## Prefab identity and composition
 
 `PrefabDefinition.id` is the exact, unique display-catalog key. `PrefabDefinition.gameplayType` is non-unique metadata describing
-the complete state contract consumed by its resolver. Multiple visual Prefabs may share one gameplay type. Authority create and
-replace operations carry an exact outer `prefabId`; lookup or implicit selection by gameplay type is forbidden on the
-production path.
+the complete state contract consumed by its resolver. Multiple visual Prefabs may share one gameplay type. Nested and Scene
+composition still use exact `prefabId`; gameplay type never selects a Prefab.
+
+The outer Authority boundary instead uses a `DisplayKindDefinition`:
+
+```js
+const kind = defineDisplayKind({
+  id: 'display.unit/fighter@1',
+  gameplayType: 'unit.basic',
+  revision: 1,
+  authorityPrefabIds: ['visual/fighter-a', 'visual/fighter-b'],
+  resolvePrefab(state) {
+    if (state.variant === 'a') return 'visual/fighter-a';
+    if (state.variant === 'b') return 'visual/fighter-b';
+    return null;
+  },
+});
+const displayKindRegistry = createDisplayKindRegistry([kind]);
+```
+
+An empty allowlist is a known unimplemented requirement. A non-empty list has exactly one explicit policy: either
+`defaultPrefabId` or synchronous `resolvePrefab(state)`. A selector returns an allowed exact ID, or `null`/`undefined` when a
+legal state has no current selection. Registration order never chooses an implementation. Selector exceptions and Promises
+fail closed.
 
 Schema `scene-engine-prefab-definition@5` defines matrix-native definition-owned composition and its public transient-event
 names:
@@ -297,16 +321,16 @@ leaves the live materialization unchanged. An adopt failure rolls back the curre
 cannot restore the projection, the commit gate fails closed and a fresh checkpoint/session is required. The existing commit
 contract still does not promise rollback across multiple Authority commands.
 
-Outer `replaceNodePrefab` replaces the complete materialization ledger for that authority target while preserving the outer
-authority Node's numeric ID, derived internal name, parent and authority-owned children according to the existing replacement contract. Old and new
-Prefab-local canonical names are never simultaneously present in NodeIndex.
+Outer kind resolution preserves the Authority Node's numeric ID, derived name, parent and authority-owned children. The same
+selected Prefab reconciles in place; a changed selection stages and adopts a replacement ledger. Old and new Prefab-local names
+are never simultaneously present in NodeIndex. Losing a selection disposes only Prefab-local content and retains the root.
 
 ## Authority boundary
 
 Python owns each authority root's:
 
 ```text
-nodeId / existence / parentNodeId / MatrixPool row / visibility / prefabId / complete state
+nodeId / existence / parentNodeId / MatrixPool row / visibility / displayKindId / complete state
 ```
 
 This is deliberately the outer boundary. Python does not publish commands for definition-owned child instances, does not know
@@ -328,7 +352,7 @@ setNodeState
 setNodeProperty
 unsetNodeProperty
 emitNodeEvent
-replaceNodePrefab
+setNodeDisplayKind
 removeNode
 ```
 
@@ -338,22 +362,36 @@ batch invokes the mutation hook once. New rows are not part of this call: their 
 `createNode` records.
 
 `null` parent means `sys/authority-root`; a non-null parent ID must be an existing authority root. `setNodeState` is complete
-replacement, not merge patch, including when it causes nested add/remove/replace operations.
+replacement, not merge patch. It reruns kind selection before reconciling, replacing, removing or adding materialization.
+
+Every syntactically valid create first installs the Authority root. Current gaps are bounded by live Authority IDs and exposed
+through `currentDiagnostics()`; `onDiagnostic` receives only transitions, not an unbounded history:
+
+| Resolution | Diagnostic | Severity | ACK |
+| --- | --- | --- | --- |
+| kind absent | `display-kind-unknown-requirement` | warning | yes |
+| known kind with empty allowlist | `display-kind-unimplemented` | warning | yes |
+| non-empty kind cannot select | `display-kind-selection-unresolved` | error | yes |
+
+Each gap root retains MatrixPool row, hierarchy, visibility and complete state. `setNodeState`, property set/unset and kind
+change can later materialize it. Selector exceptions, malformed JSON, an invalid selected Prefab or materialization failure
+remain fail-closed and produce no ACK.
 
 `setNodeProperty` and `unsetNodeProperty` first construct a complete outer-state candidate and then reuse the exact
 `setNodeState` resolver/reconcile transaction. They address only one top-level name; dots are literal and do not form a path.
 JSON `null` remains a value, while unsetting a missing member fails closed. Names are at most 192 UTF-8 bytes and use the
-Display @8 fixed forbidden-code-point table documented in `wire.md`; this rejects whitespace, control/format, surrogate,
+Display @9 fixed forbidden-code-point table documented in `wire.md`; this rejects whitespace, control/format, surrogate,
 private-use and noncharacter code points plus JavaScript prototype-pollution names, while allowing `Cn` so runtime Unicode
 versions cannot disagree. The complete candidate remains subject to the product Prefab resolver/state contract, so a schema
 may reject an otherwise syntactically valid field. A property value has one fewer JSON-depth level than complete state because
 inserting the member adds the outer state-object level; this is validated before the Authority candidate is applied.
 
-`emitNodeEvent` requires the current outer Prefab to declare `eventName`. It routes only within that Prefab definition record,
+`emitNodeEvent` on a materialized root requires the current outer Prefab to declare `eventName`. It routes only within that Prefab definition record,
 to enabled Behaviour components whose registered Component class explicitly includes the name in static `eventNames`.
 Recipients run in Node preorder and declaration order. The frozen handler record is
 `{eventName, payload, commandSeq, sourceTick}`; payload is a JSON object. A handler must return synchronously, and failure follows
-the normal no-ACK/projection-invalid path. Events do not mutate Authority state or appear in checkpoints.
+the normal no-ACK/projection-invalid path. On an empty gap root it is a successful no-op with no subscribers. Events do not
+mutate Authority state or appear in checkpoints.
 
 Checkpoint bootstrap may create authority roots after `installScene` and before `activate`. Once activated, every Authority call
 must occur between an exact `commitGate.begin(cursor)` and `commitGate.seal(cursor)`. Calls outside an open gate fail with no
@@ -411,7 +449,9 @@ import {
   BehaviourComponent,
   PREFAB_DEFINITION_SCHEMA,
   createComponentRegistry,
+  createDisplayKindRegistry,
   createPrefabRegistry,
+  defineDisplayKind,
   definePrefab,
 } from '@scene-engine/display';
 
@@ -481,11 +521,18 @@ const unitPrefab = definePrefab({
 });
 
 const prefabRegistry = createPrefabRegistry([unitPrefab]);
+const displayKindRegistry = createDisplayKindRegistry([defineDisplayKind({
+  id: 'display.game/state@1',
+  gameplayType: 'game.state',
+  revision: 1,
+  authorityPrefabIds: [unitPrefab.id],
+  defaultPrefabId: unitPrefab.id,
+})]);
 const authorityStateSchemas = [
   { gameplayType: 'game.state', schemaId: 'game.state.authority', revision: 1 },
 ];
 
-// Pass componentRegistry, prefabRegistry, the Scene/Resource registries and
+// Pass componentRegistry, displayKindRegistry, prefabRegistry, the Scene/Resource registries and
 // authorityStateSchemas to the existing createDisplayRuntime(...) composition root.
 ```
 
@@ -553,8 +600,8 @@ Three backend keeps defensive validation, but an invalid business record must no
 
 ## Checkpoint, commit and summary
 
-A checkpoint carries Scene name, three catalog hashes, command cursor, the complete matrix pool and parent-first authority-root
-metadata. Client creates a fresh session, verifies catalog identity, installs the Scene and pool, bootstraps roots by ID,
+A checkpoint carries Scene name, command cursor, the complete matrix pool and parent-first authority-root kind/state metadata.
+Client creates a fresh session, installs the Scene and pool, bootstraps roots by ID,
 activates and starts it, then swaps the session.
 
 A commit closes the draw gate, stages the one dirty matrix block and applies every command in order. Property candidates reuse

@@ -87,10 +87,39 @@ export interface AuthorityStateSchema {
 export interface DisplayCatalogManifest {
   readonly schema: typeof DISPLAY_CATALOG_MANIFEST_SCHEMA;
   readonly scenes: readonly Readonly<Record<string, unknown>>[];
+  readonly displayKinds: readonly DisplayKindDescription[];
   readonly prefabs: readonly Readonly<Record<string, unknown>>[];
   readonly resources: readonly Readonly<Record<string, unknown>>[];
   readonly components: readonly Readonly<Record<string, unknown>>[];
   readonly authorityStateSchemas: readonly AuthorityStateSchema[];
+}
+
+export interface DisplayKindDefinitionInput {
+  readonly id: string;
+  readonly gameplayType: string;
+  readonly revision: number;
+  readonly authorityPrefabIds: readonly string[];
+  readonly defaultPrefabId?: string;
+  readonly resolvePrefab?: (state: JSONRecord) => string | null | undefined;
+}
+
+export interface DisplayKindDescription {
+  readonly id: string;
+  readonly gameplayType: string;
+  readonly revision: number;
+  readonly authorityPrefabIds: readonly string[];
+  readonly defaultPrefabId: string | null;
+}
+
+export class DisplayKindDefinition {
+  constructor(value: DisplayKindDefinitionInput);
+  readonly id: string;
+  readonly gameplayType: string;
+  readonly revision: number;
+  readonly authorityPrefabIds: readonly string[];
+  readonly defaultPrefabId: string | null;
+  describe(): Readonly<DisplayKindDescription>;
+  resolvePrefab(state: JSONRecord): string | null;
 }
 
 export interface RendererProfile {
@@ -250,6 +279,15 @@ export interface PrefabRegistry {
   values(): IterableIterator<PrefabDefinition>;
 }
 
+export interface DisplayKindRegistry {
+  register(definition: DisplayKindDefinition): DisplayKindDefinition;
+  seal(): this;
+  get(displayKindId: string): DisplayKindDefinition | null;
+  require(displayKindId: string): DisplayKindDefinition;
+  values(): IterableIterator<DisplayKindDefinition>;
+  validatePrefabImplementations(prefabRegistry: PrefabRegistry): this;
+}
+
 export interface NodeView {
   readonly name: string;
   readonly label: string | null;
@@ -402,7 +440,7 @@ export class PrefabDefinition {
 export interface AuthorityNodeRecord {
   readonly nodeId: number;
   readonly parentNodeId: number | null;
-  readonly prefabId: string;
+  readonly displayKindId: string;
   readonly transformMode: 'initial' | 'live';
   readonly visible: boolean;
   readonly state: JSONRecord;
@@ -445,7 +483,11 @@ export interface AuthorityPort {
     readonly commandSeq: number;
     readonly sourceTick: number;
   }): undefined;
-  replaceNodePrefab(command: { readonly nodeId: number; readonly prefabId: string; readonly state: JSONRecord }): undefined;
+  setNodeDisplayKind(command: {
+    readonly nodeId: number;
+    readonly displayKindId: string;
+    readonly state: JSONRecord;
+  }): undefined;
   removeNode(command: { readonly nodeId: number }): undefined;
 }
 
@@ -528,6 +570,7 @@ export interface FrameAdapter {
 
 export interface DisplayRuntimeOptions {
   readonly sceneRegistry: SceneRegistry;
+  readonly displayKindRegistry: DisplayKindRegistry;
   readonly prefabRegistry: PrefabRegistry;
   readonly resourceRegistry: ResourceRegistry;
   readonly componentRegistry: ComponentRegistry;
@@ -544,6 +587,28 @@ export interface DisplayRuntimeOptions {
   readonly canvas?: unknown;
   readonly frameAdapter?: FrameAdapter | null;
   readonly onHealth?: ((event: Readonly<Record<string, unknown>>) => void) | null;
+  readonly onDiagnostic?: ((transition: DisplayDiagnosticTransition) => void) | null;
+}
+
+export interface DisplayKindGap {
+  readonly nodeId: number;
+  readonly displayKindId: string;
+  readonly code: 'display-kind-unknown-requirement' | 'display-kind-unimplemented'
+    | 'display-kind-selection-unresolved';
+  readonly severity: 'warning' | 'error';
+}
+
+export interface DisplayDiagnosticTransition {
+  readonly nodeId: number;
+  readonly previous: DisplayKindGap | null;
+  readonly current: DisplayKindGap | null;
+}
+
+export interface DisplayDiagnostics {
+  readonly schema: 'scene-engine-display-diagnostics@1';
+  readonly warningCount: number;
+  readonly errorCount: number;
+  readonly gaps: readonly DisplayKindGap[];
 }
 
 export class DisplayRuntime {
@@ -552,6 +617,7 @@ export class DisplayRuntime {
   readonly commitGate: Readonly<CommitGate>;
   installScene(value: { readonly sceneName: string }): this;
   catalogIdentity(): DisplayCatalogIdentity;
+  currentDiagnostics(): DisplayDiagnostics;
   activate(cursor?: DisplayCursor): undefined;
   start(): undefined;
   stop(): undefined;
@@ -587,9 +653,9 @@ export class BillboardComponent extends BehaviourComponent { static readonly typ
 export class LookAtComponent extends BehaviourComponent { static readonly typeId: 'behavior.look-at@1'; static readonly tickPhase: 'before-render'; static readonly drivesTransform: true; }
 
 export const TICKS_PER_SECOND: 60;
-export const DISPLAY_RUNTIME_SCHEMA: 'scene-engine-display-node@8';
+export const DISPLAY_RUNTIME_SCHEMA: 'scene-engine-display-node@9';
 export const DISPLAY_SUMMARY_SCHEMA: 'scene-engine-display-summary@1';
-export const DISPLAY_CATALOG_MANIFEST_SCHEMA: 'scene-engine-display-catalog-manifest@2';
+export const DISPLAY_CATALOG_MANIFEST_SCHEMA: 'scene-engine-display-catalog-manifest@3';
 export const SCENE_DEFINITION_SCHEMA: 'scene-engine-scene-definition@2';
 export const PREFAB_DEFINITION_SCHEMA: 'scene-engine-prefab-definition@5';
 export const RESOURCE_REGISTRY_SCHEMA: 'scene-engine-resource-registry@1';
@@ -658,6 +724,7 @@ export function defineFrameAnimation(value: DefineFrameAnimationInput): Readonly
 export function defineDisplayCatalogManifest(value: DisplayCatalogManifest): DisplayCatalogManifest;
 export function buildDisplayCatalogManifest(value: {
   readonly sceneRegistry: SceneRegistry;
+  readonly displayKindRegistry: DisplayKindRegistry;
   readonly prefabRegistry: PrefabRegistry;
   readonly resourceRegistry: ResourceRegistry;
   readonly componentRegistry: ComponentRegistry;
@@ -671,12 +738,16 @@ export function toDisplayCatalogIdentityRecord(value: DisplayCatalogIdentity): D
 
 export function defineScene(value: SceneDefinitionInput): SceneDefinition;
 export function definePrefab(value: PrefabDefinitionInput): PrefabDefinition;
+export function defineDisplayKind(value: DisplayKindDefinitionInput): DisplayKindDefinition;
 export function defineResources(value: {
   readonly schema: typeof RESOURCE_REGISTRY_SCHEMA;
   readonly resources: readonly ResourceDescriptor[];
 }): Readonly<Record<string, unknown>>;
 export function createSceneRegistry(initial?: readonly SceneDefinition[]): SceneRegistry;
 export function createPrefabRegistry(initial?: readonly PrefabDefinition[]): PrefabRegistry;
+export function createDisplayKindRegistry(
+  initial?: readonly DisplayKindDefinition[],
+): DisplayKindRegistry;
 export function createResourceRegistry(initial?: readonly ResourceDescriptor[] | Readonly<Record<string, unknown>>): ResourceRegistry;
 export function createComponentRegistry(options?: { readonly includeBuiltIns?: boolean }): ComponentRegistry;
 export function createDisplayRuntime(options: DisplayRuntimeOptions): DisplayRuntime;

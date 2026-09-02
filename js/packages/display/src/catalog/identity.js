@@ -1,11 +1,13 @@
 import { cloneAndFreeze, exactKeys, isPlainRecord, nonemptyString, safeInteger } from '../internal.js';
 import { fail } from '../runtime/health.js';
 import { compilePrefabCatalog } from '../resource/prefab-compiler.js';
+import { assertDisplayKindId } from '../resource/display-kind-definition.js';
+import { assertPrefabId } from '../resource/prefab-definition.js';
 
-export const DISPLAY_CATALOG_MANIFEST_SCHEMA = 'scene-engine-display-catalog-manifest@2';
+export const DISPLAY_CATALOG_MANIFEST_SCHEMA = 'scene-engine-display-catalog-manifest@3';
 const SCENE_CATALOG_HASH_SCHEMA = 'scene-engine-scene-catalog-input@1';
-const PREFAB_CATALOG_HASH_SCHEMA = 'scene-engine-prefab-catalog-input@1';
-const STATE_SCHEMA_HASH_SCHEMA = 'scene-engine-state-schema-input@1';
+const PREFAB_CATALOG_HASH_SCHEMA = 'scene-engine-prefab-catalog-input@2';
+const STATE_SCHEMA_HASH_SCHEMA = 'scene-engine-state-schema-input@2';
 const HASH = /^[0-9a-f]{64}$/u;
 
 function compareIdentifier(left, right) {
@@ -68,9 +70,44 @@ function normalizeAuthorityStateSchemas(values) {
   return Object.freeze(entries);
 }
 
+function normalizeDisplayKinds(values) {
+  if (!Array.isArray(values)) fail('display-catalog-kinds-invalid');
+  const entries = values.map((value) => {
+    const record = exactKeys(value, [
+      'id', 'gameplayType', 'revision', 'authorityPrefabIds', 'defaultPrefabId',
+    ], [], 'display-catalog-kinds-invalid');
+    if (!Array.isArray(record.authorityPrefabIds)) fail('display-catalog-kinds-invalid');
+    const authorityPrefabIds = record.authorityPrefabIds
+      .map(assertPrefabId)
+      .sort(compareIdentifier);
+    for (let index = 1; index < authorityPrefabIds.length; index += 1) {
+      if (authorityPrefabIds[index - 1] === authorityPrefabIds[index]) {
+        fail('display-catalog-kinds-invalid');
+      }
+    }
+    const defaultPrefabId = record.defaultPrefabId === null
+      ? null : assertPrefabId(record.defaultPrefabId);
+    if (defaultPrefabId !== null && !authorityPrefabIds.includes(defaultPrefabId)) {
+      fail('display-kind-default-prefab-invalid');
+    }
+    return Object.freeze({
+      id: assertDisplayKindId(record.id),
+      gameplayType: nonemptyString(record.gameplayType, 'display-catalog-kinds-invalid'),
+      revision: safeInteger(record.revision, 'display-catalog-kinds-invalid', { minimum: 0 }),
+      authorityPrefabIds: Object.freeze(authorityPrefabIds),
+      defaultPrefabId,
+    });
+  }).sort((left, right) => compareIdentifier(left.id, right.id));
+  for (let index = 1; index < entries.length; index += 1) {
+    if (entries[index - 1].id === entries[index].id) fail('display-catalog-kinds-invalid');
+  }
+  return Object.freeze(entries);
+}
+
 export function defineDisplayCatalogManifest(value) {
   const record = exactKeys(value, [
-    'schema', 'scenes', 'prefabs', 'resources', 'components', 'authorityStateSchemas',
+    'schema', 'scenes', 'displayKinds', 'prefabs', 'resources', 'components',
+    'authorityStateSchemas',
   ], [], 'display-catalog-manifest-invalid');
   if (record.schema !== DISPLAY_CATALOG_MANIFEST_SCHEMA) {
     fail('display-catalog-manifest-schema-invalid');
@@ -78,12 +115,25 @@ export function defineDisplayCatalogManifest(value) {
   const manifest = {
     schema: DISPLAY_CATALOG_MANIFEST_SCHEMA,
     scenes: sortEntries(record.scenes, 'id', 'display-catalog-scenes-invalid'),
+    displayKinds: normalizeDisplayKinds(record.displayKinds),
     prefabs: sortEntries(record.prefabs, 'id', 'display-catalog-prefabs-invalid'),
     resources: sortEntries(record.resources, 'id', 'display-catalog-resources-invalid'),
     components: sortEntries(record.components, 'typeId', 'display-catalog-components-invalid'),
     authorityStateSchemas: normalizeAuthorityStateSchemas(record.authorityStateSchemas),
   };
-  const gameplayTypes = new Set(manifest.prefabs.map((entry) => entry.gameplayType));
+  const prefabById = new Map(manifest.prefabs.map((entry) => [entry.id, entry]));
+  for (const kind of manifest.displayKinds) {
+    for (const prefabId of kind.authorityPrefabIds) {
+      const prefab = prefabById.get(prefabId);
+      if (!prefab || prefab.gameplayType !== kind.gameplayType) {
+        fail('display-kind-prefab-gameplay-type-mismatch');
+      }
+    }
+  }
+  const gameplayTypes = new Set([
+    ...manifest.prefabs.map((entry) => entry.gameplayType),
+    ...manifest.displayKinds.map((entry) => entry.gameplayType),
+  ]);
   const schemaTypes = new Set(manifest.authorityStateSchemas.map((entry) => entry.gameplayType));
   if (gameplayTypes.size !== schemaTypes.size
       || [...gameplayTypes].some((entry) => !schemaTypes.has(entry))) {
@@ -94,21 +144,25 @@ export function defineDisplayCatalogManifest(value) {
 
 export function buildDisplayCatalogManifest({
   sceneRegistry,
+  displayKindRegistry,
   prefabRegistry,
   resourceRegistry,
   componentRegistry,
   authorityStateSchemas,
 }) {
   if (typeof sceneRegistry?.values !== 'function'
+      || typeof displayKindRegistry?.values !== 'function'
       || typeof prefabRegistry?.values !== 'function'
       || typeof resourceRegistry?.values !== 'function'
       || typeof componentRegistry?.catalogEntries !== 'function') {
     fail('display-catalog-registry-invalid');
   }
   compilePrefabCatalog({ prefabRegistry, componentRegistry, resourceRegistry });
+  displayKindRegistry.validatePrefabImplementations(prefabRegistry);
   return defineDisplayCatalogManifest({
     schema: DISPLAY_CATALOG_MANIFEST_SCHEMA,
     scenes: [...sceneRegistry.values()].map((definition) => definition.describe()),
+    displayKinds: [...displayKindRegistry.values()].map((definition) => definition.describe()),
     prefabs: [...prefabRegistry.values()].map((definition) => definition.describe()),
     resources: [...resourceRegistry.values()].map((resource) => resource.describe()),
     components: componentRegistry.catalogEntries(),
@@ -126,12 +180,18 @@ export function computeDisplayCatalogIdentity(value) {
     prefabCatalogHash: sha256Hex(canonicalDisplayCatalogJson({
       schema: PREFAB_CATALOG_HASH_SCHEMA,
       prefabs: manifest.prefabs,
+      displayKinds: manifest.displayKinds,
       resources: manifest.resources,
       components: manifest.components,
     })),
     stateSchemaHash: sha256Hex(canonicalDisplayCatalogJson({
       schema: STATE_SCHEMA_HASH_SCHEMA,
       authorityStateSchemas: manifest.authorityStateSchemas,
+      displayKinds: manifest.displayKinds.map((entry) => ({
+        id: entry.id,
+        gameplayType: entry.gameplayType,
+        revision: entry.revision,
+      })),
     })),
   });
 }
@@ -146,7 +206,7 @@ export function normalizeDisplayCatalogIdentity(value) {
   return Object.freeze({ ...record });
 }
 
-/** JSON record written beside an Arts build and loaded by Python. */
+/** Optional snake-case record for local Display artifact tooling. */
 export function toDisplayCatalogIdentityRecord(value) {
   const identity = normalizeDisplayCatalogIdentity(value);
   return Object.freeze({

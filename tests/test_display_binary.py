@@ -6,7 +6,6 @@ import numpy as np
 import pytest
 
 from scene_engine.display import (
-    DisplayCatalogIdentity,
     DisplayCommand,
     DisplayMatrixPool,
     DisplayNode,
@@ -32,9 +31,6 @@ from scene_engine.display_binary import (
 from scene_engine.errors import ConfigurationError, WireError
 
 
-HASH_A = "a" * 64
-HASH_B = "b" * 64
-HASH_C = "c" * 64
 IDENTITY = [
     1.0, 0.0, 0.0, 0.0,
     0.0, 1.0, 0.0, 0.0,
@@ -77,9 +73,6 @@ def checkpoint(*, state: dict | None = None) -> dict:
     return {
         "schema": DISPLAY_CHECKPOINT_SCHEMA,
         "scene_name": "main",
-        "scene_catalog_hash": HASH_A,
-        "prefab_catalog_hash": HASH_B,
-        "state_schema_hash": HASH_C,
         "last_command_seq": 7,
         "matrix_pool_size": 3,
         "matrix_pool": [
@@ -91,7 +84,7 @@ def checkpoint(*, state: dict | None = None) -> dict:
             {
                 "node_id": 0,
                 "parent_node_id": None,
-                "prefab_id": "world/root",
+                "display_kind_id": "world/root",
                 "transform_mode": "live",
                 "visible": True,
                 "state": {"mode": "ready"} if state is None else state,
@@ -99,7 +92,7 @@ def checkpoint(*, state: dict | None = None) -> dict:
             {
                 "node_id": 2,
                 "parent_node_id": 0,
-                "prefab_id": "world/child",
+                "display_kind_id": "world/child",
                 "transform_mode": "initial",
                 "visible": False,
                 "state": {},
@@ -110,12 +103,12 @@ def checkpoint(*, state: dict | None = None) -> dict:
 
 def command_stream() -> dict:
     variants = [
-        ("node-create", 2, {"parent_node_id": None, "prefab_id": "world/root", "transform_mode": "live", "visible": True, "state": {"created": True}}),
+        ("node-create", 2, {"parent_node_id": None, "display_kind_id": "world/root", "transform_mode": "live", "visible": True, "state": {"created": True}}),
         ("node-set-transform-batch", 2, {"node_ids": [0]}),
         ("node-set-parent", 3, {"parent_node_id": 0}),
         ("node-set-visible", 4, {"visible": False}),
         ("node-set-state", 5, {"state": {"items": [1, 2]}}),
-        ("node-replace-prefab", 6, {"prefab_id": "world/replacement", "state": {"mode": "other"}}),
+        ("node-set-display-kind", 6, {"display_kind_id": "world/replacement", "state": {"mode": "other"}}),
         ("node-set-property", 6, {"property_name": "status.health", "value": [None, True, {"amount": 3}]}),
         ("node-unset-property", 6, {"property_name": "temporaryFlag"}),
         ("node-emit-event", 6, {"event_name": "combat.Exploded", "payload": {"coins": 4}}),
@@ -177,7 +170,7 @@ def test_binary_checkpoint_round_trips_full_pool_and_sparse_node_records() -> No
     assert encoded.last_command_seq == 7
     assert bytes(encoded) == encoded.bytes
     assert encoded.bytes[:4] == DISPLAY_BINARY_CHECKPOINT_MAGIC
-    assert encoded.bytes[4] == DISPLAY_BINARY_VERSION == 5
+    assert encoded.bytes[4] == DISPLAY_BINARY_VERSION == 6
     assert encoded.bytes[5] == DISPLAY_BINARY_SCALAR_FLOAT32
     assert struct.unpack_from("<QII", encoded.bytes, 8) == (7, 3, 2)
     assert struct.unpack_from("<16f", encoded.bytes, 24) == pytest.approx(POSE)
@@ -202,10 +195,9 @@ def test_checkpoint_tensor_preserves_opaque_float32_bits() -> None:
     node_id = pool.append(DisplayTransform(matrix_bytes=raw))
     seal = encode_display_checkpoint(
         scene_name="main",
-        catalog=DisplayCatalogIdentity(HASH_A, HASH_B, HASH_C),
         last_command_seq=0,
         matrix_pool=pool,
-        nodes=(DisplayNode(node_id=node_id, parent_node_id=None, prefab_id="world/root", transform_mode="live", visible=True, state={}),),
+        nodes=(DisplayNode(node_id=node_id, parent_node_id=None, display_kind_id="world/root", transform_mode="live", visible=True, state={}),),
     )
 
     encoded = encode_display_checkpoint_binary(seal, 0)
@@ -241,7 +233,7 @@ def test_binary_command_stream_round_trips_batch_then_all_command_opcodes() -> N
     )
     assert [record["kind"] for record in decoded["commands"]] == [
         "node-create", "node-set-transform-batch", "node-set-parent",
-        "node-set-visible", "node-set-state", "node-replace-prefab",
+        "node-set-visible", "node-set-state", "node-set-display-kind",
         "node-set-property", "node-unset-property", "node-emit-event", "node-remove",
     ]
     assert decoded["commands"][6]["value"] == [None, True, {"amount": 3}]
@@ -460,10 +452,9 @@ def test_typed_stream_gathers_pool_rows_without_inline_matrix() -> None:
     node_id = pool.append(DisplayTransform.from_matrix(IDENTITY))
     baseline = encode_display_checkpoint(
         scene_name="main",
-        catalog=DisplayCatalogIdentity(HASH_A, HASH_B, HASH_C),
         last_command_seq=0,
         matrix_pool=pool,
-        nodes=(DisplayNode(node_id=node_id, parent_node_id=None, prefab_id="world/root", transform_mode="live", visible=True, state={}),),
+        nodes=(DisplayNode(node_id=node_id, parent_node_id=None, display_kind_id="world/root", transform_mode="live", visible=True, state={}),),
     )
     baseline.confirm_published()
     raw = struct.pack("<16I", *OPAQUE_MATRIX_BITS)
@@ -613,13 +604,13 @@ def _first_checkpoint_record_offset(raw: bytes | bytearray) -> int:
     pool_size = struct.unpack_from("<I", raw, 16)[0]
     cursor = 24 + pool_size * 64
     scene_length = struct.unpack_from("<H", raw, cursor)[0]
-    return cursor + 2 + scene_length + 32 * 3
+    return cursor + 2 + scene_length
 
 
 def _replace_first_state(raw: bytes, replacement: bytes) -> bytes:
     cursor = _first_checkpoint_record_offset(raw) + 8
-    prefab_length = struct.unpack_from("<H", raw, cursor)[0]
-    cursor += 2 + prefab_length + 1
+    display_kind_length = struct.unpack_from("<H", raw, cursor)[0]
+    cursor += 2 + display_kind_length + 1
     original_length = struct.unpack_from("<I", raw, cursor)[0]
     state_offset = cursor + 4
     return raw[:cursor] + struct.pack("<I", len(replacement)) + replacement + raw[state_offset + original_length :]

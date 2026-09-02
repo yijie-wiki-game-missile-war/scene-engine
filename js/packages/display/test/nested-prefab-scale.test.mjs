@@ -110,11 +110,11 @@ function dynamicOwner({ id, childPrefab, maximumInstances, gameplayType, resolve
   });
 }
 
-function authorityCommand(nodeId, prefabId, state) {
+function authorityCommand(nodeId, displayKindId, state) {
   return {
     nodeId,
     parentNodeId: null,
-    prefabId,
+    displayKindId,
     transformMode: 'live',
     transform: IDENTITY,
     visible: true,

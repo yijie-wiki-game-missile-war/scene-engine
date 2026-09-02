@@ -2,6 +2,10 @@ import { objectHasOwnMethod } from '../internal.js';
 import { fail } from '../runtime/health.js';
 import { PrefabDefinition, assertPrefabId } from './prefab-definition.js';
 import { SceneDefinition } from './scene-definition.js';
+import {
+  DisplayKindDefinition,
+  assertDisplayKindId,
+} from './display-kind-definition.js';
 
 function assertFinalDefinition(definition, Base, methods) {
   if (!(definition instanceof Base)) fail('display-definition-invalid');
@@ -52,6 +56,40 @@ export class PrefabRegistry {
   values() { return this._definitions.values(); }
 }
 
+export class DisplayKindRegistry {
+  constructor() { this._definitions = new Map(); this._sealed = false; }
+  register(definition) {
+    if (this._sealed) fail('display-registry-sealed');
+    assertFinalDefinition(definition, DisplayKindDefinition, ['describe', 'resolvePrefab']);
+    const id = assertDisplayKindId(definition.id);
+    if (this._definitions.has(id)) fail('display-kind-id-duplicate');
+    this._definitions.set(id, definition);
+    return definition;
+  }
+  seal() { this._sealed = true; return this; }
+  get(displayKindId) {
+    return this._definitions.get(assertDisplayKindId(displayKindId)) ?? null;
+  }
+  require(displayKindId) {
+    const result = this.get(displayKindId);
+    if (!result) fail('display-kind-missing');
+    return result;
+  }
+  values() { return this._definitions.values(); }
+  validatePrefabImplementations(prefabRegistry) {
+    if (typeof prefabRegistry?.require !== 'function') fail('display-kind-registry-invalid');
+    for (const definition of this._definitions.values()) {
+      for (const prefabId of definition.authorityPrefabIds) {
+        const prefab = prefabRegistry.require(prefabId);
+        if (prefab.gameplayType !== definition.gameplayType) {
+          fail('display-kind-prefab-gameplay-type-mismatch');
+        }
+      }
+    }
+    return this;
+  }
+}
+
 export function createSceneRegistry(initial = []) {
   const registry = new SceneRegistry();
   for (const definition of initial) registry.register(definition);
@@ -59,6 +97,11 @@ export function createSceneRegistry(initial = []) {
 }
 export function createPrefabRegistry(initial = []) {
   const registry = new PrefabRegistry();
+  for (const definition of initial) registry.register(definition);
+  return registry;
+}
+export function createDisplayKindRegistry(initial = []) {
+  const registry = new DisplayKindRegistry();
   for (const definition of initial) registry.register(definition);
   return registry;
 }

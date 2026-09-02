@@ -28,7 +28,7 @@ function createCommand(nodeId, parentNodeId = null, overrides = {}) {
   return {
     nodeId,
     parentNodeId,
-    prefabId: 'target.test.item',
+    displayKindId: 'target.test.item',
     transformMode: 'live',
     visible: true,
     state: {},
@@ -254,9 +254,9 @@ test('Prefab replacement rebinds the replacement authority root to the same matr
   t.after(() => runtime.dispose());
   const before = runtime._nodeIndex.require('py/0');
 
-  commitAuthority(runtime, () => runtime.authority.replaceNodePrefab({
+  commitAuthority(runtime, () => runtime.authority.setNodeDisplayKind({
     nodeId: 0,
-    prefabId: replacement.id,
+    displayKindId: replacement.id,
     state: {},
   }));
   const after = runtime._nodeIndex.require('py/0');

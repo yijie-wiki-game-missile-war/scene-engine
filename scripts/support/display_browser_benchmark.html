@@ -24,11 +24,13 @@
       PREFAB_DEFINITION_SCHEMA,
       SCENE_DEFINITION_SCHEMA,
       createComponentRegistry,
+      createDisplayKindRegistry,
       createDisplayRuntime,
       createPrefabRegistry,
       createResourceRegistry,
       createSceneRegistry,
       definePrefab,
+      defineDisplayKind,
       defineScene,
     } from '/js/packages/display/src/index.js';
     import { createThreeRenderBackend } from '/js/packages/renderer-three/src/index.js';
@@ -134,6 +136,13 @@
         hostElement: document.querySelector('#host'),
         canvas: document.querySelector('#canvas'),
         sceneRegistry: createSceneRegistry([scene]),
+        displayKindRegistry: createDisplayKindRegistry([defineDisplayKind({
+          id: prefab.id,
+          gameplayType: prefab.gameplayType,
+          revision: 1,
+          authorityPrefabIds: [prefab.id],
+          defaultPrefabId: prefab.id,
+        })]),
         prefabRegistry: createPrefabRegistry([prefab]),
         resourceRegistry: resources,
         componentRegistry: createComponentRegistry(),
@@ -168,7 +177,7 @@
       });
       for (let nodeId = 0; nodeId < bindingCount; nodeId += 1) {
         runtime.authority.createNode({
-          nodeId, parentNodeId: null, prefabId: prefab.id,
+          nodeId, parentNodeId: null, displayKindId: prefab.id,
           transformMode: 'live',
           visible: true, state: {},
         });

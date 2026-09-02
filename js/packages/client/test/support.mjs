@@ -6,9 +6,6 @@ import {
 
 export const STREAM_ID = '00000000-0000-4000-8000-000000000002';
 export const WORLD_CODEC = 'example-world@2';
-export const HASH_A = 'a'.repeat(64);
-export const HASH_B = 'b'.repeat(64);
-export const HASH_C = 'c'.repeat(64);
 
 export function transform(x = 0) {
   return new Float32Array([
@@ -23,7 +20,7 @@ export function baselineNode(nodeId = 0, parentNodeId = null) {
   return {
     node_id: nodeId,
     parent_node_id: parentNodeId,
-    prefab_id: 'unit.example',
+    display_kind_id: 'unit.example',
     transform_mode: 'live',
     visible: true,
     state: { mode: 'idle' },
@@ -47,9 +44,6 @@ export function checkpointPacket({
   matrixPoolSize = nodes.length === 0
     ? 0 : Math.max(...nodes.map((node) => node.node_id)) + 1,
   matrixPool = null,
-  sceneCatalogHash = HASH_A,
-  prefabCatalogHash = HASH_B,
-  stateSchemaHash = HASH_C,
 } = {}) {
   return encodePacket('engine.checkpoint', {
     schema: 'scene-engine-wire@3',
@@ -67,11 +61,8 @@ export function checkpointPacket({
       kind: 'display_checkpoint',
       encoding: 'raw',
       value: encodeDisplayCheckpoint({
-        schema: 'scene-engine-display-checkpoint@8',
+        schema: 'scene-engine-display-checkpoint@9',
         scene_name: 'main',
-        scene_catalog_hash: sceneCatalogHash,
-        prefab_catalog_hash: prefabCatalogHash,
-        state_schema_hash: stateSchemaHash,
         last_command_seq: lastCommandSeq,
         matrix_pool_size: matrixPoolSize,
         matrix_pool: checkpointMatrixPool(nodes, matrixPoolSize, matrixPool),
@@ -83,7 +74,7 @@ export function checkpointPacket({
 
 export function command(kind, commandSeq, sourceTick, fields = {}) {
   const common = {
-    schema: 'scene-engine-node-command@8',
+    schema: 'scene-engine-node-command@9',
     command_seq: commandSeq,
     source_tick: sourceTick,
     kind,
@@ -179,7 +170,7 @@ export function commitPacket({
       kind: 'display_command_stream',
       encoding: 'raw',
       value: encodeDisplayCommandStream({
-        schema: 'scene-engine-display-command-stream@8',
+        schema: 'scene-engine-display-command-stream@9',
         base_command_seq: baseCommandSeq,
         last_command_seq: lastCommandSeq,
         matrix_pool_size: matrixPoolSize,
@@ -221,7 +212,7 @@ export function createMockDisplayFactory({ failMethod = null, asyncMethod = null
       setNodeProperty: (value) => invoke('setNodeProperty', value),
       unsetNodeProperty: (value) => invoke('unsetNodeProperty', value),
       emitNodeEvent: (value) => invoke('emitNodeEvent', value),
-      replaceNodePrefab: (value) => invoke('replaceNodePrefab', value),
+      setNodeDisplayKind: (value) => invoke('setNodeDisplayKind', value),
       removeNode(value) {
         const result = invoke('removeNode', value);
         if (result === undefined) nodes.delete(value.nodeId);
@@ -230,13 +221,6 @@ export function createMockDisplayFactory({ failMethod = null, asyncMethod = null
     };
     const session = {
       runtime: {
-        catalogIdentity() {
-          return Object.freeze({
-            sceneCatalogHash: metadata.sceneCatalogHash,
-            prefabCatalogHash: metadata.prefabCatalogHash,
-            stateSchemaHash: metadata.stateSchemaHash,
-          });
-        },
         installScene: (value) => invoke('installScene', value),
         activate(value) {
           const result = invoke('activate', value);

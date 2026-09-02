@@ -192,11 +192,11 @@ function emptyDefinition(id, gameplayType) {
   });
 }
 
-function authorityCommand({ nodeId, parentNodeId, prefabId }) {
+function authorityCommand({ nodeId, parentNodeId, displayKindId }) {
   return {
     nodeId,
     parentNodeId,
-    prefabId,
+    displayKindId,
     transformMode: 'live',
     transform: IDENTITY,
     visible: true,
@@ -239,7 +239,7 @@ test('nested child depth rejection leaves no detached NodeIndex entry', async ()
         authority.createNode(authorityCommand({
           nodeId: index,
           parentNodeId: deepestParent,
-          prefabId: empty.id,
+          displayKindId: empty.id,
         }));
         deepestParent = index;
       }
@@ -254,7 +254,7 @@ test('nested child depth rejection leaves no detached NodeIndex entry', async ()
     runtime.authority.createNode(authorityCommand({
       nodeId: 125,
       parentNodeId: deepestParent,
-      prefabId: owner.id,
+      displayKindId: owner.id,
     }));
   } catch (error) {
     caught = error;
@@ -302,7 +302,7 @@ test('an empty dynamic slot uses its actual graph height at the authority depth 
           authority.createNode(authorityCommand({
             nodeId: index,
             parentNodeId: deepestParent,
-            prefabId: empty.id,
+            displayKindId: empty.id,
           }));
           deepestParent = index;
         }
@@ -314,7 +314,7 @@ test('an empty dynamic slot uses its actual graph height at the authority depth 
       ...authorityCommand({
         nodeId: 125,
         parentNodeId: deepestParent,
-        prefabId: owner.id,
+        displayKindId: owner.id,
       }),
       state: { withChild: false },
     }), { sourceTickDelta: 1 });
@@ -407,7 +407,7 @@ test('a newly attached nested fixed billboard sees the transaction final retaine
     t.after(() => runtime.dispose());
     const ownerName = 'py/0';
     commitAuthority(runtime, () => runtime.authority.createNode({
-      ...authorityCommand({ nodeId: 0, parentNodeId: null, prefabId: owner.id }),
+      ...authorityCommand({ nodeId: 0, parentNodeId: null, displayKindId: owner.id }),
       state: { show: false, mountTransform: IDENTITY },
     }), { sourceTickDelta: 1 });
 
@@ -459,7 +459,7 @@ test('bulk dynamic removal visits the flat materialization ledger only linearly'
   t.after(() => runtime.dispose());
   const ownerName = 'py/0';
   commitAuthority(runtime, () => runtime.authority.createNode({
-    ...authorityCommand({ nodeId: 0, parentNodeId: null, prefabId: owner.id }),
+    ...authorityCommand({ nodeId: 0, parentNodeId: null, displayKindId: owner.id }),
     state: { count: 64 },
   }), { sourceTickDelta: 1 });
   const baselineNodeCount = runtime._nodeIndex.size;
@@ -562,7 +562,7 @@ test('a nested replacement shadow cannot observe nodes removed by the same candi
     t.after(() => runtime.dispose());
 
     commitAuthority(runtime, () => runtime.authority.createNode({
-      ...authorityCommand({ nodeId: 0, parentNodeId: null, prefabId: owner.id }),
+      ...authorityCommand({ nodeId: 0, parentNodeId: null, displayKindId: owner.id }),
       state: { prefabId: oldChild.id },
     }), { sourceTickDelta: 1 });
     assert.notEqual(runtime._nodeIndex.get(removedNodeName), null);
@@ -631,7 +631,7 @@ test('an addition shadow hides every sibling removed by the same candidate', asy
   t.after(() => runtime.dispose());
 
   commitAuthority(runtime, () => runtime.authority.createNode({
-    ...authorityCommand({ nodeId: 0, parentNodeId: null, prefabId: owner.id }),
+    ...authorityCommand({ nodeId: 0, parentNodeId: null, displayKindId: owner.id }),
     state: { next: false },
   }), { sourceTickDelta: 1 });
   assert.notEqual(runtime._nodeIndex.get(removedNodeName), null);
@@ -698,7 +698,7 @@ test('addition attach hooks see siblings added by the same complete candidate', 
   t.after(() => runtime.dispose());
 
   commitAuthority(runtime, () => runtime.authority.createNode({
-    ...authorityCommand({ nodeId: 0, parentNodeId: null, prefabId: owner.id }),
+    ...authorityCommand({ nodeId: 0, parentNodeId: null, displayKindId: owner.id }),
     state: { show: false },
   }), { sourceTickDelta: 1 });
 
@@ -746,7 +746,7 @@ test('a partial live NodeIndex registration failure rolls an adopted subtree ful
     const childRootName = `prefab/${ownerName}/children/only`;
     const childBodyName = `${childRootName}/body`;
     commitAuthority(runtime, () => runtime.authority.createNode({
-      ...authorityCommand({ nodeId: 0, parentNodeId: null, prefabId: owner.id }),
+      ...authorityCommand({ nodeId: 0, parentNodeId: null, displayKindId: owner.id }),
       state: { show: false },
     }), { sourceTickDelta: 1 });
     const baselineSize = runtime._nodeIndex.size;
@@ -822,7 +822,7 @@ test('component preparation failure disposes components already created on the s
     t.after(() => runtime.dispose());
     const ownerName = 'py/0';
     commitAuthority(runtime, () => runtime.authority.createNode({
-      ...authorityCommand({ nodeId: 0, parentNodeId: null, prefabId: owner.id }),
+      ...authorityCommand({ nodeId: 0, parentNodeId: null, displayKindId: owner.id }),
       state: { show: false },
     }), { sourceTickDelta: 1 });
     const baselineSize = runtime._nodeIndex.size;
@@ -913,7 +913,7 @@ test('a child attach hook reads the retained parent final properties, visibility
     t.after(() => runtime.dispose());
 
     commitAuthority(runtime, () => runtime.authority.createNode({
-      ...authorityCommand({ nodeId: 0, parentNodeId: null, prefabId: owner.id }),
+      ...authorityCommand({ nodeId: 0, parentNodeId: null, displayKindId: owner.id }),
       state: { show: false, parentVisible: true, value: 1 },
     }), { sourceTickDelta: 1 });
     commitAuthority(runtime, () => runtime.authority.setNodeState({
@@ -1006,7 +1006,7 @@ test('a second sibling attach failure preserves every retained live baseline', a
     value: 1,
   };
   commitAuthority(runtime, () => runtime.authority.createNode({
-    ...authorityCommand({ nodeId: 0, parentNodeId: null, prefabId: owner.id }),
+    ...authorityCommand({ nodeId: 0, parentNodeId: null, displayKindId: owner.id }),
     state: initialState,
   }), { sourceTickDelta: 1 });
 
@@ -1131,7 +1131,7 @@ test('multiple removed siblings regain exact order and identity after a later pa
     const childName = (key) => `prefab/${ownerName}/children/${key}`;
     const initialKeys = ['alpha', 'bravo', 'charlie', 'delta'];
     commitAuthority(runtime, () => runtime.authority.createNode({
-      ...authorityCommand({ nodeId: 0, parentNodeId: null, prefabId: owner.id }),
+      ...authorityCommand({ nodeId: 0, parentNodeId: null, displayKindId: owner.id }),
       state: {
         keys: initialKeys,
         mountTransform: IDENTITY,

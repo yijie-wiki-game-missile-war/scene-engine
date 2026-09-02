@@ -16,7 +16,6 @@ from .display import (
     DISPLAY_CHECKPOINT_SCHEMA,
     DISPLAY_COMMAND_SCHEMA,
     DISPLAY_COMMAND_STREAM_SCHEMA,
-    DisplayCatalogIdentity,
     DisplayCommand,
     DisplayNode,
     MAXIMUM_EVENT_NAME_BYTES,
@@ -32,7 +31,7 @@ from .json_tree import MAXIMUM_SAFE_INTEGER, validate_json_value
 
 DISPLAY_BINARY_CHECKPOINT_MAGIC = b"SDCP"
 DISPLAY_BINARY_COMMAND_STREAM_MAGIC = b"SDCS"
-DISPLAY_BINARY_VERSION = 5
+DISPLAY_BINARY_VERSION = 6
 DISPLAY_BINARY_SCALAR_FLOAT32 = 1
 
 DISPLAY_CHECKPOINT_KIND = "display_checkpoint"
@@ -60,7 +59,7 @@ _OPCODE_BY_KIND = {
     "node-set-parent": 3,
     "node-set-visible": 4,
     "node-set-state": 5,
-    "node-replace-prefab": 6,
+    "node-set-display-kind": 6,
     "node-remove": 7,
     "node-set-property": 8,
     "node-unset-property": 9,
@@ -69,11 +68,11 @@ _OPCODE_BY_KIND = {
 _KIND_BY_OPCODE = {value: key for key, value in _OPCODE_BY_KIND.items()}
 
 _SCENE_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
-_PREFAB_ID = re.compile(
+_DISPLAY_KIND_ID = re.compile(
     r"^[a-z0-9][a-z0-9._@-]*(?:/[a-z0-9][a-z0-9._@-]*)*$"
 )
 
-_MAXIMUM_PREFAB_ID_BYTES = 192
+_MAXIMUM_DISPLAY_KIND_ID_BYTES = 192
 _MAXIMUM_SCENE_NAME_BYTES = 96
 
 @dataclass(frozen=True, slots=True)
@@ -111,7 +110,7 @@ class EncodedDisplayPayload:
 class _EncodedCheckpointNode:
     node_id: int
     parent_node_id: int | None
-    prefab_id: str
+    display_kind_id: str
     flags: int
     state: bytes
 
@@ -128,7 +127,7 @@ def encode_display_checkpoint_binary(
     last_command_seq = _safe_integer(
         expected_last_command_seq, "expected_last_command_seq", ConfigurationError
     )
-    scene_name, catalog, matrix_pool, nodes = _checkpoint_semantics(
+    scene_name, matrix_pool, nodes = _checkpoint_semantics(
         value,
         expected_last_command_seq=last_command_seq,
         maximum_json_depth=maximum_json_depth,
@@ -150,9 +149,6 @@ def encode_display_checkpoint_binary(
             "scene_name",
             maximum_bytes=_MAXIMUM_SCENE_NAME_BYTES,
         ),
-        bytes.fromhex(catalog.scene_catalog_hash),
-        bytes.fromhex(catalog.prefab_catalog_hash),
-        bytes.fromhex(catalog.state_schema_hash),
     ]
     for node in nodes:
         chunks.append(_U32.pack(node.node_id))
@@ -165,9 +161,9 @@ def encode_display_checkpoint_binary(
         )
         chunks.append(
             _encode_string(
-                node.prefab_id,
-                "prefab_id",
-                maximum_bytes=_MAXIMUM_PREFAB_ID_BYTES,
+                node.display_kind_id,
+                "display_kind_id",
+                maximum_bytes=_MAXIMUM_DISPLAY_KIND_ID_BYTES,
             )
         )
         chunks.append(_U8.pack(node.flags))
@@ -210,11 +206,6 @@ def decode_display_checkpoint_binary(
         "scene_name", maximum_bytes=_MAXIMUM_SCENE_NAME_BYTES
     )
     _validate_scene_name(scene_name, WireError)
-    catalog = DisplayCatalogIdentity(
-        scene_catalog_hash=reader.take(32, "scene catalog hash").hex(),
-        prefab_catalog_hash=reader.take(32, "prefab catalog hash").hex(),
-        state_schema_hash=reader.take(32, "state schema hash").hex(),
-    )
     minimum_node_bytes = 4 + 4 + 2 + 1 + 4
     if node_count > reader.remaining // minimum_node_bytes:
         reader.fail("Node count exceeds the remaining payload")
@@ -239,8 +230,8 @@ def decode_display_checkpoint_binary(
             depth = depths[parent_node_id] + 1
         if depth > 128:
             reader.fail("Node depth exceeds 128")
-        prefab_id = reader.string(
-            "prefab_id", maximum_bytes=_MAXIMUM_PREFAB_ID_BYTES
+        display_kind_id = reader.string(
+            "display_kind_id", maximum_bytes=_MAXIMUM_DISPLAY_KIND_ID_BYTES
         )
         flags = reader.u8("Node flags")
         if flags & ~_NODE_FLAGS:
@@ -253,7 +244,7 @@ def decode_display_checkpoint_binary(
                 DisplayNode(
                     node_id=node_id,
                     parent_node_id=parent_node_id,
-                    prefab_id=prefab_id,
+                    display_kind_id=display_kind_id,
                     transform_mode=transform_mode,
                     visible=visible,
                     state=state,
@@ -272,9 +263,6 @@ def decode_display_checkpoint_binary(
     return {
         "schema": DISPLAY_CHECKPOINT_SCHEMA,
         "scene_name": scene_name,
-        "scene_catalog_hash": catalog.scene_catalog_hash,
-        "prefab_catalog_hash": catalog.prefab_catalog_hash,
-        "state_schema_hash": catalog.state_schema_hash,
         "last_command_seq": last_command_seq,
         "matrix_pool_size": matrix_pool_size,
         "matrix_pool": matrix_pool,
@@ -360,9 +348,9 @@ def encode_display_command_stream_binary(
             )
             chunks.append(
                 _encode_string(
-                    fields["prefab_id"],
-                    "prefab_id",
-                    maximum_bytes=_MAXIMUM_PREFAB_ID_BYTES,
+                    fields["display_kind_id"],
+                    "display_kind_id",
+                    maximum_bytes=_MAXIMUM_DISPLAY_KIND_ID_BYTES,
                 )
             )
             chunks.append(
@@ -425,12 +413,12 @@ def encode_display_command_stream_binary(
                     maximum_json_depth=maximum_json_depth,
                 )
             )
-        elif kind == "node-replace-prefab":
+        elif kind == "node-set-display-kind":
             chunks.append(
                 _encode_string(
-                    fields["prefab_id"],
-                    "prefab_id",
-                    maximum_bytes=_MAXIMUM_PREFAB_ID_BYTES,
+                    fields["display_kind_id"],
+                    "display_kind_id",
+                    maximum_bytes=_MAXIMUM_DISPLAY_KIND_ID_BYTES,
                 )
             )
             chunks.append(
@@ -531,8 +519,8 @@ def decode_display_command_stream_binary(
             )
             if parent_node_id is not None and parent_node_id >= matrix_pool_size:
                 reader.fail("parent Node ID is outside matrix pool size")
-            prefab_id = reader.string(
-                "prefab_id", maximum_bytes=_MAXIMUM_PREFAB_ID_BYTES
+            display_kind_id = reader.string(
+                "display_kind_id", maximum_bytes=_MAXIMUM_DISPLAY_KIND_ID_BYTES
             )
             flags = reader.u8("Node flags")
             if flags & ~_NODE_FLAGS:
@@ -544,7 +532,7 @@ def decode_display_command_stream_binary(
                 node = DisplayNode(
                     node_id=node_id,
                     parent_node_id=parent_node_id,
-                    prefab_id=prefab_id,
+                    display_kind_id=display_kind_id,
                     transform_mode=transform_mode,
                     visible=visible,
                     state=state,
@@ -623,18 +611,18 @@ def decode_display_command_stream_binary(
                     "payload": _thaw(command.fields["payload"]),
                 }
             )
-        elif kind == "node-replace-prefab":
-            prefab_id = reader.string(
-                "prefab_id", maximum_bytes=_MAXIMUM_PREFAB_ID_BYTES
+        elif kind == "node-set-display-kind":
+            display_kind_id = reader.string(
+                "display_kind_id", maximum_bytes=_MAXIMUM_DISPLAY_KIND_ID_BYTES
             )
             state = reader.state(maximum_json_depth=maximum_json_depth)
             command = _validated_command_call(
-                DisplayCommand.replace_prefab, node_id, prefab_id, state
+                DisplayCommand.set_display_kind, node_id, display_kind_id, state
             )
             records.append(
                 {
                     **common,
-                    "prefab_id": command.fields["prefab_id"],
+                    "display_kind_id": command.fields["display_kind_id"],
                     "state": _thaw(command.fields["state"]),
                 }
             )
@@ -676,7 +664,7 @@ def decode_display_command_stream_binary(
 
 def _checkpoint_semantics(
     value: Any, *, expected_last_command_seq: int, maximum_json_depth: int
-) -> tuple[str, DisplayCatalogIdentity, np.ndarray, tuple[_EncodedCheckpointNode, ...]]:
+) -> tuple[str, np.ndarray, tuple[_EncodedCheckpointNode, ...]]:
     if isinstance(value, ValidatedDisplayCheckpoint):
         if (
             value.last_command_seq != expected_last_command_seq
@@ -685,13 +673,12 @@ def _checkpoint_semantics(
             raise ConfigurationError("validated display checkpoint seal is invalid")
         return (
             value.scene_name,
-            value.catalog,
             value.matrix_pool,
             tuple(
                 _EncodedCheckpointNode(
                     node_id=node.node_id,
                     parent_node_id=node.parent_node_id,
-                    prefab_id=node.prefab_id,
+                    display_kind_id=node.display_kind_id,
                     flags=_node_flags(node.visible, node.transform_mode),
                     state=_encode_state(
                         node.state, maximum_json_depth=maximum_json_depth
@@ -703,9 +690,6 @@ def _checkpoint_semantics(
     fields = {
         "schema",
         "scene_name",
-        "scene_catalog_hash",
-        "prefab_catalog_hash",
-        "state_schema_hash",
         "last_command_seq",
         "matrix_pool_size",
         "matrix_pool",
@@ -716,11 +700,6 @@ def _checkpoint_semantics(
     if value["schema"] != DISPLAY_CHECKPOINT_SCHEMA:
         raise ConfigurationError("display checkpoint schema is invalid")
     scene_name = _validate_scene_name(value["scene_name"], ConfigurationError)
-    catalog = DisplayCatalogIdentity(
-        scene_catalog_hash=value["scene_catalog_hash"],
-        prefab_catalog_hash=value["prefab_catalog_hash"],
-        state_schema_hash=value["state_schema_hash"],
-    )
     last = _safe_integer(value["last_command_seq"], "last_command_seq", ConfigurationError)
     if last != expected_last_command_seq:
         raise ConfigurationError("display checkpoint command cursor is invalid")
@@ -739,7 +718,9 @@ def _checkpoint_semantics(
         _EncodedCheckpointNode(
             node_id=node.node_id,
             parent_node_id=node.parent_node_id,
-            prefab_id=_validate_prefab_id(node.prefab_id, ConfigurationError),
+            display_kind_id=_validate_display_kind_id(
+                node.display_kind_id, ConfigurationError
+            ),
             flags=_node_flags(node.visible, node.transform_mode),
             state=_encode_state(
                 node.state, maximum_json_depth=maximum_json_depth
@@ -747,7 +728,7 @@ def _checkpoint_semantics(
         )
         for node in semantic_nodes
     )
-    return scene_name, catalog, matrix_pool, nodes
+    return scene_name, matrix_pool, nodes
 
 
 def _command_stream_semantics(
@@ -1132,16 +1113,16 @@ def _semantic_uint32_vector(value: Any, field: str) -> np.ndarray:
     return result
 
 
-def _validate_prefab_id(
+def _validate_display_kind_id(
     value: Any,
     error_type: type[ConfigurationError] | type[WireError],
 ) -> str:
-    encoded_length = _utf8_length(value, "prefab_id", error_type)
+    encoded_length = _utf8_length(value, "display_kind_id", error_type)
     if (
-        encoded_length > _MAXIMUM_PREFAB_ID_BYTES
-        or _PREFAB_ID.fullmatch(value) is None
+        encoded_length > _MAXIMUM_DISPLAY_KIND_ID_BYTES
+        or _DISPLAY_KIND_ID.fullmatch(value) is None
     ):
-        _raise(error_type, "prefab_id is invalid")
+        _raise(error_type, "display_kind_id is invalid")
     return value
 
 

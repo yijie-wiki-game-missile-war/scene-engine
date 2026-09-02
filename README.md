@@ -1,4 +1,4 @@
-# Scene Engine 0.18
+# Scene Engine 0.19
 
 Scene Engine 是面向**服务端权威浏览器游戏**的运行时基础设施。产品世界与玩法规则保留在 Python，按固定
 `60 tick/s` 推进；已提交的状态变化以完整基线和增量事务同步到浏览器，并投影为可渲染的 3D 场景。
@@ -17,7 +17,8 @@ Scene Engine 是面向**服务端权威浏览器游戏**的运行时基础设施
   `node_id + event_name` 发布带载荷的瞬时显示事件；它们与 Transform、reparent 共用同一命令顺序、后台发送器和
   录制路径。属性进入后续完整基线，已发生事件不会由 checkpoint 补发；金币、比分等全局显示数据可归属一个专用
   authority Node，而不需要另开一条全局消息通道。
-- **声明式显示内容**：用 Scene、Prefab、Resource 和 Component 描述场景与表现，支持复用、嵌套和受约束的
+- **声明式显示内容**：产品发布稳定的 `displayKindId`，浏览器本地 DisplayKindRegistry 显式选择一个 Arts
+  Prefab 实现；用 Scene、Prefab、Resource 和 Component 描述场景与表现，支持复用、嵌套和受约束的
   动态 Prefab 组合，并统一落入一棵显示节点树；Python 权威节点以稳定整数 ID 索引一个常驻 NumPy
   `(n,4,4)` Matrix4 池；一次更新先汇总 ID，再从池中一次抽取对齐的 `(m,4,4)` 连续矩阵块，并以一条批量
   Transform 命令同步。矩阵原生的不可变便利 API 提供常用构造、平移、
@@ -28,6 +29,8 @@ Scene Engine 是面向**服务端权威浏览器游戏**的运行时基础设施
   “爆炸”“受击”通知使用事件，由显示端映射为动画或局部表现。视觉采样进度不回写权威世界。
 - **录制与 Replay**：精确记录权威数据，并通过与实时运行相同的 Client 和 Display 路径回放，用于权威状态与
   显示投影的复现、调试和验证。
+- **缺口可降级**：未知、尚未实现或暂时无法选择的显示种类保留空 Authority 根并给出有界诊断，不阻断合法玩法
+  状态 ACK；已选择 Prefab 的非法 state 或 materialization 仍然失败关闭。
 - **完整性与恢复**：显示目录在场景安装前校验，每次状态候选在确认进度前校验；可恢复的渲染故障可以重建后端，
   失效的显示投影则从新的完整基线安全重建。
 

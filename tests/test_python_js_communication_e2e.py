@@ -10,7 +10,6 @@ import pytest
 import numpy as np
 
 import scripts.benchmark_python_js_communication as benchmark_module
-from scene_engine import DisplayCatalogIdentity
 from scripts.benchmark_python_js_communication import (
     CommunicationProgram,
     CommunicationWorld,
@@ -154,7 +153,6 @@ def test_benchmark_world_reuses_resident_matrix_pool_without_publication_rebuild
     program = CommunicationProgram(
         roots=3,
         updates_per_commit=1,
-        catalog=DisplayCatalogIdentity("a" * 64, "b" * 64, "c" * 64),
     )
     calls: list[tuple[float, float, float]] = []
     original = benchmark_module.display_transform

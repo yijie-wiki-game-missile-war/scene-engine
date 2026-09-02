@@ -5,14 +5,14 @@ import test from 'node:test';
 import {
   PREFAB_DEFINITION_SCHEMA,
   SCENE_DEFINITION_SCHEMA,
-  buildDisplayCatalogManifest,
-  computeDisplayCatalogIdentity,
   createComponentRegistry,
+  createDisplayKindRegistry,
   createDisplayRuntime,
   createPrefabRegistry,
   createResourceRegistry,
   createSceneRegistry,
   definePrefab,
+  defineDisplayKind,
   defineScene,
 } from '../../display/src/index.js';
 import { createFakeRenderBackend } from '../../display/src/testing/fake-render-backend.js';
@@ -39,11 +39,14 @@ const RENDERER_PROFILE = Object.freeze({
 test('canonical Wire fixtures install and commit against the canonical Display catalog', async (t) => {
   const fixture = (path) => new URL(`../../../../fixtures/${path}`, import.meta.url);
   const manifest = JSON.parse(await readFile(
-    fixture('display-catalog-v2/manifest.json'), 'utf8',
+      fixture('display-catalog-v3/manifest.json'), 'utf8',
   ));
   const componentRegistry = createComponentRegistry();
   const resourceRegistry = createResourceRegistry(manifest.resources);
   const prefabRegistry = createPrefabRegistry(manifest.prefabs.map((value) => definePrefab(value)));
+  const displayKindRegistry = createDisplayKindRegistry(
+    manifest.displayKinds.map((value) => defineDisplayKind(value)),
+  );
   const sceneRegistry = createSceneRegistry(manifest.scenes.map((value) => defineScene(value)));
   const runtimes = [];
   const client = new SceneEngineClient({
@@ -51,6 +54,7 @@ test('canonical Wire fixtures install and commit against the canonical Display c
       let nextFrameId = 0;
       const runtime = createDisplayRuntime({
         sceneRegistry,
+        displayKindRegistry,
         prefabRegistry,
         resourceRegistry,
         componentRegistry,
@@ -141,6 +145,21 @@ test('real DisplayRuntime returns no ACK for command or world-overflow commit fa
     root: { components: [], children: [] },
   });
   const prefabRegistry = createPrefabRegistry([prefab]);
+  const displayKindRegistry = createDisplayKindRegistry([
+    defineDisplayKind({
+      id: 'unit.example',
+      gameplayType: 'unit.example',
+      revision: 1,
+      authorityPrefabIds: ['unit.example'],
+      defaultPrefabId: 'unit.example',
+    }),
+    defineDisplayKind({
+      id: 'display.known/not-built@1',
+      gameplayType: 'unit.example',
+      revision: 1,
+      authorityPrefabIds: [],
+    }),
+  ]);
   const sceneRegistry = createSceneRegistry([defineScene({
     schema: SCENE_DEFINITION_SCHEMA,
     id: 'main',
@@ -167,14 +186,6 @@ test('real DisplayRuntime returns no ACK for command or world-overflow commit fa
   const authorityStateSchemas = Object.freeze([Object.freeze({
     gameplayType: 'unit.example', schemaId: 'unit.example.state', revision: 1,
   })]);
-  const catalogIdentity = computeDisplayCatalogIdentity(buildDisplayCatalogManifest({
-    sceneRegistry,
-    prefabRegistry,
-    resourceRegistry,
-    componentRegistry,
-    authorityStateSchemas,
-  }));
-
   const runtimes = [];
   const clients = [];
   const createRealClient = () => new SceneEngineClient({
@@ -183,6 +194,7 @@ test('real DisplayRuntime returns no ACK for command or world-overflow commit fa
       let nextFrameId = 0;
       const runtime = createDisplayRuntime({
         sceneRegistry,
+        displayKindRegistry,
         prefabRegistry,
         resourceRegistry,
         componentRegistry,
@@ -211,12 +223,38 @@ test('real DisplayRuntime returns no ACK for command or world-overflow commit fa
   });
 
   const checkpoint = client.applyPacket(checkpointPacket({
-    sceneCatalogHash: catalogIdentity.sceneCatalogHash,
-    prefabCatalogHash: catalogIdentity.prefabCatalogHash,
-    stateSchemaHash: catalogIdentity.stateSchemaHash,
     matrixPoolSize: 2,
   }));
   assert.ok(checkpoint.ackPacket instanceof Uint8Array);
+
+  const gapClient = createRealClient();
+  clients.push(gapClient);
+  const gapCheckpoint = gapClient.applyPacket(checkpointPacket({
+    nodes: [
+      { ...baselineNode(0), display_kind_id: 'display.unknown/item@1' },
+      {
+        ...baselineNode(1, 0),
+        display_kind_id: 'display.known/not-built@1',
+      },
+    ],
+    matrixPoolSize: 2,
+  }));
+  assert.ok(gapCheckpoint.ackPacket instanceof Uint8Array);
+  assert.deepEqual(runtimes.at(-1).currentDiagnostics().gaps.map((gap) => gap.code), [
+    'display-kind-unknown-requirement',
+    'display-kind-unimplemented',
+  ]);
+  const gapEvent = gapClient.applyPacket(commitPacket({
+    matrixPoolSize: 2,
+    commands: [command('node-emit-event', 1, 1, {
+      node_id: 0,
+      event_name: 'visual.unimplemented',
+      payload: {},
+    })],
+  }));
+  assert.ok(gapEvent.ackPacket instanceof Uint8Array,
+    'an event on an empty authority root remains an ACKed no-op');
+
   const beforeCommit = client.currentCommit();
   const beforeWorld = client.currentWorldState();
   const noOutcome = Symbol('no-outcome');
@@ -267,9 +305,6 @@ test('real DisplayRuntime returns no ACK for command or world-overflow commit fa
     nodes,
     matrixPoolSize: nodes.length,
     matrixPool,
-    sceneCatalogHash: catalogIdentity.sceneCatalogHash,
-    prefabCatalogHash: catalogIdentity.prefabCatalogHash,
-    stateSchemaHash: catalogIdentity.stateSchemaHash,
   }));
   assert.ok(overflowCheckpoint.ackPacket instanceof Uint8Array);
   const acknowledged = overflowClient.currentCommit();

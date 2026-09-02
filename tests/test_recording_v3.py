@@ -9,7 +9,6 @@ import pytest
 import scene_engine.wire as wire_module
 
 from scene_engine.display import (
-    DisplayCatalogIdentity,
     DisplayCommand,
     DisplayMatrixPool,
     DisplayNode,
@@ -24,9 +23,6 @@ from scene_engine.recording import (
     rebuild_packet_index,
 )
 from scene_engine.wire import encode_checkpoint, encode_commit
-
-
-CATALOG = DisplayCatalogIdentity("a" * 64, "b" * 64, "c" * 64)
 
 
 def checkpoint(
@@ -45,14 +41,13 @@ def checkpoint(
     if matrix_pool_size:
         published = encode_display_checkpoint(
             scene_name="main",
-            catalog=CATALOG,
             last_command_seq=last_command_seq,
             matrix_pool=pool,
             nodes=tuple(
                 DisplayNode(
                     node_id=node_id,
                     parent_node_id=None,
-                    prefab_id="world/node",
+                    display_kind_id="world/node",
                     transform_mode="live",
                     visible=True,
                     state={},
@@ -65,14 +60,13 @@ def checkpoint(
             pool.retire(node_id)
     display = encode_display_checkpoint(
         scene_name="main",
-        catalog=CATALOG,
         last_command_seq=last_command_seq,
         matrix_pool=pool,
         nodes=tuple(
             DisplayNode(
                 node_id=node_id,
                 parent_node_id=None,
-                prefab_id="world/node",
+                display_kind_id="world/node",
                 transform_mode="live",
                 visible=True,
                 state={},
@@ -123,14 +117,13 @@ def commit(
     if previous_pool_size:
         baseline = encode_display_checkpoint(
             scene_name="main",
-            catalog=CATALOG,
             last_command_seq=base_command_seq,
             matrix_pool=pool,
             nodes=tuple(
                 DisplayNode(
                     node_id=node_id,
                     parent_node_id=None,
-                    prefab_id="world/node",
+                    display_kind_id="world/node",
                     transform_mode="live",
                     visible=True,
                     state={},
@@ -384,7 +377,7 @@ def test_packet_log_rejects_sparse_uint32_pool_growth_without_suffix_allocation(
         world_codec="world@1",
         world_patch={"schema": "scene-engine-json-tree@1", "changes": []},
         display_commands={
-            "schema": "scene-engine-display-command-stream@8",
+            "schema": "scene-engine-display-command-stream@9",
             "base_command_seq": 0,
             "last_command_seq": 0,
             "matrix_pool_size": 0xFFFFFFFF,

@@ -60,7 +60,7 @@ test('DisplayRuntime drives geometry, nested Prefabs, authority activity, animat
       const rootTransform = transformAt([10, 0, 0]);
       commitAuthority(runtime, () => runtime.authority.createNode(createAuthorityNode({
         nodeId: ROOT_ID,
-        prefabId: NESTED_PREFAB_ID,
+        displayKindId: NESTED_PREFAB_ID,
         state: {
           fixedState: { particleIntensity: 0.5 },
           units: {

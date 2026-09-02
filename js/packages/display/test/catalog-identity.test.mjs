@@ -10,16 +10,18 @@ import {
   canonicalDisplayCatalogJson,
   computeDisplayCatalogIdentity,
   createComponentRegistry,
+  createDisplayKindRegistry,
   createPrefabRegistry,
   createResourceRegistry,
   createSceneRegistry,
   defineDisplayCatalogManifest,
+  defineDisplayKind,
   definePrefab,
   defineScene,
   toDisplayCatalogIdentityRecord,
 } from '../src/index.js';
 
-const fixtureDirectory = new URL('../../../../fixtures/display-catalog-v2/', import.meta.url);
+const fixtureDirectory = new URL('../../../../fixtures/display-catalog-v3/', import.meta.url);
 const manifest = JSON.parse(fs.readFileSync(new URL('manifest.json', fixtureDirectory), 'utf8'));
 const expectedRecord = JSON.parse(fs.readFileSync(new URL('identity.json', fixtureDirectory), 'utf8'));
 const expected = Object.freeze({
@@ -49,6 +51,9 @@ test('checked-in Display catalog definitions compile through the public registri
   const resourceRegistry = createResourceRegistry(manifest.resources);
   const prefabDefinitions = manifest.prefabs.map((value) => definePrefab(value));
   const prefabRegistry = createPrefabRegistry(prefabDefinitions);
+  const displayKindRegistry = createDisplayKindRegistry(
+    manifest.displayKinds.map((value) => defineDisplayKind(value)),
+  );
   const sceneDefinitions = manifest.scenes.map((value) => defineScene(value));
   const sceneRegistry = createSceneRegistry(sceneDefinitions);
   for (const definition of prefabDefinitions) {
@@ -59,6 +64,7 @@ test('checked-in Display catalog definitions compile through the public registri
   }
   assert.deepEqual(buildDisplayCatalogManifest({
     sceneRegistry,
+    displayKindRegistry,
     prefabRegistry,
     resourceRegistry,
     componentRegistry,
@@ -89,6 +95,7 @@ test('catalog build precompiles nested Prefab dependencies and hashes compositio
     });
     return buildDisplayCatalogManifest({
       sceneRegistry: createSceneRegistry(),
+      displayKindRegistry: createDisplayKindRegistry(),
       prefabRegistry: createPrefabRegistry(reverse ? [owner, leaf] : [leaf, owner]),
       resourceRegistry: createResourceRegistry(),
       componentRegistry: createComponentRegistry(),
@@ -130,6 +137,7 @@ test('catalog build fails closed on a cycle through a dynamic Prefab allowlist',
   });
   assert.throws(() => buildDisplayCatalogManifest({
     sceneRegistry: createSceneRegistry(),
+    displayKindRegistry: createDisplayKindRegistry(),
     prefabRegistry: createPrefabRegistry([right, left]),
     resourceRegistry: createResourceRegistry(),
     componentRegistry: createComponentRegistry(),
@@ -149,20 +157,28 @@ test('catalog SHA-256 matches the platform implementation', () => {
     scenes: normalized.scenes,
   }));
   assert.equal(actual.prefabCatalogHash, nodeSha256({
-    schema: 'scene-engine-prefab-catalog-input@1',
+    schema: 'scene-engine-prefab-catalog-input@2',
     prefabs: normalized.prefabs,
+    displayKinds: normalized.displayKinds,
     resources: normalized.resources,
     components: normalized.components,
   }));
   assert.equal(actual.stateSchemaHash, nodeSha256({
-    schema: 'scene-engine-state-schema-input@1',
+    schema: 'scene-engine-state-schema-input@2',
     authorityStateSchemas: normalized.authorityStateSchemas,
+    displayKinds: normalized.displayKinds.map((entry) => ({
+      id: entry.id,
+      gameplayType: entry.gameplayType,
+      revision: entry.revision,
+    })),
   }));
 });
 
 test('catalog registration order does not change identity', () => {
   const reordered = clone(manifest);
-  for (const field of ['scenes', 'prefabs', 'resources', 'components', 'authorityStateSchemas']) {
+  for (const field of [
+    'scenes', 'displayKinds', 'prefabs', 'resources', 'components', 'authorityStateSchemas',
+  ]) {
     reordered[field].reverse();
   }
   assert.deepEqual(computeDisplayCatalogIdentity(reordered), expected);

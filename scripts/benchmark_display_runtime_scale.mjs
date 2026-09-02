@@ -11,11 +11,13 @@ import {
   SCENE_DEFINITION_SCHEMA,
   TICKS_PER_SECOND,
   createComponentRegistry,
+  createDisplayKindRegistry,
   createDisplayRuntime,
   createPrefabRegistry,
   createResourceRegistry,
   createSceneRegistry,
   defineFrameAnimation,
+  defineDisplayKind,
   definePrefab,
   defineScene,
 } from '../js/packages/display/src/index.js';
@@ -345,6 +347,13 @@ function buildCatalog(options) {
   return {
     items,
     sceneRegistry: createSceneRegistry([sceneDefinition()]),
+    displayKindRegistry: createDisplayKindRegistry(prefabs.map((prefab) => defineDisplayKind({
+      id: prefab.id,
+      gameplayType: prefab.gameplayType,
+      revision: 1,
+      authorityPrefabIds: [prefab.id],
+      defaultPrefabId: prefab.id,
+    }))),
     prefabRegistry: createPrefabRegistry(prefabs),
     resourceRegistry: createResourceRegistry(resources()),
     componentRegistry: createComponentRegistry(),
@@ -542,7 +551,7 @@ function createFixture(runtime, catalog, options) {
     runtime.authority.createNode({
       nodeId: 0,
       parentNodeId: null,
-      prefabId: IDS.prefabNestedOwner,
+      displayKindId: IDS.prefabNestedOwner,
       transformMode: 'live',
       visible: true,
       state: { items: nestedItems },
@@ -566,7 +575,7 @@ function createFixture(runtime, catalog, options) {
     runtime.authority.createNode({
       nodeId: index,
       parentNodeId: null,
-      prefabId: catalog.items[kind].id,
+      displayKindId: catalog.items[kind].id,
       transformMode: 'live',
       visible: true,
       state: {},
@@ -755,6 +764,7 @@ async function runBenchmark(options) {
       toDataURL: () => 'data:image/png;base64,benchmark',
     },
     sceneRegistry: catalog.sceneRegistry,
+    displayKindRegistry: catalog.displayKindRegistry,
     prefabRegistry: catalog.prefabRegistry,
     resourceRegistry: catalog.resourceRegistry,
     componentRegistry: catalog.componentRegistry,

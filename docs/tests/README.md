@@ -26,12 +26,12 @@ Python 测试由 `uv run python -m pytest -q` 按 `pyproject.toml` 的 `tests/` 
 | [`test_transport_sender.py`](../../tests/test_transport_sender.py) | 有界 send/control 数量与字节 outbox、单 worker FIFO、不可变 bytes 共享、connection epoch 取消、失败 inbox、优雅/强制关闭、有限 shutdown 和元数据回收。 |
 | [`test_wire_v3.py`](../../tests/test_wire_v3.py) | Wire v3 packet、raw binary32 matrix Display attachment 布局、golden bytes、非法 corpus、大小与深度限制、安全整数、Display cursor 对齐、旧版本和旧布局拒绝。 |
 | [`test_display.py`](../../tests/test_display.py) | Python Display checkpoint、目录身份、parent-first baseline、流内单调且不复用的 uint32 Node ID、连续 `(n,4,4)` NumPy 矩阵池、增长与零墓碑、版本化 dirty 发布确认、严格命令序列、完整 state、顶层 property、瞬时 event，以及 Matrix4 便利构造和点/向量转换。 |
-| [`test_display_binary.py`](../../tests/test_display_binary.py) | SDCP/SDCS v5 的 Node ID 表、只读连续且 bytes-backed 的完整/dirty NumPy matrix tensor 与 dirty ID、空 tensor shape、opcode 1–10、任意 JSON property value、事件载荷、固定 65,536 command 上限、cursor/tick seal、state JSON、opaque binary32 位模式保留与结构失败关闭。 |
+| [`test_display_binary.py`](../../tests/test_display_binary.py) | SDCP/SDCS v6 的 Display Kind、Node ID 表、只读连续且 bytes-backed 的完整/dirty NumPy matrix tensor 与 dirty ID、空 tensor shape、opcode 1–10、任意 JSON property value、事件载荷、固定 65,536 command 上限、cursor/tick seal、state JSON、opaque binary32 位模式保留与结构失败关闭。 |
 | [`test_json_tree_v1.py`](../../tests/test_json_tree_v1.py) | JSON Tree set/unset/append、写入前完整验证、canonical path 顺序、数值与危险键限制、容量边界和数组原始索引语义。 |
 | [`test_recording_v3.py`](../../tests/test_recording_v3.py) | packet-log 精确 packet bytes、command cursor 索引、每包 Display payload 单次解码、INCOMPLETE/seal 生命周期、stream/MatrixPool progression、周期 checkpoint 的 pool/active-ID 一致性、稀疏增长放大防护和损坏记录拒绝。 |
-| [`test_catalog_identity.py`](../../tests/test_catalog_identity.py) | Python 加载 JavaScript 构建的 Display catalog identity，严格校验封闭字段和小写 SHA-256。 |
+| [`test_catalog_identity.py`](../../tests/test_catalog_identity.py) | Python 公开 API 与 `ProductCheckpoint` 不再包含 Arts catalog identity。 |
 | [`test_import_surface.py`](../../tests/test_import_surface.py) | Python 根包公开导出、版本和当前模块集合，防止旧模块或额外 API 回流。 |
-| [`test_python_js_communication_e2e.py`](../../tests/test_python_js_communication_e2e.py) | 32 roots checkpoint、多次 transform commit、exact Wire/ACK bytes、长度帧本地 Node 子进程、canonical JavaScript catalog identity、Client/Display cursor、最终 World 与 Transform digest；另以小规模 windowed CLI smoke 检查 in-flight/pending 峰值和最终归零。 |
+| [`test_python_js_communication_e2e.py`](../../tests/test_python_js_communication_e2e.py) | 32 roots checkpoint、多次 transform commit、exact Wire/ACK bytes、长度帧本地 Node 子进程、浏览器本地 Display Kind/catalog、Client/Display cursor、最终 World 与 Transform digest；另以小规模 windowed CLI smoke 检查 in-flight/pending 峰值和最终归零。 |
 
 ## JavaScript Client
 
@@ -40,7 +40,7 @@ Python 测试由 `uv run python -m pytest -q` 按 `pyproject.toml` 的 `tests/` 
 | 测试项目 | 覆盖范围 |
 | --- | --- |
 | [`client.test.mjs`](../../js/packages/client/test/client.test.mjs) | 精确公共导出与版本、Python Wire fixtures 逐字节同源、shear Matrix4 所有权、WorldState、checkpoint/session 原子替换、commit gate、ACK、observer、显式 DisplayView、input、JSON patch 和失败关闭。 |
-| [`display-binary.test.mjs`](../../js/packages/client/test/display-binary.test.mjs) | 与 Python 一致的 SDCP/SDCS v5 Node ID 与 matrix tensor codec、opcode 1–10、property/event JSON、固定 65,536 command 上限、单 owned `Float32Array`、dirty ID 对齐，以及损坏 header、名称、矩阵、长度和 trailing bytes 拒绝。 |
+| [`display-binary.test.mjs`](../../js/packages/client/test/display-binary.test.mjs) | 与 Python 一致的 SDCP/SDCS v6 Display Kind、Node ID 与 matrix tensor codec、opcode 1–10、property/event JSON、固定 65,536 command 上限、单 owned `Float32Array`、dirty ID 对齐，以及损坏 header、名称、矩阵、长度和 trailing bytes 拒绝。 |
 | [`client-display-failure.test.mjs`](../../js/packages/client/test/client-display-failure.test.mjs) | Canonical Wire fixture 与 canonical Display catalog 的真实安装/提交、Client 与真实 DisplayRuntime 的同步屏障、异步清理拒绝观察、部分命令或 world 溢出提交失败、terminal 状态和无 ACK 保证。 |
 | [`packet-log.test.mjs`](../../js/packages/client/test/packet-log.test.mjs) | packet-log 字段、cursor 与 MatrixPool 生命周期校验、通过唯一 Authority 路径 Replay、seek 新建 session、周期 checkpoint 分叉/稀疏增长放大、损坏记录和旧 manifest 拒绝。 |
 
@@ -56,9 +56,10 @@ Python 测试由 `uv run python -m pytest -q` 按 `pyproject.toml` 的 `tests/` 
 | [`node-core.test.mjs`](../../js/packages/display/test/node-core.test.mjs) | Node 名称语法、float32 Matrix4 规范化、真实 NodeGraph `parentWorld*local`、shear、派生 world 溢出拒绝、NodeIndex、dirty-root 合并、最大深度、Billboard 和 LookAt。 |
 | [`node-graph-forest-audit.test.mjs`](../../js/packages/display/test/node-graph-forest-audit.test.mjs) | forest detach/restore 的封闭性、兄弟顺序、身份、dirty 状态和失败前零写入。 |
 | [`definitions.test.mjs`](../../js/packages/display/test/definitions.test.mjs) | Scene、Prefab、Resource 与 built-in Component 的封闭定义、注册、引用、嵌套依赖、深度/规模边界和 exact `prefabId`。 |
+| [`display-kind.test.mjs`](../../js/packages/display/test/display-kind.test.mjs) | Display Kind 0..N Prefab 映射、显式 selector/default、unknown/unimplemented/unresolved 空根、父子层级、有界 diagnostics、state/property 驱动替换/失去/恢复，以及 selector 异常失败关闭。 |
 | [`catalog-identity.test.mjs`](../../js/packages/display/test/catalog-identity.test.mjs) | canonical manifest、构建 artifact、SHA-256、注册顺序独立性、hash domain 隔离和 authority-state schema coverage。 |
 | [`component.test.mjs`](../../js/packages/display/test/component.test.mjs) | Component 同步生命周期、只读能力、scheduler 快照、显式事件订阅与同步 handler、final 方法、transform driver 唯一性和资源校验后的原子属性替换。 |
-| [`runtime.test.mjs`](../../js/packages/display/test/runtime.test.mjs) | Authority commit gate、Transform、完整 state 与顶层 property reconcile、Prefab event allowlist/路由/失败、world 溢出、Scene 安装、Prefab replacement、summary/currentView、health、backend rebuild 和批量 dispose。 |
+| [`runtime.test.mjs`](../../js/packages/display/test/runtime.test.mjs) | Authority commit gate、Transform、完整 state 与顶层 property reconcile、Prefab event allowlist/路由/失败、world 溢出、Scene 安装、kind-driven materialization replacement、summary/currentView、health、backend rebuild 和批量 dispose。 |
 | [`nested-prefab.test.mjs`](../../js/packages/display/test/nested-prefab.test.mjs) | 固定与动态嵌套 Prefab 展开、0..N diff、same-key/id 身份保留、失败零变更、递归释放和静态 Scene 初始化。 |
 | [`nested-prefab-runtime-audit.test.mjs`](../../js/packages/display/test/nested-prefab-runtime-audit.test.mjs) | 深度边界、路径冲突、事务最终候选可见性、attach 失败、NodeIndex 注册失败、复杂 rollback 和兄弟顺序恢复。 |
 | [`nested-prefab-scale.test.mjs`](../../js/packages/display/test/nested-prefab-scale.test.mjs) | 640 个动态子实例下基于 ledger identity 的 reconcile，以及大候选 staging/adoption 失败后的完整回滚。 |

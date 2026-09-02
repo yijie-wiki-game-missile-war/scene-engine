@@ -173,11 +173,11 @@ function dynamicPrefabs({ maximumInstances = 3 } = {}) {
   return { leafA, leafB, outer };
 }
 
-function authorityCommand(nodeId, prefabId, state, transform = IDENTITY) {
+function authorityCommand(nodeId, displayKindId, state, transform = IDENTITY) {
   return {
     nodeId,
     parentNodeId: null,
-    prefabId,
+    displayKindId,
     transformMode: 'live',
     transform,
     visible: true,

@@ -20,7 +20,7 @@ const AUTHORITY_METHOD = Object.freeze({
   'node-set-property': 'setNodeProperty',
   'node-unset-property': 'unsetNodeProperty',
   'node-emit-event': 'emitNodeEvent',
-  'node-replace-prefab': 'replaceNodePrefab',
+  'node-set-display-kind': 'setNodeDisplayKind',
   'node-remove': 'removeNode',
 });
 
@@ -143,19 +143,11 @@ export class SceneEngineClient {
         undefined,
         [Object.freeze({
           sceneName: checkpoint.sceneName,
-          sceneCatalogHash: checkpoint.sceneCatalogHash,
-          prefabCatalogHash: checkpoint.prefabCatalogHash,
-          stateSchemaHash: checkpoint.stateSchemaHash,
           commit,
         })],
         'display-session-factory-async',
       );
       candidate = createSession(candidate);
-      assertCatalogIdentity(candidate.runtime, Object.freeze({
-        sceneCatalogHash: checkpoint.sceneCatalogHash,
-        prefabCatalogHash: checkpoint.prefabCatalogHash,
-        stateSchemaHash: checkpoint.stateSchemaHash,
-      }));
       callSynchronous(
         candidate.runtime.installScene,
         candidate.runtime,
@@ -466,7 +458,7 @@ function createSession(value) {
   }
   requireMethods(
     value.runtime,
-    ['catalogIdentity', 'installScene', 'activate', 'start', 'summary', 'currentView'],
+    ['installScene', 'activate', 'start', 'summary', 'currentView'],
     'display-session-runtime-invalid',
   );
   requireMethods(value.authorityPort, [
@@ -483,27 +475,6 @@ function createSession(value) {
     commitGate: value.commitGate,
     dispose: () => value.dispose.call(value),
   });
-}
-
-function assertCatalogIdentity(runtime, expected) {
-  const actual = callSynchronous(
-    runtime.catalogIdentity,
-    runtime,
-    [],
-    'display-catalog-identity-async',
-  );
-  requireRecord(actual, 'display-catalog-identity-invalid');
-  const fields = ['sceneCatalogHash', 'prefabCatalogHash', 'stateSchemaHash'];
-  const keys = Reflect.ownKeys(actual);
-  if (keys.length !== fields.length || keys.some((key) => !fields.includes(key))) {
-    fail('display-catalog-identity-invalid');
-  }
-  for (const field of fields) {
-    if (typeof actual[field] !== 'string' || !/^[0-9a-f]{64}$/u.test(actual[field])) {
-      fail('display-catalog-identity-invalid');
-    }
-    if (actual[field] !== expected[field]) fail('display-catalog-identity-mismatch');
-  }
 }
 
 function callAuthority(authorityPort, method, record) {
@@ -542,10 +513,10 @@ function authorityPayload(command) {
         commandSeq: command.commandSeq,
         sourceTick: command.sourceTick,
       });
-    case 'node-replace-prefab':
+    case 'node-set-display-kind':
       return Object.freeze({
         nodeId: command.nodeId,
-        prefabId: command.prefabId,
+        displayKindId: command.displayKindId,
         state: command.state,
       });
     case 'node-remove':
@@ -559,7 +530,7 @@ function authorityNodePayload(node) {
   return Object.freeze({
     nodeId: node.nodeId,
     parentNodeId: node.parentNodeId,
-    prefabId: node.prefabId,
+    displayKindId: node.displayKindId,
     transformMode: node.transformMode,
     visible: node.visible,
     state: node.state,

@@ -8,10 +8,12 @@ import {
   buildDisplayCatalogManifest,
   computeDisplayCatalogIdentity,
   createComponentRegistry,
+  createDisplayKindRegistry,
   createPrefabRegistry,
   createResourceRegistry,
   createSceneRegistry,
   definePrefab,
+  defineDisplayKind,
   defineScene,
   toDisplayCatalogIdentityRecord,
 } from '../../js/packages/display/src/index.js';
@@ -19,6 +21,7 @@ import { IDENTITY_MATRIX } from './matrix4.mjs';
 
 export const COMMUNICATION_SCENE_ID = 'communication';
 export const COMMUNICATION_PREFAB_ID = 'communication/root';
+export const COMMUNICATION_DISPLAY_KIND_ID = 'display.communication/root@1';
 export const COMMUNICATION_GAMEPLAY_TYPE = 'communication.root';
 export const COMMUNICATION_AUTHORITY_STATE_SCHEMAS = Object.freeze([Object.freeze({
   gameplayType: COMMUNICATION_GAMEPLAY_TYPE,
@@ -74,10 +77,18 @@ export function communicationScene() {
 export function buildCommunicationCatalog() {
   const sceneRegistry = createSceneRegistry([communicationScene()]);
   const prefabRegistry = createPrefabRegistry([communicationPrefab()]);
+  const displayKindRegistry = createDisplayKindRegistry([defineDisplayKind({
+    id: COMMUNICATION_DISPLAY_KIND_ID,
+    gameplayType: COMMUNICATION_GAMEPLAY_TYPE,
+    revision: 1,
+    authorityPrefabIds: [COMMUNICATION_PREFAB_ID],
+    defaultPrefabId: COMMUNICATION_PREFAB_ID,
+  })]);
   const resourceRegistry = createResourceRegistry();
   const componentRegistry = createComponentRegistry();
   const manifest = buildDisplayCatalogManifest({
     sceneRegistry,
+    displayKindRegistry,
     prefabRegistry,
     resourceRegistry,
     componentRegistry,
@@ -85,6 +96,7 @@ export function buildCommunicationCatalog() {
   });
   return {
     sceneRegistry,
+    displayKindRegistry,
     prefabRegistry,
     resourceRegistry,
     componentRegistry,

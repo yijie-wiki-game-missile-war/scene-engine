@@ -21,19 +21,20 @@ import { PrefabInstantiator } from './prefab-instantiator.js';
 import { Scene } from './scene.js';
 import { SceneLoader } from './scene-loader.js';
 
-export const DISPLAY_RUNTIME_SCHEMA = 'scene-engine-display-node@8';
+export const DISPLAY_RUNTIME_SCHEMA = 'scene-engine-display-node@9';
 export const DISPLAY_SUMMARY_SCHEMA = 'scene-engine-display-summary@1';
 const ZERO_CURSOR = Object.freeze({ commitSeq: 0, sourceTick: 0, lastCommandSeq: 0 });
 const DISPLAY_OPTION_KEYS = Object.freeze({
   required: Object.freeze([
     'sceneRegistry',
+    'displayKindRegistry',
     'prefabRegistry',
     'resourceRegistry',
     'componentRegistry',
     'createRenderBackend',
     'authorityStateSchemas',
   ]),
-  optional: Object.freeze(['hostElement', 'canvas', 'frameAdapter', 'onHealth']),
+  optional: Object.freeze(['hostElement', 'canvas', 'frameAdapter', 'onHealth', 'onDiagnostic']),
 });
 
 function normalizeCursor(value) {
@@ -78,6 +79,7 @@ export class DisplayRuntime {
     );
     const {
       sceneRegistry,
+      displayKindRegistry,
       prefabRegistry,
       resourceRegistry,
       componentRegistry,
@@ -88,9 +90,12 @@ export class DisplayRuntime {
     const canvas = record.canvas ?? null;
     const frameAdapter = record.frameAdapter ?? null;
     const onHealth = record.onHealth ?? null;
-    if (!sceneRegistry || !prefabRegistry || !resourceRegistry || !componentRegistry
+    const onDiagnostic = record.onDiagnostic ?? null;
+    if (!sceneRegistry || !displayKindRegistry || !prefabRegistry
+        || !resourceRegistry || !componentRegistry
         || typeof createRenderBackend !== 'function' || !Array.isArray(authorityStateSchemas)
-        || (onHealth !== null && typeof onHealth !== 'function')) {
+        || (onHealth !== null && typeof onHealth !== 'function')
+        || (onDiagnostic !== null && typeof onDiagnostic !== 'function')) {
       fail('display-options-invalid');
     }
     this._hostElement = hostElement;
@@ -98,6 +103,7 @@ export class DisplayRuntime {
     this._createRenderBackend = createRenderBackend;
     this._frameAdapter = validateFrameAdapter(frameAdapter);
     this._onHealth = onHealth;
+    this._onDiagnostic = onDiagnostic;
     this._nodeIndex = new NodeIndex();
     this._revision = 0;
     this._cursor = ZERO_CURSOR;
@@ -120,6 +126,7 @@ export class DisplayRuntime {
 
     this._catalogManifest = buildDisplayCatalogManifest({
       sceneRegistry,
+      displayKindRegistry,
       prefabRegistry,
       resourceRegistry,
       componentRegistry,
@@ -132,7 +139,13 @@ export class DisplayRuntime {
       resourceRegistry,
     });
 
-    for (const registry of [sceneRegistry, prefabRegistry, resourceRegistry, componentRegistry]) {
+    for (const registry of [
+      sceneRegistry,
+      displayKindRegistry,
+      prefabRegistry,
+      resourceRegistry,
+      componentRegistry,
+    ]) {
       if (typeof registry.seal !== 'function') fail('display-options-invalid');
       registry.seal();
     }
@@ -161,6 +174,7 @@ export class DisplayRuntime {
     });
     const registries = Object.freeze({
       sceneRegistry,
+      displayKindRegistry,
       prefabRegistry,
       resourceRegistry,
       componentRegistry,
@@ -198,6 +212,7 @@ export class DisplayRuntime {
       onMutation: () => this._mutated(),
       onCleanupErrors: (errors) => this._reportCleanupErrors(errors),
       assertMutable: () => this._assertAuthorityMutable(),
+      onDiagnostic: (transition) => this._emitDiagnostic(transition),
     }));
     this._sceneLoader = new SceneLoader({
       scene: this._scene,
@@ -235,6 +250,10 @@ export class DisplayRuntime {
   }
 
   catalogIdentity() { this._assertNotDisposed(); return this._catalogIdentity; }
+  currentDiagnostics() {
+    this._assertNotDisposed();
+    return this.authority.currentDiagnostics();
+  }
 
   activate(cursor = ZERO_CURSOR) {
     this._assertNotDisposed();
@@ -408,6 +427,7 @@ export class DisplayRuntime {
         this._createRenderBackend = null;
         this._frameAdapter = null;
         this._onHealth = null;
+        this._onDiagnostic = null;
         this._nodeIndex = null;
         this._scheduler = null;
         this._renderSystem = null;
@@ -596,6 +616,9 @@ export class DisplayRuntime {
       this._onHealth?.(healthEvent({ severity: 'error', code,
         message: error?.message ?? code, ...details }));
     } catch { /* health observers are best-effort */ }
+  }
+  _emitDiagnostic(transition) {
+    try { this._onDiagnostic?.(transition); } catch { /* diagnostic observers are best-effort */ }
   }
   _reportCleanupErrors(errors) {
     for (const error of errors ?? []) {

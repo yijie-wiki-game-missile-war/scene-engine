@@ -53,12 +53,6 @@ export interface DisplayCursor {
   readonly lastCommandSeq: number;
 }
 
-export interface DisplayCatalogIdentity {
-  readonly sceneCatalogHash: string;
-  readonly prefabCatalogHash: string;
-  readonly stateSchemaHash: string;
-}
-
 export interface DisplaySummary {
   readonly schema: 'scene-engine-display-summary@1';
   readonly sceneName: string | null;
@@ -98,13 +92,12 @@ export interface DisplayView {
   snapshot(): Readonly<Record<string, unknown>>;
 }
 
-export interface DisplaySessionMetadata extends DisplayCatalogIdentity {
+export interface DisplaySessionMetadata {
   readonly sceneName: string;
   readonly commit: CommitView;
 }
 
 export interface DisplaySessionRuntime {
-  catalogIdentity(): DisplayCatalogIdentity;
   installScene(value: { readonly sceneName: string }): DisplaySessionRuntime;
   activate(cursor: DisplayCursor): undefined;
   start(): undefined;
@@ -115,7 +108,7 @@ export interface DisplaySessionRuntime {
 export interface AuthorityNodeRecord {
   readonly nodeId: number;
   readonly parentNodeId: number | null;
-  readonly prefabId: string;
+  readonly displayKindId: string;
   readonly transformMode: 'initial' | 'live';
   readonly visible: boolean;
   readonly state: JSONRecord;
@@ -155,7 +148,11 @@ export interface DisplayAuthorityPort {
     readonly commandSeq: number;
     readonly sourceTick: number;
   }): undefined;
-  replaceNodePrefab(command: { readonly nodeId: number; readonly prefabId: string; readonly state: JSONRecord }): undefined;
+  setNodeDisplayKind(command: {
+    readonly nodeId: number;
+    readonly displayKindId: string;
+    readonly state: JSONRecord;
+  }): undefined;
   removeNode(command: { readonly nodeId: number }): undefined;
 }
 

@@ -11,7 +11,6 @@ import pytest
 
 from scene_engine.display import (
     DISPLAY_CODEC,
-    DisplayCatalogIdentity,
     DisplayCommand,
     DisplayMatrixPool,
     DisplayNode,
@@ -51,7 +50,7 @@ def display_node() -> DisplayNode:
     return DisplayNode(
         node_id=0,
         parent_node_id=None,
-        prefab_id="flight.aircraft",
+        display_kind_id="flight.aircraft",
         transform_mode="live",
         visible=True,
         state={"animation": "idle"},
@@ -63,7 +62,6 @@ def published_pool() -> DisplayMatrixPool:
     pool.append(DisplayTransform.identity())
     baseline = encode_display_checkpoint(
         scene_name="main",
-        catalog=DisplayCatalogIdentity("a" * 64, "b" * 64, "c" * 64),
         last_command_seq=0,
         matrix_pool=pool,
         nodes=(display_node(),),
@@ -77,7 +75,6 @@ def test_wire_v3_checkpoint_contains_world_and_binary_display_baseline_only() ->
     pool.append(DisplayTransform.identity())
     display = encode_display_checkpoint(
         scene_name="main",
-        catalog=DisplayCatalogIdentity("a" * 64, "b" * 64, "c" * 64),
         last_command_seq=0,
         matrix_pool=pool,
         nodes=(display_node(),),
@@ -97,7 +94,7 @@ def test_wire_v3_checkpoint_contains_world_and_binary_display_baseline_only() ->
     assert raw[4] == WIRE_MAJOR_VERSION == 3
     assert packet.kind is PacketKind.CHECKPOINT
     assert packet.header["schema"] == WIRE_SCHEMA == "scene-engine-wire@3"
-    assert packet.header["display_codec"] == DISPLAY_CODEC == "scene-engine-display-node@8"
+    assert packet.header["display_codec"] == DISPLAY_CODEC == "scene-engine-display-node@9"
     assert [item.kind for item in packet.attachments] == [
         AttachmentKind.WORLD_SNAPSHOT,
         AttachmentKind.DISPLAY_CHECKPOINT,
@@ -126,18 +123,12 @@ def test_frozen_wire_v3_golden_packets_round_trip_exact_bytes() -> None:
         checkpoint.attachments[1].bytes,
         checkpoint.header["last_command_seq"],
     )
-    identity = json.loads(
-        (FIXTURES / "display-catalog-v2/identity.json").read_text()
-    )
-    assert {
-        "scene_catalog_hash": display["scene_catalog_hash"],
-        "prefab_catalog_hash": display["prefab_catalog_hash"],
-        "state_schema_hash": display["state_schema_hash"],
-    } == identity
+    assert display["nodes"][0]["display_kind_id"] == "unit.basic"
+    assert not {"scene_catalog_hash", "prefab_catalog_hash", "state_schema_hash"} & set(display)
 
 
-def test_frozen_display_v8_corpus_validates_and_malformed_records_fail() -> None:
-    root = FIXTURES / "display-v8"
+def test_frozen_display_v9_corpus_validates_and_malformed_records_fail() -> None:
+    root = FIXTURES / "display-v9"
     checkpoint_value = json.loads((root / "checkpoint.json").read_text())
     command_value = json.loads((root / "command-tick.json").read_text())
     nodes = validate_display_checkpoint(checkpoint_value)
@@ -241,7 +232,6 @@ def test_wire_v2_major_is_rejected_without_a_compatibility_decoder() -> None:
     pool = DisplayMatrixPool()
     display = encode_display_checkpoint(
         scene_name="main",
-        catalog=DisplayCatalogIdentity("a" * 64, "b" * 64, "c" * 64),
         last_command_seq=0,
         matrix_pool=pool,
         nodes=(),
@@ -267,7 +257,6 @@ def test_old_json_display_attachment_layout_is_rejected() -> None:
     pool = DisplayMatrixPool()
     display = encode_display_checkpoint(
         scene_name="main",
-        catalog=DisplayCatalogIdentity("a" * 64, "b" * 64, "c" * 64),
         last_command_seq=0,
         matrix_pool=pool,
         nodes=(),

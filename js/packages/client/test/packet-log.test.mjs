@@ -41,7 +41,7 @@ test('validates packet-log@3 command cursor and replays through sole Authority p
     'activate', 'start', 'summary',
     'begin', 'applyNodeTransformBatch', 'createNode', 'setNodeTransforms',
     'setNodeParent', 'setNodeVisible',
-    'setNodeState', 'replaceNodePrefab', 'setNodeProperty', 'setNodeProperty',
+    'setNodeState', 'setNodeDisplayKind', 'setNodeProperty', 'setNodeProperty',
     'unsetNodeProperty', 'emitNodeEvent', 'removeNode', 'seal', 'summary',
     'begin', 'applyNodeTransformBatch', 'seal', 'summary',
   ]);

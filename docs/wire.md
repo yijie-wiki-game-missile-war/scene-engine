@@ -31,7 +31,7 @@ Exact layouts:
 - ACK/error: no attachments.
 
 Checkpoint and commit headers carry `stream_id`, `commit_seq`, `source_tick`, `world_revision`, `last_command_seq`, `world_codec`
-and `display_codec=scene-engine-display-node@8`. Commit adds cause and causation ID. ACK is cumulative over stream, commit and
+and `display_codec=scene-engine-display-node@9`. Commit adds cause and causation ID. ACK is cumulative over stream, commit and
 last command cursor.
 
 The Display checkpoint contains:
@@ -41,18 +41,14 @@ last_command_seq
 matrix_pool_size
 matrix_pool[n, 4, 4]
 scene_name
-scene_catalog_hash
-prefab_catalog_hash
-state_schema_hash
 parent-first active authority-root metadata keyed by node_id
 ```
 
-The three hashes come from `scene-engine-display-catalog-manifest@2`: JavaScript canonicalizes the installed Scene,
-Prefab/Resource/Component and authority-state schema definitions, writes a build identity artifact, and Python loads those exact
-values. Wire transports the identities; it does not invent or recompute product catalog content.
+The checkpoint carries no Arts catalog identity. The browser artifact computes its local catalog identity independently;
+producer bytes contain only the opaque Display Kind and complete authority state needed for projection.
 
 The command stream contains a base cursor, source-tick seal, the resulting matrix-pool size, one sorted dirty-ID vector, its
-aligned matrix tensor and strict `scene-engine-node-command@8` records. Sequence is the base plus one-based record order, last
+aligned matrix tensor and strict `scene-engine-node-command@9` records. Sequence is the base plus one-based record order, last
 cursor is base plus count and the sealed source tick must equal the packet header. Structural/state commands have one target;
 one optional Transform-batch command has an arbitrary sorted ID vector and occupies one sequence regardless of its row count.
 
@@ -64,17 +60,17 @@ browser-only concern.
 
 ## Binary Display payloads
 
-Both raw Display payloads begin with a four-byte kind magic (`SDCP` checkpoint or `SDCS` command stream), payload version `5`,
+Both raw Display payloads begin with a four-byte kind magic (`SDCP` checkpoint or `SDCS` command stream), payload version `6`,
 scalar code `1` (`float32`) and zero `u16` flags. Strings are fatal UTF-8 prefixed by `u16` byte length and cannot use length
 `0xffff`. Complete state and event payloads are canonical JSON objects; property values may be any canonical JSON value. Every
 JSON body is prefixed by a `u32`
-byte length. SHA-256 identities are transported as their 32 raw bytes. Python's structural decoder rejects unknown scalar
+byte length. Python's structural decoder rejects unknown scalar
 codes, opcodes or flags, malformed UTF-8 or JSON, invalid lengths, truncation and trailing bytes. Matrix semantics are checked
 later by the JavaScript Client before Authority mutation or ACK.
 
 Checkpoint then stores `last_command_seq` as `u64`, `pool_size` and active-Node count as `u32`, followed immediately by the
-complete contiguous `pool_size * 16 * f32` matrix tensor. Scene name, the three hashes and the parent-first metadata records
-follow the tensor. Each metadata record stores `node_id`, `parent_id` (`0xffffffff` for no parent), Prefab ID, one flags byte
+complete contiguous `pool_size * 16 * f32` matrix tensor. Scene name and the parent-first metadata records follow the tensor.
+Each metadata record stores `node_id`, `parent_id` (`0xffffffff` for no parent), Display Kind ID, one flags byte
 (`bit 0=visible`, `bit 1=live Transform`, all other bits zero) and state. It carries no name or inline matrix. Active IDs are
 unique and below `pool_size`; a non-null parent ID must identify an earlier active record. Every inactive/tombstone pool row is
 exact positive-zero bits.
@@ -88,12 +84,12 @@ records. Command records follow the tensor. Scalar records start with one opcode
 instead carries only a batch-row count because its IDs and matrices already occupy the global dirty blocks:
 
 ```text
-1 create          node_id, parent_id, Prefab ID, flags byte, state
+1 create          node_id, parent_id, Display Kind ID, flags byte, state
 2 set-transforms  transform_count
 3 set-parent      node_id, parent_id
 4 set-visible     node_id, u8 boolean (0 or 1)
 5 set-state       node_id, state
-6 replace-Prefab  node_id, Prefab ID, state
+6 set-display-kind node_id, Display Kind ID, state
 7 remove          node_id
 8 set-property    node_id, property name, JSON value
 9 unset-property  node_id, property name
@@ -101,7 +97,7 @@ instead carries only a batch-row count because its IDs and matrices already occu
 ```
 
 Property and event names are `u16`-length fatal UTF-8 with a semantic maximum of 192 bytes. They are non-empty Unicode scalar
-sequences and reject `__proto__`, `prototype` and `constructor`. Their forbidden-code-point table is frozen by Display @8:
+sequences and reject `__proto__`, `prototype` and `constructor`. Their forbidden-code-point table is frozen by Display @9:
 Unicode 16.0 White_Space plus `Cc`/`Cf`/`Cs`/`Co`, all Unicode noncharacters, but not `Cn`. This fixed table—not the host
 runtime's Unicode database—keeps Python 3.11–3.14 and Node 20+ name admission identical; future assignments such as U+088F remain
 valid. A dot is an ordinary name character, not a path separator. `null` is a valid set-property value and is distinct from
@@ -156,7 +152,7 @@ contract.
 
 World patch identity is `scene-engine-json-tree@1`; operations are `set`, `unset` and `append`. All paths and values are validated
 before mutation. Raw packet bytes are immutable after first encode, and packet logs never decode/re-encode them. Cross-language
-fixtures live under `fixtures/wire-v3`, `fixtures/display-v8`, `fixtures/display-catalog-v2` and the Client fixture directories.
+fixtures live under `fixtures/wire-v3`, `fixtures/display-v9`, `fixtures/display-catalog-v3` and the Client fixture directories.
 `scripts/generate_fixtures.py` is their sole writer; the Client package's JavaScript generator delegates to it. The canonical
 cross-language corpus includes a sheared affine matrix and the Client asserts its packaged Wire files are byte-identical to the
 root corpus.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regenerate the frozen cross-language Scene Engine wire@3/display@8 fixtures."""
+"""Regenerate the frozen cross-language Scene Engine wire@3/display@9 fixtures."""
 
 from __future__ import annotations
 
@@ -16,7 +16,6 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from scene_engine.display import (  # noqa: E402
-    DisplayCatalogIdentity,
     DisplayCommand,
     DisplayMatrixPool,
     DisplayNode,
@@ -77,10 +76,10 @@ def transform(x: float) -> DisplayTransform:
     ))
 
 
-def catalog_identity_fixture() -> tuple[Path, bytes, DisplayCatalogIdentity]:
+def catalog_identity_fixture() -> tuple[Path, bytes]:
     """Validate the authored manifest and derive identity with production JS."""
 
-    catalog_root = ROOT / "fixtures" / "display-catalog-v2"
+    catalog_root = ROOT / "fixtures" / "display-catalog-v3"
     manifest_path = catalog_root / "manifest.json"
     identity_module = (
         ROOT / "js" / "packages" / "display" / "src" / "catalog" / "identity.js"
@@ -127,25 +126,21 @@ process.stdout.write(JSON.stringify(toDisplayCatalogIdentityRecord(identity)));
         json.dumps(identity, ensure_ascii=False, allow_nan=False, indent=2).encode("utf-8")
         + b"\n"
     )
-    return (
-        catalog_root / "identity.json",
-        rendered,
-        DisplayCatalogIdentity.from_record(identity),
-    )
+    return catalog_root / "identity.json", rendered
 
 
 def node(
     node_id: int,
     *,
     parent_node_id: int | None = None,
-    prefab_id: str = "unit.basic",
+    display_kind_id: str = "unit.basic",
     visible: bool = True,
     state: dict | None = None,
 ) -> DisplayNode:
     return DisplayNode(
         node_id=node_id,
         parent_node_id=parent_node_id,
-        prefab_id=prefab_id,
+        display_kind_id=display_kind_id,
         transform_mode="live",
         visible=visible,
         state=state or {"animation": "idle"},
@@ -160,9 +155,9 @@ def main() -> None:
         help="leave the packaged JavaScript packet-log fixture untouched",
     )
     args = parser.parse_args()
-    catalog_identity_path, catalog_identity_bytes, catalog = catalog_identity_fixture()
+    catalog_identity_path, catalog_identity_bytes = catalog_identity_fixture()
     wire_root = ROOT / "fixtures" / "wire-v3"
-    display_root = ROOT / "fixtures" / "display-v8"
+    display_root = ROOT / "fixtures" / "display-v9"
     tree_root = ROOT / "fixtures" / "json-tree-v1"
     package_wire_root = ROOT / "js" / "packages" / "client" / "fixtures" / "wire-v3"
     package_log = ROOT / "js" / "packages" / "client" / "fixtures" / "packet-log"
@@ -185,7 +180,6 @@ def main() -> None:
     )
     display_checkpoint = encode_display_checkpoint(
         scene_name="main",
-        catalog=catalog,
         last_command_seq=0,
         matrix_pool=matrix_pool,
         nodes=initial_nodes,
@@ -202,7 +196,7 @@ def main() -> None:
         DisplayCommand.set_parent(aircraft_id, root_id),
         DisplayCommand.set_visible(aircraft_id, False),
         DisplayCommand.set_state(aircraft_id, {"animation": "moving"}),
-        DisplayCommand.replace_prefab(
+        DisplayCommand.set_display_kind(
             aircraft_id, "unit.basic", {"animation": "damaged"}
         ),
         DisplayCommand.set_property(aircraft_id, "coins", 7),
@@ -302,7 +296,6 @@ def main() -> None:
     )
     final_display_checkpoint = encode_display_checkpoint(
         scene_name="main",
-        catalog=catalog,
         last_command_seq=final_cursor,
         matrix_pool=matrix_pool,
         nodes=final_nodes,

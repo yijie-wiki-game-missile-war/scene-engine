@@ -50,7 +50,6 @@ ProductCheckpoint(
     world_codec: str,
     world_snapshot: Mapping[str, Any],
     scene_name: str,
-    display_catalog: DisplayCatalogIdentity,
     display_matrix_pool: DisplayMatrixPool,
     display_nodes: tuple[DisplayNode, ...],
 )
@@ -63,11 +62,8 @@ ProductCommit(
 )
 ```
 
-The display identity is loaded from the JSON artifact produced by the JavaScript catalog build:
-
-```python
-identity = DisplayCatalogIdentity.from_record(record)
-```
+Python does not load, publish or freeze an Arts catalog identity. The browser Display artifact owns its local catalog identity;
+the versioned `display_kind_id` and complete state are the cross-repository display contract.
 
 One `DisplayMatrixPool` is resident for the whole stream. `append(transform)` allocates the next stable authority `node_id`;
 `set(node_id, transform)` changes one row, `set_batch(node_ids, matrices)` validates then writes an aligned NumPy batch, and
@@ -83,7 +79,7 @@ read-only `<u4` copy of those IDs; sealing uses that vector to gather the corres
 read-only `(m,4,4)` tensor. It does not construct, serialize or confirm one command per row.
 
 Checkpoint nodes are complete parent-first authority roots. Product code supplies stable `node_id`/`parent_id`, exact
-registered `prefab_id`, transform mode, visibility and complete authority state; the Node obtains its local Matrix4 from the
+versioned `display_kind_id`, transform mode, visibility and complete authority state; the Node obtains its local Matrix4 from the
 pool row with the same ID. The browser Client remains the first matrix-semantic validation gate.
 After checkpoint it publishes one vector-targeted Transform command plus single-target structural/state commands through named
 constructors:
@@ -97,19 +93,23 @@ DisplayCommand.set_state(node_id, complete_state)
 DisplayCommand.set_property(node_id, property_name, value)
 DisplayCommand.unset_property(node_id, property_name)
 DisplayCommand.emit_event(node_id, event_name, payload={})
-DisplayCommand.replace_prefab(node_id, prefab_id, complete_state)
+DisplayCommand.set_display_kind(node_id, display_kind_id, complete_state)
 DisplayCommand.remove(node_id)
 ```
 
 Generic `DisplayCommand(kind=..., **fields)` construction is intentionally unavailable. Engine owns `command_seq`,
 `source_tick`, stream/commit/revision and encoded bytes.
 
+Python never probes whether a kind has an Arts implementation. Unknown, known-unimplemented and selection-unresolved kinds
+still create and update one complete Authority root in Display and remain ACKable; Display owns their current diagnostics.
+Malformed JSON state and failures after a Prefab has been selected remain fail-closed.
+
 `set_property` and `unset_property` address one top-level member of the complete authority state. They are ordered delta
 publication conveniences, not a second state owner: product code must mutate its canonical World/state model so any later
 checkpoint contains the same complete result. `set_property(..., None)` writes JSON `null`; only `unset_property` removes the
 member. A dot in `property_name` is a literal character and never means a nested path. Use `set_state` for an atomic candidate
 that changes several mutually dependent fields. Product-wide projected data such as coins or score can use a dedicated
-authority Node/Prefab; it follows the same property and checkpoint rules and does not require a second global-data channel.
+authority Node/Display Kind; it follows the same property and checkpoint rules and does not require a second global-data channel.
 
 `emit_event` publishes one transient JSON-object payload. It occupies one command sequence and shares exact FIFO order with
 Transform, reparent and properties, but it never enters a checkpoint. A linear Replay therefore dispatches it again from the
@@ -121,7 +121,8 @@ optionally with a logical start tick, rather than only in an event.
 The following complete `EngineProgram` excerpt publishes `coins` and `dead` as durable top-level properties and `explode` as a
 one-time visual notification. Durable values are changed in the product's canonical `World` before the mutation returns
 `changed`; both the product checkpoint and `DisplayNode.state` are rebuilt from that World. The example assumes that Scene
-`main` and Prefab `game/state` exist in the supplied Display catalog, and that the Prefab declares the `explode` event. The
+`main` and Display Kind `display.game/state@1` exist in the browser Display registry, and its selected Prefab declares the
+`explode` event. The
 matching browser setup is in the
 [Display property and event quickstart](display.md#property-projection-and-event-handling-quickstart).
 
@@ -131,7 +132,6 @@ from dataclasses import dataclass
 from scene_engine import (
     CheckpointContext,
     CommitContext,
-    DisplayCatalogIdentity,
     DisplayCommand,
     DisplayMatrixPool,
     DisplayNode,
@@ -163,8 +163,7 @@ class DisplayDelta:
 class GameProgram:
     WORLD_CODEC = "my-game-world@1"
 
-    def __init__(self, display_catalog: DisplayCatalogIdentity) -> None:
-        self.display_catalog = display_catalog
+    def __init__(self) -> None:
         self.matrix_pool = DisplayMatrixPool()
         self.game_node_id = self.matrix_pool.append(DisplayTransform.identity())
 
@@ -212,13 +211,12 @@ class GameProgram:
                 "world_revision": world.world_revision,
             },
             scene_name="main",
-            display_catalog=self.display_catalog,
             display_matrix_pool=self.matrix_pool,
             display_nodes=(
                 DisplayNode(
                     node_id=self.game_node_id,
                     parent_node_id=None,
-                    prefab_id="game/state",
+                    display_kind_id="display.game/state@1",
                     transform_mode="live",
                     visible=True,
                     # The complete current durable state of this authority Node.
@@ -315,8 +313,8 @@ clears only the rows captured by that packet; an encoding failure does not silen
 
 ## Nested Prefab projection
 
-Nested Prefabs are entirely inside `@scene-engine/display@0.14.0` and Prefab definition schema
-`scene-engine-prefab-definition@5`. Property/event commands use `scene-engine-display-node@8`; they do not add a Wire packet
+Nested Prefabs are entirely inside `@scene-engine/display@0.15.0` and Prefab definition schema
+`scene-engine-prefab-definition@5`. Property/event commands use `scene-engine-display-node@9`; they do not add a Wire packet
 kind, attachment, second event channel or packet-log schema.
 
 Python still creates and controls only the outer `py/` authority root. `set_state` sends one complete outer state. Display calls

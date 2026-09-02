@@ -22,7 +22,6 @@ import numpy as np
 
 import scene_engine
 from scene_engine import (
-    DisplayCatalogIdentity,
     DisplayCommand,
     DisplayMatrixPool,
     DisplayNode,
@@ -201,18 +200,13 @@ def _encoding_benchmark(
     node_ids = tuple(matrix_pool.append(transform) for transform in transforms)
     baseline = encode_display_checkpoint(
         scene_name="benchmark",
-        catalog=DisplayCatalogIdentity(
-            scene_catalog_hash="0" * 64,
-            prefab_catalog_hash="1" * 64,
-            state_schema_hash="2" * 64,
-        ),
         last_command_seq=0,
         matrix_pool=matrix_pool,
         nodes=tuple(
             DisplayNode(
                 node_id=node_id,
                 parent_node_id=None,
-                prefab_id="benchmark/root",
+                display_kind_id="benchmark/root",
                 transform_mode="live",
                 visible=True,
                 state={},
@@ -351,18 +345,13 @@ def _resident_memory(*, count: int) -> tuple[dict[str, Any], dict[str, bool]]:
     # storage; publishing through the public API also verifies that they drain.
     baseline = encode_display_checkpoint(
         scene_name="benchmark-resident",
-        catalog=DisplayCatalogIdentity(
-            scene_catalog_hash="0" * 64,
-            prefab_catalog_hash="1" * 64,
-            state_schema_hash="2" * 64,
-        ),
         last_command_seq=0,
         matrix_pool=matrix_pool,
         nodes=tuple(
             DisplayNode(
                 node_id=node_id,
                 parent_node_id=None,
-                prefab_id="benchmark/root",
+                display_kind_id="benchmark/root",
                 transform_mode="live",
                 visible=True,
                 state={},

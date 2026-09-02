@@ -21,7 +21,6 @@ from typing import Any, Iterable
 import numpy as np
 
 from scene_engine import (
-    DisplayCatalogIdentity,
     DisplayCommand,
     DisplayMatrixPool,
     DisplayNode,
@@ -39,10 +38,9 @@ from scene_engine.wire import PacketKind, encode_ack, read_engine_packet
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CATALOG_SCRIPT = ROOT / "scripts" / "support" / "communication_catalog.mjs"
 PEER_SCRIPT = ROOT / "scripts" / "support" / "python_js_communication_peer.mjs"
 SCENE_NAME = "communication"
-PREFAB_ID = "communication/root"
+DISPLAY_KIND_ID = "display.communication/root@1"
 WORLD_CODEC = "communication-world@1"
 CLIENT_ID = "python-js-communication"
 FRAME_HEADER = struct.Struct("<I")
@@ -85,11 +83,9 @@ class CommunicationProgram:
         *,
         roots: int,
         updates_per_commit: int,
-        catalog: DisplayCatalogIdentity,
     ) -> None:
         self.roots = roots
         self.updates_per_commit = updates_per_commit
-        self.catalog = catalog
 
     def read_counters(self, world: CommunicationWorld) -> WorldCounters:
         return WorldCounters(world.source_tick, world.world_revision)
@@ -135,13 +131,12 @@ class CommunicationProgram:
             WORLD_CODEC,
             world_snapshot(world),
             SCENE_NAME,
-            self.catalog,
             world.matrix_pool,
             tuple(
                 DisplayNode(
                     node_id=index,
                     parent_node_id=None,
-                    prefab_id=PREFAB_ID,
+                    display_kind_id=DISPLAY_KIND_ID,
                     transform_mode="live",
                     visible=True,
                     state={"index": index},
@@ -462,25 +457,6 @@ class FramedRuntimeTransport:
         self.closed.append((client_id, reason))
 
 
-def load_catalog_identity(
-    *, timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
-) -> DisplayCatalogIdentity:
-    node = shutil.which("node")
-    if node is None:
-        raise RuntimeError("node executable is required")
-    completed = subprocess.run(
-        [node, str(CATALOG_SCRIPT)],
-        cwd=ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=timeout_seconds,
-    )
-    if completed.stderr:
-        raise RuntimeError(f"catalog builder wrote stderr: {completed.stderr.strip()}")
-    return DisplayCatalogIdentity.from_record(json.loads(completed.stdout))
-
-
 def run_benchmark(
     *,
     roots: int,
@@ -501,12 +477,10 @@ def run_benchmark(
         raise ValueError("timeout_seconds must be a finite positive number")
     timeout_seconds = float(timeout_seconds)
     updates_per_commit = max(1, min(roots, math.ceil(roots * update_ratio)))
-    catalog = load_catalog_identity(timeout_seconds=timeout_seconds)
     world = CommunicationWorld(roots)
     program = CommunicationProgram(
         roots=roots,
         updates_per_commit=updates_per_commit,
-        catalog=catalog,
     )
     clock = ManualClock()
     peer = LengthFramedPeer(timeout_seconds=timeout_seconds)
@@ -679,7 +653,7 @@ def run_benchmark(
                 "profile": profile,
                 "ticksPerSecond": TICKS_PER_SECOND,
             },
-            "catalogIdentity": catalog.to_record(),
+            "displayCatalogIdentity": peer_report["displayCatalogIdentity"],
             "checkpoint": {
                 "engineBytes": transport.packet_lengths[0],
                 "ackBytes": ack_lengths[0],

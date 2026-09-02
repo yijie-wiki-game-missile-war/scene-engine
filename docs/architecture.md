@@ -1,6 +1,6 @@
 # Current architecture
 
-Scene Engine 0.18 owns one deterministic publication and browser-projection boundary:
+Scene Engine 0.19 owns one deterministic publication and browser-projection boundary:
 
 ```text
 mutable product World
@@ -9,9 +9,9 @@ mutable product World
   -> scene-engine-wire@3 exact packet bytes
   -> recorder + sessions / bounded outbox
   -> one background transport sender
-  -> SceneEngineClient 0.15
+  -> SceneEngineClient 0.16
        -> immutable WorldState + cumulative ACK + O(1) DisplaySummary
-       -> DisplayRuntime 0.14 AuthorityPort
+       -> DisplayRuntime 0.15 AuthorityPort + DisplayKindRegistry
             -> one NodeIndex / one NodeGraph / one Component scheduler / one RAF
             -> one private flat Prefab materialization ledger
             -> RenderSystem
@@ -30,7 +30,7 @@ root imports the Three backend. The current Display API is browser-oriented and 
 | exact transport call order and connection epochs | Python transport sender thread | bounded immutable-byte outbox |
 | exact packet decode, WorldState pointer and ACK | JavaScript Client | `SceneEngineClient` |
 | authority IDs/matrix pool, parent graph and Prefab instances | DisplayRuntime | `AuthorityPort` plus read-only views |
-| Scene, Prefab, Resource, Component and state-schema catalog | DisplayRuntime composition | immutable definitions and registries |
+| Display Kind, Scene, Prefab, Resource, Component and state-schema catalog | DisplayRuntime composition | immutable definitions and registries |
 | renderer bindings, batching and GPU resources | Three backend | flat `RenderBackendPort` |
 | recorded bytes and Replay seek | packet-log@3 | exact Engine packets |
 
@@ -52,7 +52,8 @@ send/close calls attached to the endpoint for which they were accepted.
 
 Python publishes only complete authority roots and later structural/state/property/event mutations plus one vector-targeted
 Transform batch per commit. It owns each root's stream-stable numeric ID,
-existence, parent ID, row in one resident NumPy matrix pool, visibility, exact `prefabId` and complete authority state. It never
+existence, parent ID, row in one resident NumPy matrix pool, visibility, opaque versioned `displayKindId` and complete authority
+state. It never
 publishes a `py/` name, URL, model, texture, material, light, camera or Prefab-local path. Display deterministically maps an
 authority ID to its internal canonical name `py/<id>`; authored Scene/Prefab paths and renderer `(nodeName,componentKey)` keys
 therefore remain browser-local and unchanged.
@@ -61,7 +62,8 @@ Checkpoint roots and structural parent IDs are validated in Python. Later mutati
 The browser Client validates the complete ID tables and every active/dirty matrix before it opens the Display commit gate; an
 invalid target or tensor therefore produces no ACK.
 
-Arts/product display code owns concrete Scene, Prefab, Resource and Component definitions. `PrefabDefinition.id` is the unique
+Arts/product display code owns Display Kind, concrete Scene, Prefab, Resource and Component definitions. A Display Kind owns a
+closed zero-or-more authority-Prefab allowlist plus one explicit default or synchronous selector. `PrefabDefinition.id` is the unique
 lookup key; `gameplayType` is non-unique state-contract metadata, so multiple Prefabs may share it. Prefab definition schema
 `scene-engine-prefab-definition@5` can compose exact child Prefab ids through fixed `prefabInstances`, bounded dynamic
 `prefabSlots`. The catalog compiler validates every fixed reference and every slot allowlist, including missing definitions and
@@ -71,7 +73,8 @@ cycles, before the runtime installs any Scene.
 same synchronous resolver/reconcile path as `node-set-state`; a dot in a name is literal, not a nested path. `null` is a value,
 so removal has its own command. Product code remains the durable owner and must include the resulting complete state in later
 checkpoints. `node-emit-event` is ordered but transient: the Prefab must declare the event, and only explicitly subscribed,
-enabled Behaviour components in that outer Prefab definition receive its frozen payload. Events are recorded in exact commit
+enabled Behaviour components in the currently selected outer Prefab definition receive its frozen payload. An event on an empty
+gap root is a successful empty delivery. Events are recorded in exact commit
 bytes and replay in order, but are absent from checkpoints.
 
 Python still owns only the outer `py/` authority root and sends its complete state. A synchronous resolver may derive fixed-child
@@ -79,19 +82,19 @@ overrides and each slot's complete desired instance set; each child resolver the
 child. Materialization recursively flattens all levels into the existing NodeIndex and NodeGraph as ordinary Nodes and
 Components. It does not add child commands, another authority boundary or a nested runtime tree.
 
-A build generates one canonical catalog manifest from:
+A build generates one browser-local canonical catalog manifest from:
 
 - Scene descriptions;
-- Prefab, Resource and Component descriptions;
+- Display Kind, Prefab, Resource and Component descriptions;
 - one authority-state schema identity for every used gameplay type.
 
-The manifest produces three independent SHA-256 identities. The JavaScript build writes the snake-case identity record beside
-the display artifact; Python loads that exact record into `DisplayCatalogIdentity`. Client compares the local runtime identity
-with the checkpoint before it installs a Scene.
+The manifest produces three independent SHA-256 identities for Display artifact integrity. Python neither loads nor transmits
+them, and Client does not compare them with producer bytes. Replay may pin a separate Display artifact identity when historical
+visual fidelity is required.
 
 ## Transaction and observation boundary
 
-For a checkpoint, Client creates a new candidate Display session, verifies catalog identity, installs the Scene, transfers the
+For a checkpoint, Client creates a new candidate Display session, installs the Scene, transfers the
 single owned full matrix tensor, creates all baseline authority roots parent-first by ID, activates the checkpoint cursor and
 starts the runtime. Only after the candidate is complete does it replace the old session.
 
@@ -110,7 +113,9 @@ For a commit, Client:
 After activation, Authority operations outside an open commit gate fail. A component cannot bypass this boundary: Behaviour
 hooks receive read-only NodeView and Display query capabilities, not NodeIndex, NodeGraph, Authority or RenderSystem.
 
-For a state update, an instance with the same slot key, instance key and `prefabId` retains its Node/Component identity; a new
+For an outer state update, Display reruns the synchronous kind selector. The same selected Prefab reconciles in place, a changed
+selection replaces materialization, and an unknown/unimplemented/unresolved selection retains only the Authority root with a
+current diagnostic. For nested state, an instance with the same slot key, instance key and `prefabId` retains identity; a new
 key is added, a missing key is removed and a changed `prefabId` is replaced. The runtime validates and stages the complete
 candidate before exposing it. This is atomic for the single Authority operation; the commit contract still does not promise
 rollback across multiple commands.

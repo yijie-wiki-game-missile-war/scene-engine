@@ -49,9 +49,17 @@ export { AnimationPlayerComponent } from './animation/animation-player.js';
 export { SCENE_DEFINITION_SCHEMA, SceneDefinition, defineScene } from './resource/scene-definition.js';
 export { PREFAB_DEFINITION_SCHEMA, PrefabDefinition, definePrefab } from './resource/prefab-definition.js';
 export {
+  DisplayKindDefinition,
+  defineDisplayKind,
+} from './resource/display-kind-definition.js';
+export {
   RESOURCE_REGISTRY_SCHEMA,
   defineResources,
   createResourceRegistry,
 } from './resource/resource-registry.js';
-export { createSceneRegistry, createPrefabRegistry } from './resource/registries.js';
+export {
+  createDisplayKindRegistry,
+  createSceneRegistry,
+  createPrefabRegistry,
+} from './resource/registries.js';
 export { createComponentRegistry } from './component/component-registry.js';

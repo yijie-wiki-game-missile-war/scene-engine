@@ -11,7 +11,6 @@ def test_python_root_exports_are_exact() -> None:
         "CheckpointContext",
         "CommitContext",
         "ConfigurationError",
-        "DisplayCatalogIdentity",
         "DisplayCommand",
         "DisplayMatrixPool",
         "DisplayNode",
@@ -45,7 +44,7 @@ def test_python_root_exports_are_exact() -> None:
         "WorldCounters",
         "__version__",
     }
-    assert scene_engine.__version__ == "0.18.0"
+    assert scene_engine.__version__ == "0.19.0"
 
 
 def test_python_package_contains_only_current_modules() -> None:

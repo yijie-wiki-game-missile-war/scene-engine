@@ -41,6 +41,7 @@ const probe = {
   frames: null,
   fakeBackend: null,
   sessionCount: 0,
+  displayCatalogIdentity: null,
 };
 const engineHash = createHash('sha256');
 const ackHash = createHash('sha256');
@@ -57,6 +58,7 @@ function createDisplaySession(metadata) {
   const fake = createFakeRenderBackend();
   const runtime = createDisplayRuntime({
     sceneRegistry: catalog.sceneRegistry,
+    displayKindRegistry: catalog.displayKindRegistry,
     prefabRegistry: catalog.prefabRegistry,
     resourceRegistry: catalog.resourceRegistry,
     componentRegistry: catalog.componentRegistry,
@@ -68,6 +70,7 @@ function createDisplaySession(metadata) {
   probe.frames = frames;
   probe.fakeBackend = fake;
   probe.sessionCount += 1;
+  probe.displayCatalogIdentity = catalog.identity;
   return {
     runtime,
     authorityPort: runtime.authority,
@@ -158,6 +161,7 @@ async function finish() {
     finalCommit,
     finalWorldState,
     displaySummary,
+    displayCatalogIdentity: probe.displayCatalogIdentity,
     transformDigest,
     noRenderWork,
     cleanup,

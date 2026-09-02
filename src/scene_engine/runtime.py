@@ -12,7 +12,6 @@ from typing import Any, Mapping, Protocol
 
 from .clock import MonotonicClock, SystemMonotonicClock
 from .display import (
-    DisplayCatalogIdentity,
     DisplayCommand,
     DisplayMatrixPool,
     DisplayNode,
@@ -164,7 +163,6 @@ class ProductCheckpoint:
     world_codec: str
     world_snapshot: Mapping[str, Any]
     scene_name: str
-    display_catalog: DisplayCatalogIdentity
     display_matrix_pool: DisplayMatrixPool
     display_nodes: tuple[DisplayNode, ...]
 
@@ -174,10 +172,6 @@ class ProductCheckpoint:
             raise ConfigurationError("world_snapshot must be a JSON object")
         validate_json_value(self.world_snapshot)
         _text(self.scene_name, "scene_name")
-        if not isinstance(self.display_catalog, DisplayCatalogIdentity):
-            raise ConfigurationError(
-                "display_catalog must be DisplayCatalogIdentity"
-            )
         if not isinstance(self.display_matrix_pool, DisplayMatrixPool):
             raise ConfigurationError(
                 "display_matrix_pool must be DisplayMatrixPool"
@@ -505,7 +499,6 @@ class SceneEngineRuntime:
         self._checkpoint_cache: PacketRef | None = None
         self._world_codec: str | None = None
         self._display_scene_name: str | None = None
-        self._display_catalog: DisplayCatalogIdentity | None = None
         self._display_matrix_pool: DisplayMatrixPool | None = None
         self._display_command_seq = 0
         self._fatal_cause: BaseException | None = None
@@ -883,7 +876,7 @@ class SceneEngineRuntime:
         if (
             self._world_codec is None
             or self._display_scene_name is None
-            or self._display_catalog is None
+            or self._display_matrix_pool is None
         ):
             raise RuntimeError("stream publication contract is not initialized")
         if product.world_codec != self._world_codec:
@@ -959,11 +952,10 @@ class SceneEngineRuntime:
             raise RuntimeError("world_codec changed within one stream")
         if self._display_scene_name is not None and (
             product.scene_name != self._display_scene_name
-            or product.display_catalog != self._display_catalog
             or product.display_matrix_pool is not self._display_matrix_pool
         ):
             raise RuntimeError(
-                "display scene, catalog, or matrix pool changed within one stream"
+                "display scene or matrix pool changed within one stream"
             )
         if initial_publication and tuple(
             sorted(node.node_id for node in product.display_nodes)
@@ -973,7 +965,6 @@ class SceneEngineRuntime:
             )
         display_checkpoint = encode_display_checkpoint(
             scene_name=product.scene_name,
-            catalog=product.display_catalog,
             last_command_seq=self._display_command_seq,
             matrix_pool=product.display_matrix_pool,
             nodes=product.display_nodes,
@@ -994,7 +985,6 @@ class SceneEngineRuntime:
         if self._world_codec is None:
             self._world_codec = product.world_codec
             self._display_scene_name = product.scene_name
-            self._display_catalog = product.display_catalog
             self._display_matrix_pool = product.display_matrix_pool
         return PacketRef(
             raw,

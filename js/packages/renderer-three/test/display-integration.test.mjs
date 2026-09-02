@@ -4,6 +4,7 @@ import test from 'node:test';
 import {
   SCENE_DEFINITION_SCHEMA,
   createComponentRegistry,
+  createDisplayKindRegistry,
   createDisplayRuntime,
   createPrefabRegistry,
   createResourceRegistry,
@@ -56,6 +57,7 @@ test('Display RenderSystem drives the exact backend port and rebuilds from decla
     hostElement,
     canvas,
     sceneRegistry: createSceneRegistry([scene]),
+    displayKindRegistry: createDisplayKindRegistry(),
     prefabRegistry: createPrefabRegistry(),
     resourceRegistry: resources,
     componentRegistry: createComponentRegistry(),

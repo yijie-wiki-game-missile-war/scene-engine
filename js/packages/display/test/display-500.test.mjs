@@ -10,7 +10,7 @@ test('500 authority roots share one index and preserve exact canonical identity'
       runtime.authority.createNode({
         nodeId: index,
         parentNodeId: null,
-        prefabId: 'target.test.item',
+        displayKindId: 'target.test.item',
         transformMode: 'live',
         transform: matrixTransform({ position: [index, 0, 0] }),
         visible: true,
