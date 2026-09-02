@@ -5,11 +5,11 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import * as api from '../src/index.js';
-import { CAMERA_PROPERTIES, createHarness, descriptor } from './support.mjs';
+import { CAMERA_PROPERTIES, createHarness, descriptor, frame } from './support.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-test('0.12 root is the exact ThreeRenderBackend public surface', async () => {
+test('0.13 root is the exact ThreeRenderBackend public surface', async () => {
   assert.deepEqual(Object.keys(api).sort(), [
     'THREE_RENDER_BACKEND_SCHEMA',
     'ThreeRenderBackendError',
@@ -17,7 +17,7 @@ test('0.12 root is the exact ThreeRenderBackend public surface', async () => {
   ]);
   assert.equal(api.THREE_RENDER_BACKEND_SCHEMA, 'scene-engine-three-render-backend@3');
   const packageJson = JSON.parse(await fs.readFile(path.join(ROOT, 'package.json'), 'utf8'));
-  assert.equal(packageJson.version, '0.12.0');
+  assert.equal(packageJson.version, '0.13.0');
   assert.deepEqual((await fs.readdir(path.join(ROOT, 'src'))).sort(), [
     'backend.js', 'constants.js', 'errors.js', 'index.d.ts', 'index.js',
     'panel-projection.js', 'resource-manager.js', 'resources.js', 'validation.js',
@@ -28,8 +28,8 @@ test('backend implements only the frozen RenderBackendPort and exposes no Three 
   const { backend, registry } = createHarness();
   const methods = [
     'createBinding', 'updateBinding', 'destroyBinding', 'prepareFrame', 'render',
-    'requestResize', 'pick', 'projectWorldPoint', 'focusWorldPoint', 'capture',
-    'whenIdle', 'diagnostics', 'dispose',
+    'requestResize', 'pick', 'screenPointToWorldRay', 'pickProximity',
+    'projectWorldPoint', 'focusWorldPoint', 'capture', 'whenIdle', 'diagnostics', 'dispose',
   ];
   for (const method of methods) assert.equal(typeof backend[method], 'function', method);
   for (const removed of ['install', 'apply', 'applyBatch', 'rebuild', 'start', 'stop', 'requestAnimationFrame']) {
@@ -37,10 +37,14 @@ test('backend implements only the frozen RenderBackendPort and exposes no Three 
   }
   const camera = await backend.createBinding(descriptor('scene/camera', 'camera',
     'render.camera@1', CAMERA_PROPERTIES, registry));
+  backend.prepareFrame(frame(camera));
   const diagnostics = backend.diagnostics();
   assert.equal(diagnostics.bindingCount, 1);
   assert.equal(containsThreeValue(diagnostics), false);
   assert.equal(containsThreeValue(backend.capture()), false);
+  assert.equal(containsThreeValue(backend.screenPointToWorldRay({ clientX: 400, clientY: 300 })),
+    false);
+  assert.equal(backend.pickProximity({ clientX: 400, clientY: 300, radiusPixels: 16 }), null);
   backend.destroyBinding(camera);
   backend.dispose();
 });

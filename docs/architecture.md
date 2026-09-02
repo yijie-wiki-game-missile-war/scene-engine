@@ -11,11 +11,12 @@ mutable product World
   -> one background transport sender
   -> SceneEngineClient 0.16
        -> immutable WorldState + cumulative ACK + O(1) DisplaySummary
-       -> DisplayRuntime 0.15 AuthorityPort + DisplayKindRegistry
+       -> DisplayRuntime 0.16 AuthorityPort + DisplayKindRegistry
             -> one NodeIndex / one NodeGraph / one Component scheduler / one RAF
             -> one private flat Prefab materialization ledger
+            -> pointer interaction controller
             -> RenderSystem
-                 -> flat ThreeRenderBackend 0.12.0 bindings
+                 -> flat ThreeRenderBackend 0.13.0 bindings
 ```
 
 The boundary is renderer-isolated: product code and Arts definitions use Display contracts, while only the browser composition
@@ -31,6 +32,7 @@ root imports the Three backend. The current Display API is browser-oriented and 
 | exact packet decode, WorldState pointer and ACK | JavaScript Client | `SceneEngineClient` |
 | authority IDs/matrix pool, parent graph and Prefab instances | DisplayRuntime | `AuthorityPort` plus read-only views |
 | Display Kind, Scene, Prefab, Resource, Component and state-schema catalog | DisplayRuntime composition | immutable definitions and registries |
+| pointer gesture state, claiming and renderer-neutral samples | Display pointer controller | Pointer Events plus interaction callbacks |
 | renderer bindings, batching and GPU resources | Three backend | flat `RenderBackendPort` |
 | recorded bytes and Replay seek | packet-log@3 | exact Engine packets |
 
@@ -152,8 +154,13 @@ Animation target scope is established from materialization identity/provenance, 
 starts with `prefab/`. Each nested definition instance therefore gets its own `$root` and local-path namespace even though all
 targets are ordinary Components in the one runtime graph.
 
-The backend owns only renderer resources and flat `(nodeName, componentKey)` bindings. It never reconstructs a business tree or
-returns Three objects. Disposal stops scheduling, aborts pending work, unloads Scene and Prefab materializations, clears the
+The backend owns only renderer resources and flat `(nodeName, componentKey)` bindings. It also owns the screen-space bounds or
+pick proxy used for proximity queries, because only the renderer knows the effective ordinary, batched and compensated
+representation. Display resolves the returned binding through its one Node graph and owns click, context-click, double-click,
+drag and proximity state. Neither layer interprets product metadata or returns Three objects. Pointer callbacks run outside the
+commit/ACK barrier and any product input they cause follows the existing input path; local samples add no Wire or Replay record.
+
+Disposal stops scheduling, aborts pending work, unloads Scene and Prefab materializations, clears the
 private ledger, releases Components, resource leases and backend bindings, and is idempotent.
 
 Transform has one logical representation end to end: a column-major local Matrix4, carried on Wire as exactly 64

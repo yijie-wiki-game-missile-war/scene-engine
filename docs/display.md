@@ -8,8 +8,8 @@ fallback runtime.
 ```text
 scene-engine Python                 0.19.0
 @scene-engine/client               0.16.0
-@scene-engine/display              0.15.0
-@scene-engine/renderer-three       0.12.0
+@scene-engine/display              0.16.0
+@scene-engine/renderer-three       0.13.0
 wire                               scene-engine-wire@3
 display                            scene-engine-display-node@9
 scene definition                   scene-engine-scene-definition@2
@@ -578,6 +578,48 @@ componentRegistry.patchComponentProperties({
 
 The registry merges the candidate, normalizes the complete value, validates all Resource IDs and kinds, then replaces the
 property identity atomically. On failure, previous properties, dirty state, resource leases and draw request remain unchanged.
+
+## Pointer interaction
+
+`@scene-engine/display@0.16.0` adds a renderer-neutral single-pointer controller for the nine application events `click`,
+`context-click`, `double-click`, `drag-grab`, `drag-move`, `drag-drop`, `proximity-enter`, `proximity-move` and
+`proximity-leave`. `onPress` is an optional notification after claim; `onCancel` and `onError` report abnormal local lifecycle
+instead of fabricating a completed click or drop.
+
+The built-in non-rendering `PointerTargetComponent` has `typeId: 'interaction.pointer-target@1'`, `allowMultiple: false`, and
+closed properties `{roles, data}`. `roles` is a required non-empty duplicate-free subset of `proximity`, `select`,
+`drag-source`, `drop-surface` and `drop-target`; `data` is a required deeply frozen strict JSON object interpreted only by the
+application. Display resolves a renderer binding to the nearest enabled pointer-target Component on its Node-parent chain,
+including nested Prefab Nodes, without constructing `currentView()`.
+
+DisplayRuntime exposes:
+
+```js
+pickInteraction({ clientX, clientY })
+pickInteractionProximity({ clientX, clientY, radiusPixels })
+screenPointToWorldRay({ clientX, clientY })
+```
+
+Exact interaction picking uses the backend's ordinary pick. Proximity uses a renderer-owned screen bound or pick proxy and a
+finite `0..256` CSS-pixel radius; zero is exact-hit mode. The radius is not a world-space distance or pen altitude. The world
+ray is finite plain data with a normalized direction and supports perspective and orthographic cameras.
+
+`createPointerInteractionController(...)` defaults to primary/secondary buttons `0/2`, a `4` CSS-pixel drag threshold,
+`350 ms` and `6` CSS pixels for double-click matching, and a `12` CSS-pixel proximity radius. `claim(sample)` synchronously
+returns an opaque token or `null`. A claim captures and isolates that pointer sequence from camera controls; an unclaimed
+sequence and all proximity observation pass through unchanged. A claimed secondary sequence suppresses only its corresponding
+native `contextmenu`.
+
+A primary selectable target released within threshold emits click; the second matching click is delivered first as click and
+then double-click. Crossing threshold on a drag source emits exactly one drag-grab, later moves emit drag-move, and normal
+release emits exactly one drag-drop. Cancellation never masquerades as drop. Drag move/drop expose the current exact target;
+the application inspects `drop-target` or `drop-surface` and decides validity.
+
+Idle mouse and hovering-pen moves can emit proximity; touch and a pen in contact never synthesize it. Proximity has no token,
+capture or propagation side effect. Each accepted Pointer Event performs at most one interaction query and one world-ray query,
+retains only bounded active state, schedules no RAF, and mutates no Node. Component/session/backend/disposal boundaries clear
+active state exactly once. Samples and callbacks are browser-local, outside the commit/ACK barrier, and create no Wire or Replay
+record. See the [complete implementation contract and tests](pointer-interaction-plan.md).
 
 ## Render-state validation before seal
 

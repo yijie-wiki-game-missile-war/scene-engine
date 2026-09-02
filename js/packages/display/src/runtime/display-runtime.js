@@ -20,6 +20,14 @@ import { DisplayRuntimeError, fail, healthEvent } from './health.js';
 import { PrefabInstantiator } from './prefab-instantiator.js';
 import { Scene } from './scene.js';
 import { SceneLoader } from './scene-loader.js';
+import {
+  pointerQuery,
+  proximityQuery,
+  normalizeWorldRay,
+  resolveInteractionPick,
+} from '../interaction/interaction-picking.js';
+import { PointerTargetComponent } from '../interaction/pointer-target-component.js';
+import { notifyInteractionRuntimeLifecycle } from '../interaction/runtime-lifecycle.js';
 
 export const DISPLAY_RUNTIME_SCHEMA = 'scene-engine-display-node@9';
 export const DISPLAY_SUMMARY_SCHEMA = 'scene-engine-display-summary@1';
@@ -303,6 +311,31 @@ export class DisplayRuntime {
   }
   currentView() { this._assertNotDisposed(); return new DisplayView(this); }
   pick(query) { this._assertNotDisposed(); return this._renderSystem.pick(query); }
+  pickInteraction(query) {
+    this._assertNotDisposed();
+    const normalized = pointerQuery(query, 'display-interaction-query-invalid');
+    return resolveInteractionPick(
+      this,
+      this._nodeIndex,
+      this._renderSystem.pick(normalized),
+    );
+  }
+  pickInteractionProximity(query) {
+    this._assertNotDisposed();
+    const normalized = proximityQuery(query);
+    return resolveInteractionPick(
+      this,
+      this._nodeIndex,
+      this._renderSystem.pickProximity(normalized),
+      { proximity: true, radiusPixels: normalized.radiusPixels },
+    );
+  }
+  screenPointToWorldRay(query) {
+    this._assertNotDisposed();
+    return normalizeWorldRay(this._renderSystem.screenPointToWorldRay(
+      pointerQuery(query, 'display-world-ray-query-invalid'),
+    ));
+  }
   projectWorldPoint(point) {
     this._assertNotDisposed(); return this._renderSystem.projectWorldPoint(point);
   }
@@ -326,6 +359,7 @@ export class DisplayRuntime {
     this._assertNotDisposed();
     if (!this._installed) fail('display-scene-not-installed');
     if (this._rebuildPromise !== null) return this._rebuildPromise;
+    notifyInteractionRuntimeLifecycle(this, Object.freeze({ kind: 'backend-rebuild' }));
     const wasRunning = this._running;
     this.stop();
     let operation;
@@ -348,6 +382,7 @@ export class DisplayRuntime {
         await this._renderSystem.rebuildBackend(candidate);
         candidate = null;
         if (this._disposed) return;
+        notifyInteractionRuntimeLifecycle(this, Object.freeze({ kind: 'backend-ready' }));
         if (this._health !== 'projection-invalid') this._health = 'ready';
         if (wasRunning) this.start();
       } catch (error) {
@@ -374,6 +409,7 @@ export class DisplayRuntime {
 
   dispose() {
     if (this._disposePromise !== null) return this._disposePromise;
+    notifyInteractionRuntimeLifecycle(this, Object.freeze({ kind: 'runtime-disposed' }));
     this.stop();
     this._drawGateOpen = false;
     this._pendingCursor = null;
@@ -509,6 +545,12 @@ export class DisplayRuntime {
       this._scheduler.setEnabled(component, component.enabled);
       this._panelAnchorSourceChanged(component);
     }
+    if (component instanceof PointerTargetComponent) {
+      notifyInteractionRuntimeLifecycle(this, Object.freeze({
+        kind: 'component-changed', component, reason: component.enabled
+          ? 'target-changed' : 'target-disabled',
+      }));
+    }
     this.requestDraw();
   }
   _componentPropertiesChanged(component) {
@@ -517,9 +559,19 @@ export class DisplayRuntime {
       this._animationSystem.targetPropertiesChanged(component);
       this._renderSystem.markComponentDirty(component);
     } else this._panelAnchorSourceChanged(component);
+    if (component instanceof PointerTargetComponent) {
+      notifyInteractionRuntimeLifecycle(this, Object.freeze({
+        kind: 'component-changed', component, reason: 'target-role-removed',
+      }));
+    }
     this.requestDraw();
   }
   _componentDetaching(component) {
+    if (component instanceof PointerTargetComponent) {
+      notifyInteractionRuntimeLifecycle(this, Object.freeze({
+        kind: 'component-changed', component, reason: 'target-removed',
+      }));
+    }
     if (component instanceof AnimationPlayerComponent) this._animationSystem.unregister(component);
     else if (component instanceof RenderComponent) this._renderSystem.unregister(component);
     else {

@@ -38,6 +38,11 @@ export {
 
 export { BillboardComponent } from './behaviours/billboard.js';
 export { LookAtComponent } from './behaviours/look-at.js';
+export {
+  POINTER_TARGET_ROLES,
+  PointerTargetComponent,
+} from './interaction/pointer-target-component.js';
+export { createPointerInteractionController } from './interaction/pointer-interaction-controller.js';
 
 export {
   ANIMATION_RESOURCE_SCHEMA,

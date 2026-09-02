@@ -257,6 +257,16 @@ export class RenderSystem {
     this._assertHealthy();
     return this._runBackend('display-render-pick-failed', () => this._backend.pick(cloneAndFreeze(query)));
   }
+  pickProximity(query) {
+    this._assertHealthy();
+    return this._runBackend('display-render-proximity-pick-failed',
+      () => this._backend.pickProximity(cloneAndFreeze(query)));
+  }
+  screenPointToWorldRay(query) {
+    this._assertHealthy();
+    return this._runBackend('display-render-world-ray-failed',
+      () => this._backend.screenPointToWorldRay(cloneAndFreeze(query)));
+  }
   projectWorldPoint(point) {
     this._assertHealthy();
     return this._runBackend('display-render-project-failed',

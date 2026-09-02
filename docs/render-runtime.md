@@ -1,6 +1,6 @@
-# Three RenderBackend 0.12.0
+# Three RenderBackend 0.13.0
 
-`@scene-engine/renderer-three@0.12.0` is the browser composition-root implementation of Display's flat RenderBackendPort. Its
+`@scene-engine/renderer-three@0.13.0` is the browser composition-root implementation of Display's flat RenderBackendPort. Its
 root exports only:
 
 ```text
@@ -14,12 +14,13 @@ The package also publishes `src/index.d.ts`.
 ## Boundary
 
 The factory accepts DOM host, canvas, renderer profile, ResourceRegistry, lifecycle AbortSignal and a health observer. It returns
-13 methods used by DisplayRuntime:
+15 methods used by DisplayRuntime:
 
 ```text
 createBinding / updateBinding / destroyBinding
 prepareFrame / render / requestResize
-pick / projectWorldPoint / focusWorldPoint / capture
+pick / pickProximity / screenPointToWorldRay
+projectWorldPoint / focusWorldPoint / capture
 whenIdle / diagnostics / dispose
 ```
 
@@ -38,6 +39,7 @@ The backend schema is `scene-engine-three-render-backend@3`. Each `updateBinding
 `identity`, `worldMatrix`, `panelAnchorWorld`, `visible`, `batchable`, and `properties`. The anchor is a finite world-space vec3 or `null`;
 only `render.sprite@3` may have a non-null anchor. `batchable` is a strict boolean port flag set by Display: `false` while the
 Display AnimationSystem owns a transient override for the binding, `true` otherwise. It is not a public Sprite property.
+The two pointer-query methods extend the port without changing the binding record or backend schema.
 
 Display passes its NodeGraph-computed world matrix, the derived panel anchor, logical visibility and already normalized closed
 component properties. Display must reject invalid business records before commit seal; the backend repeats defensive
@@ -117,8 +119,41 @@ never rebuild them. Model handles no longer create an animation mixer, Sprite ha
 animation Resources are Display data that the renderer never loads.
 
 `prepareFrame(frame)` consumes dirty bindings and the active camera; parameterless `render()` performs the requested draw from
-that prepared state. Picking returns plain
-`{nodeName, componentKey, point, distance}` data or `null`; project/focus/capture/diagnostics also return plain data only.
+that prepared state. Exact picking returns plain `{nodeName, componentKey, point, distance}` data or `null`;
+project/focus/capture/diagnostics also return plain data only.
+
+## Pointer queries
+
+`pickProximity({clientX, clientY, radiusPixels})` accepts finite client coordinates and a finite CSS-pixel radius from `0` to
+`256`. Radius `0` uses the existing exact-pick target semantics and returns that binding with `screenDistancePixels: 0` and the
+hit point's normalized-device depth. It is therefore the exact-hit mode, not a special nonzero tolerance.
+
+For a positive radius, the backend tests every current visible, pickable logical binding against the renderer-owned projected
+screen bounds or pick proxy for its effective ordinary, batched or compensated representation. It measures the shortest CSS
+pixel distance from the pointer to that proxy, rejects distances beyond the radius, then orders candidates by
+`screenDistancePixels`, normalized-device `depth`, and stable `(nodeName, componentKey)` identity. The result is frozen plain
+data or `null`:
+
+```js
+{ nodeName, componentKey, screenDistancePixels, depth }
+```
+
+This is a screen-space interaction tolerance. It is not a world-space radius, pen altitude, pressure, or distance to an
+application-defined collider. Display owns ancestor target resolution and does not ask the renderer to interpret product
+roles or metadata.
+
+`screenPointToWorldRay({clientX, clientY})` uses the same host-element client-coordinate system and current active camera. It
+supports perspective and orthographic cameras and returns frozen finite plain data with a normalized direction:
+
+```js
+{ origin: [x, y, z], direction: [x, y, z] }
+```
+
+Both queries require an active camera, reject unknown input fields and never expose a Three object. Invalid screen-point,
+proximity, viewport and derived-ray records fail with bounded `three-backend-*` errors; a missing active camera remains
+`three-active-camera-required`. A Display pointer controller performs at most one `pickProximity` and one
+`screenPointToWorldRay` call for one accepted DOM event; the renderer does not schedule a second loop or retain gesture
+history.
 
 Backend health can trigger `DisplayRuntime.rebuildRenderBackend()`, which preserves Display Node/Component identity and remounts
 bindings. Disposal aborts pending work and releases renderer, geometry, material, texture, binding and listener ownership.

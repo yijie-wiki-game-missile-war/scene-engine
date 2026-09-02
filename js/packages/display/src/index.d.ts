@@ -532,6 +532,38 @@ export interface PickHit {
   readonly distance: number;
 }
 
+export interface ProximityPickHit {
+  readonly nodeName: string;
+  readonly componentKey: string;
+  readonly screenDistancePixels: number;
+  readonly depth: number;
+}
+
+export interface WorldRay {
+  readonly origin: Vec3;
+  readonly direction: Vec3;
+}
+
+export type PointerTargetRole = 'proximity' | 'select' | 'drag-source'
+  | 'drop-surface' | 'drop-target';
+
+export interface InteractionTarget {
+  readonly nodeName: string;
+  readonly authorityOwnerName: string | null;
+  readonly roles: readonly PointerTargetRole[];
+  readonly data: JSONRecord;
+}
+
+export interface InteractionPick {
+  readonly hit: PickHit;
+  readonly target: InteractionTarget | null;
+}
+
+export interface InteractionProximityPick {
+  readonly hit: ProximityPickHit;
+  readonly target: InteractionTarget | null;
+}
+
 export interface WorldPointProjection {
   readonly clientX: number;
   readonly clientY: number;
@@ -554,6 +586,12 @@ export interface RenderBackendPort {
   render(): undefined;
   requestResize(): unknown;
   pick(query: Readonly<{ clientX: number; clientY: number }>): PickHit | null;
+  pickProximity(query: Readonly<{
+    clientX: number;
+    clientY: number;
+    radiusPixels: number;
+  }>): ProximityPickHit | null;
+  screenPointToWorldRay(query: Readonly<{ clientX: number; clientY: number }>): WorldRay;
   projectWorldPoint(point: Readonly<{ position: Vec3 }>): WorldPointProjection;
   focusWorldPoint(target: Readonly<{ position: Vec3; radius: number }>): WorldPointFocus;
   capture(): unknown;
@@ -626,12 +664,77 @@ export class DisplayRuntime {
   summary(): DisplaySummary;
   currentView(): DisplayView;
   pick(query: Readonly<{ clientX: number; clientY: number }>): PickHit | null;
+  pickInteraction(query: Readonly<{
+    clientX: number;
+    clientY: number;
+  }>): InteractionPick | null;
+  pickInteractionProximity(query: Readonly<{
+    clientX: number;
+    clientY: number;
+    radiusPixels: number;
+  }>): InteractionProximityPick | null;
+  screenPointToWorldRay(query: Readonly<{ clientX: number; clientY: number }>): WorldRay;
   projectWorldPoint(point: Readonly<{ position: Vec3 }>): WorldPointProjection;
   focusWorldPoint(target: Readonly<{ position: Vec3; radius: number }>): WorldPointFocus;
   capture(): Readonly<Record<string, unknown>>;
   rebuildRenderBackend(): Promise<void>;
   dispose(): Promise<void>;
 }
+
+export type PointerInteractionPhase = 'press' | 'click' | 'context-click' | 'double-click'
+  | 'drag-grab' | 'drag-move' | 'drag-drop'
+  | 'proximity-enter' | 'proximity-move' | 'proximity-leave' | 'cancel';
+
+export interface PointerInteractionSample {
+  readonly phase: PointerInteractionPhase;
+  readonly reason?: string;
+  readonly pointerId: number;
+  readonly pointerType: string;
+  readonly button: number;
+  readonly buttons: number;
+  readonly clientX: number;
+  readonly clientY: number;
+  readonly startClientX: number;
+  readonly startClientY: number;
+  readonly deltaClientX: number;
+  readonly deltaClientY: number;
+  readonly startInteraction: InteractionPick | InteractionProximityPick | null;
+  readonly currentInteraction: InteractionPick | InteractionProximityPick | null;
+  readonly worldRay: WorldRay;
+}
+
+export interface PointerInteractionControllerOptions<Token = unknown> {
+  readonly element: Element;
+  readonly runtime: () => DisplayRuntime | null;
+  readonly claim: (sample: PointerInteractionSample) => Token | null;
+  readonly primaryButton?: number;
+  readonly secondaryButton?: number;
+  readonly dragThresholdPixels?: number;
+  readonly doubleClickIntervalMs?: number;
+  readonly doubleClickDistancePixels?: number;
+  readonly proximityRadiusPixels?: number;
+  readonly onPress?: (token: Token, sample: PointerInteractionSample) => void;
+  readonly onClick?: (token: Token, sample: PointerInteractionSample) => void;
+  readonly onContextClick?: (token: Token, sample: PointerInteractionSample) => void;
+  readonly onDoubleClick?: (token: Token, sample: PointerInteractionSample) => void;
+  readonly onDragGrab?: (token: Token, sample: PointerInteractionSample) => void;
+  readonly onDragMove?: (token: Token, sample: PointerInteractionSample) => void;
+  readonly onDragDrop?: (token: Token, sample: PointerInteractionSample) => void;
+  readonly onProximityEnter?: (sample: PointerInteractionSample) => void;
+  readonly onProximityMove?: (sample: PointerInteractionSample) => void;
+  readonly onProximityLeave?: (sample: PointerInteractionSample) => void;
+  readonly onCancel?: (token: Token, sample: PointerInteractionSample) => void;
+  readonly onError?: (error: unknown) => void;
+}
+
+export interface PointerInteractionController {
+  readonly disposed: boolean;
+  dispose(): void;
+}
+
+export function createPointerInteractionController<Token = unknown>(
+  options: PointerInteractionControllerOptions<Token>,
+): PointerInteractionController;
 
 export class DisplayRuntimeError extends Error {
   readonly code: string;
@@ -651,6 +754,18 @@ export class PointLightComponent extends RenderComponent { static readonly typeI
 export class SpotLightComponent extends RenderComponent { static readonly typeId: 'render.spot-light@1'; }
 export class BillboardComponent extends BehaviourComponent { static readonly typeId: 'behavior.billboard@2'; static readonly tickPhase: 'before-render'; static readonly drivesTransform: true; }
 export class LookAtComponent extends BehaviourComponent { static readonly typeId: 'behavior.look-at@1'; static readonly tickPhase: 'before-render'; static readonly drivesTransform: true; }
+export class PointerTargetComponent extends Component {
+  static readonly typeId: 'interaction.pointer-target@1';
+  static readonly allowMultiple: false;
+  readonly properties: Readonly<{
+    roles: readonly PointerTargetRole[];
+    data: JSONRecord;
+  }>;
+}
+
+export const POINTER_TARGET_ROLES: readonly [
+  'proximity', 'select', 'drag-source', 'drop-surface', 'drop-target',
+];
 
 export const TICKS_PER_SECOND: 60;
 export const DISPLAY_RUNTIME_SCHEMA: 'scene-engine-display-node@9';

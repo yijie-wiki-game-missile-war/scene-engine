@@ -2,6 +2,7 @@ import * as THREE from 'three';
 
 import { THREE_RENDER_BACKEND_SCHEMA } from './constants.js';
 import { ThreeRenderBackendError, fail } from './errors.js';
+import { compensatePanelViewPoint } from './panel-projection.js';
 import { ResourceManager } from './resource-manager.js';
 import {
   DEFAULT_THREE_IMPLEMENTATION,
@@ -16,11 +17,18 @@ import {
   normalizeOptions,
   normalizePick,
   normalizePoint,
+  normalizeProximity,
+  normalizeScreenPoint,
   normalizeUpdatePatch,
   stableData,
 } from './validation.js';
 
 const ZERO_MATRIX = new THREE.Matrix4().makeScale(0, 0, 0);
+const BOX_EDGES = Object.freeze([
+  [0, 1], [2, 3], [4, 5], [6, 7],
+  [0, 2], [1, 3], [4, 6], [5, 7],
+  [0, 4], [1, 5], [2, 6], [3, 7],
+].map((edge) => Object.freeze(edge)));
 
 export class ThreeRenderBackend {
   constructor(options, implementation = DEFAULT_THREE_IMPLEMENTATION) {
@@ -313,6 +321,77 @@ export class ThreeRenderBackend {
       });
     }
     return null;
+  }
+
+  screenPointToWorldRay(value) {
+    this._assertOpen();
+    const query = normalizeScreenPoint(value);
+    const camera = this._activeCamera?.handle.camera;
+    if (!camera) fail('three-active-camera-required');
+    const rect = viewportRect(this._hostElement);
+    camera.updateWorldMatrix(true, false);
+    const raycaster = new THREE.Raycaster();
+    raycaster.setFromCamera(clientPointToNdc(query, rect), camera);
+    const origin = raycaster.ray.origin.toArray();
+    const direction = raycaster.ray.direction.normalize().toArray();
+    if (!origin.every(Number.isFinite) || !direction.every(Number.isFinite)
+        || Math.abs(new THREE.Vector3(...direction).length() - 1) > 1e-12) {
+      fail('three-backend-world-ray-invalid');
+    }
+    return Object.freeze({
+      origin: Object.freeze(origin),
+      direction: Object.freeze(direction),
+    });
+  }
+
+  pickProximity(value) {
+    this._assertOpen();
+    const query = normalizeProximity(value);
+    const camera = this._activeCamera?.handle.camera;
+    if (!camera) fail('three-active-camera-required');
+    camera.updateWorldMatrix(true, false);
+
+    // A zero-radius query is the exact renderer pick, not a projected-bounds
+    // approximation. This keeps its target semantics identical to pick().
+    if (query.radiusPixels === 0) {
+      const hit = this.pick({ clientX: query.clientX, clientY: query.clientY });
+      if (hit === null) return null;
+      const depth = new THREE.Vector3(...hit.point).project(camera).z;
+      if (!Number.isFinite(depth)) return null;
+      return Object.freeze({
+        nodeName: hit.nodeName,
+        componentKey: hit.componentKey,
+        screenDistancePixels: 0,
+        depth,
+      });
+    }
+
+    const rect = viewportRect(this._hostElement);
+    const candidates = [];
+    for (const record of this._bindings.values()) {
+      if (!record.visible || !record.handle.pickable || !record.handle.object
+          || record.destroyed) continue;
+      const bounds = projectedBindingBounds(record, camera, rect);
+      if (bounds === null) continue;
+      const screenDistancePixels = distanceToBounds(
+        query.clientX, query.clientY, bounds,
+      );
+      if (screenDistancePixels > query.radiusPixels) continue;
+      candidates.push({
+        record,
+        screenDistancePixels,
+        depth: bounds.depth,
+      });
+    }
+    candidates.sort(compareProximityCandidates);
+    const selected = candidates[0];
+    if (!selected) return null;
+    return Object.freeze({
+      nodeName: selected.record.identity.nodeName,
+      componentKey: selected.record.identity.componentKey,
+      screenDistancePixels: selected.screenDistancePixels,
+      depth: selected.depth,
+    });
   }
 
   projectWorldPoint(value) {
@@ -782,8 +861,8 @@ export function createThreeRenderBackend(options) {
   const implementation = new ThreeRenderBackend(options);
   return Object.freeze(Object.fromEntries([
     'createBinding', 'updateBinding', 'destroyBinding', 'prepareFrame', 'render',
-    'requestResize', 'pick', 'projectWorldPoint', 'focusWorldPoint', 'capture',
-    'whenIdle', 'diagnostics', 'dispose',
+    'requestResize', 'pick', 'screenPointToWorldRay', 'pickProximity',
+    'projectWorldPoint', 'focusWorldPoint', 'capture', 'whenIdle', 'diagnostics', 'dispose',
   ].map((method) => [method, implementation[method].bind(implementation)])));
 }
 
@@ -815,6 +894,145 @@ function pointWithinCameraDepth(point, camera) {
   const viewPoint = point.clone().applyMatrix4(camera.matrixWorldInverse);
   const depth = -viewPoint.z;
   return Number.isFinite(depth) && depth >= camera.near && depth <= camera.far;
+}
+function viewportRect(hostElement) {
+  let rect;
+  try { rect = hostElement.getBoundingClientRect(); } catch {
+    fail('three-backend-viewport-invalid');
+  }
+  const result = {
+    left: Number(rect?.left),
+    top: Number(rect?.top),
+    width: Number(rect?.width),
+    height: Number(rect?.height),
+  };
+  if (!Number.isFinite(result.left) || !Number.isFinite(result.top)
+      || !Number.isFinite(result.width) || result.width <= 0
+      || !Number.isFinite(result.height) || result.height <= 0) {
+    fail('three-backend-viewport-invalid');
+  }
+  return result;
+}
+function clientPointToNdc(query, rect) {
+  return new THREE.Vector2(
+    ((query.clientX - rect.left) / rect.width) * 2 - 1,
+    -((query.clientY - rect.top) / rect.height) * 2 + 1,
+  );
+}
+function projectedBindingBounds(record, camera, rect) {
+  const bounds = {
+    minX: Number.POSITIVE_INFINITY,
+    minY: Number.POSITIVE_INFINITY,
+    maxX: Number.NEGATIVE_INFINITY,
+    maxY: Number.NEGATIVE_INFINITY,
+    depth: Number.POSITIVE_INFINITY,
+    count: 0,
+  };
+  const anchorView = record.panelAnchorWorld === null ? null
+    : new THREE.Vector3(...record.panelAnchorWorld).applyMatrix4(camera.matrixWorldInverse);
+  const projectGeometry = (geometry, worldMatrix) => {
+    if (!geometry?.isBufferGeometry) return;
+    if (geometry.boundingBox === null) geometry.computeBoundingBox();
+    const box = geometry.boundingBox;
+    if (!finiteBox(box) || box.isEmpty()) return;
+    const viewCorners = Array.from({ length: 8 }, () => new THREE.Vector3());
+    for (let corner = 0; corner < 8; corner += 1) {
+      const point = viewCorners[corner].set(
+        corner & 1 ? box.max.x : box.min.x,
+        corner & 2 ? box.max.y : box.min.y,
+        corner & 4 ? box.max.z : box.min.z,
+      ).applyMatrix4(worldMatrix).applyMatrix4(camera.matrixWorldInverse);
+      if (anchorView !== null) {
+        compensatePanelViewPoint(point, anchorView, camera.isPerspectiveCamera, point);
+      }
+    }
+    const projected = new THREE.Vector3();
+    const includeViewPoint = (point) => {
+      const viewDepth = -point.z;
+      if (!Number.isFinite(viewDepth) || viewDepth < camera.near || viewDepth > camera.far) return;
+      projected.copy(point).applyMatrix4(camera.projectionMatrix);
+      if (![projected.x, projected.y, projected.z].every(Number.isFinite)) return;
+      const clientX = rect.left + (projected.x + 1) * rect.width / 2;
+      const clientY = rect.top + (1 - projected.y) * rect.height / 2;
+      bounds.minX = Math.min(bounds.minX, clientX);
+      bounds.minY = Math.min(bounds.minY, clientY);
+      bounds.maxX = Math.max(bounds.maxX, clientX);
+      bounds.maxY = Math.max(bounds.maxY, clientY);
+      bounds.depth = Math.min(bounds.depth, projected.z);
+      bounds.count += 1;
+    };
+    for (const point of viewCorners) includeViewPoint(point);
+
+    // A visible box can cross both clipping planes while every original
+    // corner lies outside the camera depth interval. The clipped convex box
+    // gains vertices where its twelve edges meet near or far; include those
+    // vertices so the projected proxy cannot disappear at either plane.
+    const clipped = new THREE.Vector3();
+    for (const [startIndex, endIndex] of BOX_EDGES) {
+      const start = viewCorners[startIndex]; const end = viewCorners[endIndex];
+      const startDepth = -start.z; const endDepth = -end.z;
+      if (!Number.isFinite(startDepth) || !Number.isFinite(endDepth)
+          || startDepth === endDepth) continue;
+      for (const planeDepth of [camera.near, camera.far]) {
+        if ((startDepth < planeDepth && endDepth > planeDepth)
+            || (startDepth > planeDepth && endDepth < planeDepth)) {
+          clipped.lerpVectors(start, end, (planeDepth - startDepth) / (endDepth - startDepth));
+          clipped.z = -planeDepth;
+          includeViewPoint(clipped);
+        }
+      }
+    }
+  };
+
+  if (record.batched) {
+    const batch = record.batch;
+    if (!batch || batch.records[record.batchIndex] !== record) return null;
+    batch.object.updateWorldMatrix(true, false);
+    const instanceMatrix = new THREE.Matrix4();
+    batch.object.getMatrixAt(record.batchIndex, instanceMatrix);
+    if (instanceMatrix.elements.slice(0, 3).every((entry) => entry === 0)) return null;
+    const worldMatrix = new THREE.Matrix4().multiplyMatrices(
+      batch.object.matrixWorld, instanceMatrix,
+    );
+    projectGeometry(batch.object.geometry, worldMatrix);
+  } else {
+    record.handle.object.updateWorldMatrix(true, true);
+    updateVisibleLods(record.handle.object, camera);
+    record.handle.object.traverseVisible((object) => {
+      projectGeometry(object.geometry, object.matrixWorld);
+    });
+  }
+  return bounds.count === 0 ? null : bounds;
+}
+function finiteBox(box) {
+  return box?.isBox3 === true
+    && [box.min.x, box.min.y, box.min.z, box.max.x, box.max.y, box.max.z]
+      .every(Number.isFinite);
+}
+function updateVisibleLods(object, camera) {
+  if (!object.visible) return;
+  if (object.isLOD && object.autoUpdate) object.update(camera);
+  for (const child of object.children) updateVisibleLods(child, camera);
+}
+function distanceToBounds(clientX, clientY, bounds) {
+  const deltaX = clientX < bounds.minX ? bounds.minX - clientX
+    : (clientX > bounds.maxX ? clientX - bounds.maxX : 0);
+  const deltaY = clientY < bounds.minY ? bounds.minY - clientY
+    : (clientY > bounds.maxY ? clientY - bounds.maxY : 0);
+  return Math.hypot(deltaX, deltaY);
+}
+function compareProximityCandidates(left, right) {
+  if (left.screenDistancePixels !== right.screenDistancePixels) {
+    return left.screenDistancePixels - right.screenDistancePixels;
+  }
+  if (left.depth !== right.depth) return left.depth - right.depth;
+  const leftIdentity = left.record.identity;
+  const rightIdentity = right.record.identity;
+  if (leftIdentity.nodeName !== rightIdentity.nodeName) {
+    return leftIdentity.nodeName < rightIdentity.nodeName ? -1 : 1;
+  }
+  if (leftIdentity.componentKey === rightIdentity.componentKey) return 0;
+  return leftIdentity.componentKey < rightIdentity.componentKey ? -1 : 1;
 }
 function positiveDimension(value) { const number = Number(value); return Number.isFinite(number) && number > 0
   ? Math.max(1, Math.round(number)) : 1; }

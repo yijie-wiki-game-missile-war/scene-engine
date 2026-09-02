@@ -8,6 +8,8 @@ const REQUIRED_METHODS = Object.freeze([
   'render',
   'requestResize',
   'pick',
+  'pickProximity',
+  'screenPointToWorldRay',
   'projectWorldPoint',
   'focusWorldPoint',
   'capture',

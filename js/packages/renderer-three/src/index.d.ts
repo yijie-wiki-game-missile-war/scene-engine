@@ -30,6 +30,18 @@ export interface PickHit {
   readonly distance: number;
 }
 
+export interface WorldRay {
+  readonly origin: Vec3;
+  readonly direction: Vec3;
+}
+
+export interface ProximityHit {
+  readonly nodeName: string;
+  readonly componentKey: string;
+  readonly screenDistancePixels: number;
+  readonly depth: number;
+}
+
 export interface WorldPointProjection {
   readonly clientX: number;
   readonly clientY: number;
@@ -54,6 +66,15 @@ export interface ThreeRenderBackendPort {
   render(): undefined;
   requestResize(): unknown;
   pick(value: Readonly<{ clientX: number; clientY: number }>): PickHit | null;
+  screenPointToWorldRay(value: Readonly<{
+    clientX: number;
+    clientY: number;
+  }>): WorldRay;
+  pickProximity(value: Readonly<{
+    clientX: number;
+    clientY: number;
+    radiusPixels: number;
+  }>): ProximityHit | null;
   projectWorldPoint(value: Readonly<{ position: Vec3 }>): WorldPointProjection;
   focusWorldPoint(value: Readonly<{ position: Vec3; radius: number }>): WorldPointFocus;
   capture(): unknown;

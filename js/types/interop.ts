@@ -12,6 +12,7 @@ import {
   createComponentRegistry,
   createDisplayKindRegistry,
   createDisplayRuntime,
+  createPointerInteractionController,
   createPrefabRegistry,
   createResourceRegistry,
   createSceneRegistry,
@@ -20,6 +21,7 @@ import {
   type DisplayRuntimeOptions,
   type DisplayView,
   type PrefabStatePatch,
+  type PointerInteractionSample,
   type PublicDisplayContext,
   type RenderBackendPort,
   type Vec3,
@@ -32,6 +34,7 @@ import {
 
 declare const hostElement: unknown;
 declare const canvas: unknown;
+declare const pointerElement: Element;
 
 const authoredTransform: DisplayTransformValue = DisplayTransform.fromTRS({
   position: [1, 2, 3],
@@ -119,19 +122,54 @@ const contextCopy: false | typeof transformOutput =
 void [contextWorld, contextCopy];
 
 declare const runtime: ReturnType<typeof createDisplayRuntime>;
-function inspectQueries(queries: Pick<RenderBackendPort, 'pick' | 'projectWorldPoint' | 'focusWorldPoint'>) {
+function inspectQueries(queries: Pick<RenderBackendPort,
+  'pick' | 'pickProximity' | 'screenPointToWorldRay'
+  | 'projectWorldPoint' | 'focusWorldPoint'>) {
   const hit = queries.pick({ clientX: 0, clientY: 0 });
   if (hit !== null) {
     const name: string = hit.nodeName;
     const distance: number = hit.distance;
     void [name, distance];
   }
+  const proximity = queries.pickProximity({ clientX: 0, clientY: 0, radiusPixels: 12 });
+  const direction: Vec3 = queries.screenPointToWorldRay({ clientX: 0, clientY: 0 }).direction;
   const clientX: number = queries.projectWorldPoint({ position: [0, 0, 0] }).clientX;
   const position: Vec3 = queries.focusWorldPoint({ position: [0, 0, 0], radius: 1 }).position;
-  void [clientX, position];
+  void [proximity?.screenDistancePixels, direction, clientX, position];
 }
-inspectQueries(runtime);
 inspectQueries(threeBackend);
+
+const interaction = runtime.pickInteraction({ clientX: 0, clientY: 0 });
+const nearbyInteraction = runtime.pickInteractionProximity({
+  clientX: 0,
+  clientY: 0,
+  radiusPixels: 12,
+});
+const runtimeRayDirection: Vec3 = runtime.screenPointToWorldRay({
+  clientX: 0,
+  clientY: 0,
+}).direction;
+void [interaction?.target?.data, nearbyInteraction?.hit.screenDistancePixels,
+  runtimeRayDirection];
+
+const pointerController = createPointerInteractionController({
+  element: pointerElement,
+  runtime: () => runtime,
+  claim(sample) {
+    const phase: PointerInteractionSample['phase'] = sample.phase;
+    return phase === 'press' ? { selected: true } : null;
+  },
+  onDragGrab(token, sample) { void [token.selected, sample.startInteraction]; },
+  onDragMove(token, sample) { void [token.selected, sample.currentInteraction]; },
+  onDragDrop(token, sample) { void [token.selected, sample.worldRay.direction]; },
+  onClick(token) { void token.selected; },
+  onContextClick(token) { void token.selected; },
+  onDoubleClick(token) { void token.selected; },
+  onProximityEnter(sample) { void sample.currentInteraction; },
+  onProximityMove(sample) { void sample.deltaClientX; },
+  onProximityLeave(sample) { void sample.reason; },
+});
+pointerController.dispose();
 
 const prefab = definePrefab({
   schema: PREFAB_DEFINITION_SCHEMA,

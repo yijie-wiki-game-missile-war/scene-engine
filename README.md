@@ -25,6 +25,8 @@ Scene Engine 是面向**服务端权威浏览器游戏**的运行时基础设施
   旋转、缩放和点/向量空间转换，而不引入第二份 TRS 状态。
 - **浏览器 3D 渲染**：当前由隔离的 Three.js 后端负责资源加载、批处理、绘制、拾取、坐标投影、聚焦和截图，
   产品与美术定义不需要直接依赖 Three.js 对象。
+- **统一指针交互**：Display 把点击、右键点击、双击、拖动抓取/移动/放下和带 CSS 像素半径的靠近生命周期
+  归一为 renderer-neutral 事件；应用仍负责认领、相机仲裁和把结果映射为产品输入。
 - **玩法与视觉分离**：玩法发布权威状态与真实运动；需要跨 checkpoint 存续的“死亡”等事实使用属性，一次性的
   “爆炸”“受击”通知使用事件，由显示端映射为动画或局部表现。视觉采样进度不回写权威世界。
 - **录制与 Replay**：精确记录权威数据，并通过与实时运行相同的 Client 和 Display 路径回放，用于权威状态与
@@ -86,6 +88,7 @@ Scene Engine 不负责：
 - [Runtime 与固定 60 Hz](docs/runtime.md)
 - [Client 与状态同步](docs/client.md)
 - [Display、Prefab 与 Component](docs/display.md)
+- [指针交互方案与合同](docs/pointer-interaction-plan.md)
 - [显示端动画](docs/display-animation.md)
 - [Three 渲染后端](docs/render-runtime.md)
 - [Recording 与 Replay](docs/recording-replay.md)

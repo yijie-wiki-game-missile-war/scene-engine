@@ -37,6 +37,10 @@ export function createFakeRenderBackend({ asyncCreate = false, asyncDestroy = fa
     render() { draws += 1; calls.push(['render']); },
     requestResize() { calls.push(['resize']); },
     pick() { return null; },
+    pickProximity() { return null; },
+    screenPointToWorldRay() {
+      return { origin: [0, 0, 0], direction: [0, 0, -1] };
+    },
     projectWorldPoint({ position }) { return { x: position[0], y: position[1], visible: true }; },
     focusWorldPoint(target) { calls.push(['focus', target]); },
     capture() { return { bindingCount: bindings.size, draws, disposed }; },

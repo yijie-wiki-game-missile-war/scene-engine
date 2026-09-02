@@ -164,6 +164,13 @@
       "eventNames": []
     },
     {
+      "typeId": "interaction.pointer-target@1",
+      "allowMultiple": false,
+      "tickPhase": null,
+      "drivesTransform": false,
+      "eventNames": []
+    },
+    {
       "typeId": "render.ambient-light@1",
       "allowMultiple": true,
       "tickPhase": null,

@@ -12,6 +12,8 @@ const CREATE_KEYS = Object.freeze(new Set([
   'signal',
 ]));
 
+export const MAX_PROXIMITY_RADIUS_PIXELS = 256;
+
 export function normalizeOptions(value) {
   const record = exactRecord(value, OPTION_KEYS, 'three-backend-options-invalid');
   for (const key of ['hostElement', 'canvas', 'rendererProfile', 'resourceRegistry']) {
@@ -142,6 +144,30 @@ export function normalizePick(value) {
     fail('three-backend-pick-invalid');
   }
   return Object.freeze({ clientX: record.clientX, clientY: record.clientY });
+}
+
+export function normalizeScreenPoint(value) {
+  const record = exactRecord(value, new Set(['clientX', 'clientY']),
+    'three-backend-screen-point-invalid');
+  if (Object.keys(record).length !== 2 || !finite(record.clientX) || !finite(record.clientY)) {
+    fail('three-backend-screen-point-invalid');
+  }
+  return Object.freeze({ clientX: record.clientX, clientY: record.clientY });
+}
+
+export function normalizeProximity(value) {
+  const record = exactRecord(value, new Set(['clientX', 'clientY', 'radiusPixels']),
+    'three-backend-proximity-invalid');
+  if (Object.keys(record).length !== 3 || !finite(record.clientX) || !finite(record.clientY)
+      || !nonnegativeFinite(record.radiusPixels)
+      || record.radiusPixels > MAX_PROXIMITY_RADIUS_PIXELS) {
+    fail('three-backend-proximity-invalid');
+  }
+  return Object.freeze({
+    clientX: record.clientX,
+    clientY: record.clientY,
+    radiusPixels: record.radiusPixels === 0 ? 0 : record.radiusPixels,
+  });
 }
 
 export function clonePlainData(value, code, seen = new Set()) {

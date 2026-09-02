@@ -15,6 +15,7 @@ import { BehaviourComponent } from './behaviour-component.js';
 import { Component, replaceComponentProperties } from './component.js';
 import { RenderComponent } from '../render/render-component.js';
 import { RENDER_COMPONENT_DESCRIPTORS } from '../render/components.js';
+import { POINTER_TARGET_COMPONENT_DESCRIPTOR } from '../interaction/pointer-target-component.js';
 
 const FINAL_METHODS = ['attach', 'setEnabled', 'setDrivenLocalTransform', 'setAnimation',
   'playAnimation', 'stopAnimation', '_animationCommand', '_adoptContext',
@@ -236,6 +237,7 @@ export function createComponentRegistry({ includeBuiltIns = true } = {}) {
     registry.register(ANIMATION_PLAYER_COMPONENT_DESCRIPTOR);
     registry.register(BILLBOARD_COMPONENT_DESCRIPTOR);
     registry.register(LOOK_AT_COMPONENT_DESCRIPTOR);
+    registry.register(POINTER_TARGET_COMPONENT_DESCRIPTOR);
   }
   return registry;
 }
