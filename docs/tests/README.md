@@ -1,17 +1,17 @@
 # 测试项目
 
-本页列出根级全量命令当前发现或调用的测试项目。测试数量随合同演进，不在文档中固定；新增、删除或重命名
-项目时更新本索引。测试方法、编写要求和唯一完成标准见[测试方法和标准](../testing.md)。
+本页列出仓库级测试命令当前发现或调用的测试项目。测试数量随合同演进，不在文档中固定；新增、删除或重命名
+项目时更新本索引。测试方法、编写要求和可用命令见[测试方法和标准](../testing.md)。
 
 ## 整体与性能测试分类
 
-| 类别 | 默认门禁中的小规模 smoke | 显式 runner |
+| 类别 | 仓库级命令中的小规模 smoke | 显式 runner |
 | --- | --- | --- |
 | Python Matrix4 操作与常驻成本 | `test_display.py` 与 `test_display_binary.py` 验证连续 NumPy 矩阵池、节点 ID、dirty tensor 和 exact binary32 编码。 | `benchmark_python_display_transform.py` 参数化操作次数、编码命令数和常驻矩阵池行数。 |
 | 显示引擎功能与性能 | `display-runtime-foundation.test.mjs`；`display-runtime-scale.test.mjs` 调用 12-binding deterministic smoke。 | `benchmark_display_runtime_scale.mjs` 运行 10k/30k/50k bindings；`benchmark_display_browser.mjs` 在真实 Chrome/WebGL 中运行。 |
 | 通讯性能 | `test_python_js_communication_e2e.py` 运行 32-root Python↔JavaScript roundtrip，并以小规模 windowed CLI smoke 检查 pending/in-flight。 | `benchmark_python_js_communication.py` 参数化 roots、commits、update ratio 和 roundtrip/windowed profile。 |
 
-默认 `uv run python -m pytest -q` 与 `npm test` 只执行表中的小规模确定性 smoke，不自动运行 Python Matrix4
+`uv run python -m pytest -q` 与 `npm test` 只执行表中的小规模确定性 smoke，不自动运行 Python Matrix4
 benchmark、10k/30k/50k 或 Chrome/WebGL runner。所有显式 runner 只向 stdout 输出 JSON，不创建或提交持久化
 性能报告、历史结果文件。时间数据当前用于观察，不设置跨机器硬阈值；各 runner 与自身范围对应的 correctness
 仍必须通过，状态与通讯 runner 另行检查结构、cursor、最终状态、健康和释放。
@@ -60,6 +60,7 @@ Python 测试由 `uv run python -m pytest -q` 按 `pyproject.toml` 的 `tests/` 
 | [`display-kind.test.mjs`](../../js/packages/display/test/display-kind.test.mjs) | Display Kind 0..N Prefab 映射、显式 selector/default、unknown/unimplemented/unresolved 空根、父子层级、有界 diagnostics、state/property 驱动替换/失去/恢复，以及 selector 异常失败关闭。 |
 | [`catalog-identity.test.mjs`](../../js/packages/display/test/catalog-identity.test.mjs) | canonical manifest、构建 artifact、SHA-256、注册顺序独立性、hash domain 隔离和 authority-state schema coverage。 |
 | [`component.test.mjs`](../../js/packages/display/test/component.test.mjs) | Component 同步生命周期、只读能力、pointer-target 封闭角色/JSON data、scheduler 快照、显式事件订阅与同步 handler、final 方法、transform driver 唯一性和资源校验后的原子属性替换。 |
+| [`composition.test.mjs`](../../js/packages/display/test/composition.test.mjs) | 选择性深度 plan 的封闭语法、目录校验、最近祖先 membership 继承、子 Node 覆写、动态更新以及非法组在 commit 内失败关闭。 |
 | [`pointer-interaction.test.mjs`](../../js/packages/display/test/pointer-interaction.test.mjs) | 最近启用 target 解析、点击/右键/双击、严格 drag-grab/move/drop、带半径 proximity、claim/相机隔离、九事件同一 authority Node 路由/input、目标/Session/捕获生命周期和监听器清理。 |
 | [`runtime.test.mjs`](../../js/packages/display/test/runtime.test.mjs) | Authority commit gate、Transform、完整 state 与顶层 property reconcile、Prefab event allowlist/路由/失败、world 溢出、Scene 安装、kind-driven materialization replacement、exact/radius interaction query、world ray、summary/currentView、health、backend rebuild 和批量 dispose。 |
 | [`nested-prefab.test.mjs`](../../js/packages/display/test/nested-prefab.test.mjs) | 固定与动态嵌套 Prefab 展开、0..N diff、same-key/id 身份保留、失败零变更、递归释放和静态 Scene 初始化。 |
@@ -80,6 +81,7 @@ Python 测试由 `uv run python -m pytest -q` 按 `pyproject.toml` 的 `tests/` 
 | [`pointer-display-integration.test.mjs`](../../js/packages/renderer-three/test/pointer-display-integration.test.mjs) | 真实 DisplayRuntime、PointerTarget、Three backend 与相机监听器组合下的 proximity、drag-grab/move/drop、指针捕获、backend rebuild 取消和最终释放。 |
 | [`resource-lifecycle.test.mjs`](../../js/packages/renderer-three/test/resource-lifecycle.test.mjs) | pending load 去重与共享 AbortSignal 扇出取消、资源依赖回收、mesh/texture/model 处理、health envelope、GLTF 部分失败、destroy/recreate 和 backend replacement 释放。 |
 | [`batch-representation.test.mjs`](../../js/packages/renderer-three/test/batch-representation.test.mjs) | ordinary object 与 InstancedMesh 唯一表示、scene traversal 排除、dirty matrix update range、保守 batch bounds、microtask Node root 与多 batch-group 批量回收、可见性、batch 重建、资源替换、pick、capture 和 diagnostics 计数。 |
+| [`composition.test.mjs`](../../js/packages/renderer-three/test/composition.test.mjs) | protected/ordinary/foreground 四遍 GPU 提交、protected depth 恢复、composition-aware exact/proximity picking、分组 batch key 和非法 membership 拒绝。 |
 | [`animation-port.test.mjs`](../../js/packages/renderer-three/test/animation-port.test.mjs) | 旧 renderer animation 字段拒绝、Animation Resource 不加载、animated sprite 退出静态 batch、frame 更新不 rebatch 和 eligibility transition。 |
 | [`display-integration.test.mjs`](../../js/packages/renderer-three/test/display-integration.test.mjs) | Display RenderSystem 驱动精确 Three backend port，并从声明式 binding 重建。 |
 | [`backend-500-lifecycle.test.mjs`](../../js/packages/renderer-three/test/backend-500-lifecycle.test.mjs) | 500 个真实 Three bindings 的 batching、frame sampling、backend rebuild、dispose 和最终零 resource lease。 |
@@ -89,7 +91,7 @@ Python 测试由 `uv run python -m pytest -q` 按 `pyproject.toml` 的 `tests/` 
 ## Python Matrix4 性能
 
 [`benchmark_python_display_transform.py`](../../scripts/benchmark_python_display_transform.py) 显式测量 Python
-`DisplayTransform` 的 NumPy Matrix4 操作、`DisplayMatrixPool` 的连续常驻表示和 binary dirty-batch 编码，不进入默认门禁。例如：
+`DisplayTransform` 的 NumPy Matrix4 操作、`DisplayMatrixPool` 的连续常驻表示和 binary dirty-batch 编码，不由仓库级测试命令调用。例如：
 
 ```bash
 uv run python scripts/benchmark_python_display_transform.py --iterations 100000 --repeats 7 --encode-commands 10000 --encode-repeats 7 --resident-count 100000
@@ -112,11 +114,11 @@ runner 失败。
 `DisplayRuntime → RenderSystem → ThreeRenderBackend` 路径。Node 环境只替换 WebGLRenderer 与资源入口为确定性测试实现；
 Three Scene、Object、Geometry、Material、Texture、binding、batching、资源租约和生命周期均走正式 backend。
 
-该测试随 `npm test` 运行，属于默认门禁的小规模功能 smoke。
+该测试随 `npm test` 运行，属于仓库级命令中的小规模功能 smoke。
 
 ### Scale runner 与 smoke
 
-[`display-runtime-scale.test.mjs`](../../js/packages/renderer-three/test/display-runtime-scale.test.mjs) 是默认门禁中的
+[`display-runtime-scale.test.mjs`](../../js/packages/renderer-three/test/display-runtime-scale.test.mjs) 是仓库级命令中的
 小规模 runner smoke。显式规模运行使用
 [`benchmark_display_runtime_scale.mjs`](../../scripts/benchmark_display_runtime_scale.mjs)，支持 `static-mesh`、
 `static-sprite`、`mixed`、`nested` 和 `animated-sprite` profile，最多 50,000 bindings。例如：
@@ -146,11 +148,11 @@ node scripts/benchmark_display_browser.mjs --bindings=10000 --ticks=120 --update
 它报告浏览器/GPU 信息、启动、`commitAndCpuSubmit` 分位数、binding/resource 状态与 dispose。
 `commitAndCpuSubmit` 覆盖 commit、Display prepare 和 WebGL CPU 命令提交，不是 GPU fence/presentation 时间或 FPS；Three
 `renderer.info.memory` 是驱动侧观测计数，释放判定以 backend binding/resource/pending/disposed 所有权字段为准。该
-runner 依赖本机 Chrome/GPU，不进入默认门禁，也不设置跨机器时间硬阈值。
+runner 依赖本机 Chrome/GPU，不由仓库级测试命令调用，也不设置跨机器时间硬阈值。
 
 ## 通讯性能
 
-[`test_python_js_communication_e2e.py`](../../tests/test_python_js_communication_e2e.py) 是默认门禁中的 32-root
+[`test_python_js_communication_e2e.py`](../../tests/test_python_js_communication_e2e.py) 是仓库级命令中的 32-root
 correctness smoke。它连接真实 Python `EngineProgram → SceneEngineRuntime`、exact Wire bytes、4-byte little-endian
 长度帧 Node 子进程、`SceneEngineClient → DisplayRuntime` 与 exact ACK 回程。Display 使用无资源 fake backend 和不执行
 回调的 frame adapter，因此结果不含 RAF、draw 或 renderer 时间。
@@ -181,7 +183,7 @@ ACK 读取队列等待，不能解释为孤立的 Wire/Client 处理时间。
 [`verify_display_leaks.mjs`](../../scripts/verify_display_leaks.mjs) 在一个进程内执行 authority create/remove 循环、
 RenderBackend 重建、异步 fault injection、动画 player 生命周期和完整 dispose，检查 Node、Component、scheduler、
 binding、resource lease、pending load 以及 Three geometry/material/texture 最终归零。根 `npm test` 统一调用该测试；
-它不是独立门禁，也不以持久化运行结果作为通过条件。
+它由根 `npm test` 调用，不以持久化运行结果作为通过条件。
 
 ## TypeScript 声明兼容
 

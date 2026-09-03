@@ -231,6 +231,7 @@ async function verifyAuthorityAndRebuildLifecycle() {
     id: 'main',
     sceneProfile: 'leak-matrix',
     rendererProfile: PROFILE,
+    compositionPlan: null,
     activeCameraLocalName: 'camera',
     nodes: [
       {
@@ -442,7 +443,7 @@ async function verifyAnimationPlayerLifecycle() {
   });
   const scene = defineScene({
     schema: SCENE_DEFINITION_SCHEMA, id: 'main', sceneProfile: 'leak-matrix-animation',
-    rendererProfile: PROFILE, activeCameraLocalName: 'camera',
+    rendererProfile: PROFILE, compositionPlan: null, activeCameraLocalName: 'camera',
     nodes: [{
       localName: 'camera', parentLocalName: null, transform: IDENTITY,
       components: [{ key: 'camera', type: 'render.camera@1', properties: CAMERA_PROPERTIES }],
@@ -642,6 +643,7 @@ async function verifyPendingBindingDispose() {
   const scene = defineScene({
     schema: SCENE_DEFINITION_SCHEMA,
     id: 'main', sceneProfile: 'leak-matrix-pending', rendererProfile: PROFILE,
+    compositionPlan: null,
     activeCameraLocalName: 'camera',
     nodes: [{
       localName: 'camera', parentLocalName: null, transform: IDENTITY,
@@ -714,6 +716,7 @@ function directBackend(descriptors, { onHealth = null, loadResource = loadThreeR
     hostElement: host(),
     canvas: { getContext: () => ({}), toDataURL: () => 'data:image/png;base64,' },
     rendererProfile: PROFILE,
+    compositionPlan: null,
     resourceRegistry: registry,
     onHealth,
   }, loadResource);
@@ -743,6 +746,7 @@ function modelDescriptor(nodeName, componentKey, modelResourceId, registry) {
     componentKey,
     componentType: 'render.model@2',
     batchable: true,
+    compositionGroup: null,
     properties: {
       modelResourceId,
       materialOverrides: {},

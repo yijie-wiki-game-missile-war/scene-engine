@@ -31,7 +31,7 @@ Then read only the current documents for the affected boundary:
 | Three bindings, loading, batching, projection and disposal | [Render runtime](../../../docs/render-runtime.md) |
 | Exact packet recording, seek and Replay | [Recording and Replay](../../../docs/recording-replay.md) |
 | Fixed-point transform encoding and coordinates | [Transform](../../../docs/transform.md) |
-| Test method and completion standard | [Testing](../../../docs/testing.md) |
+| Test methods and commands | [Testing](../../../docs/testing.md) |
 | Test inventory and suites | [Test items](../../../docs/tests/README.md) |
 
 Historical reviews, migration notes, and patch reports are context only. They do not override the current documents above.
@@ -123,7 +123,7 @@ Do not introduce:
 - registry mutation after runtime construction or asynchronous code in boundaries documented as synchronous;
 - direct construction of internal Scene, Prefab, Node, scope, graph, scheduler, or renderer-binding objects;
 - full-tree Display snapshots in the normal per-commit observer path;
-- test-only production shortcuts or evidence/artifact gates that replace the full test gate.
+- test-only production shortcuts or alternate production paths.
 
 When replacing a contract, remove the old production path. Do not keep both versions accepted unless a current contract
 explicitly defines a migration boundary.
@@ -140,22 +140,7 @@ For wire, catalog identity, public schema, or cross-language behavior changes, u
 
 Keep implementation, declarations, fixtures, tests, and current docs consistent in the same change.
 
-## Test the change
+## Test references
 
-Use focused suites for fast development feedback:
-
-```bash
-npm test --workspace @scene-engine/client
-npm test --workspace @scene-engine/display
-npm test --workspace @scene-engine/renderer-three
-```
-
-Use the exact focused Python tests listed in the [test inventory](../../../docs/tests/README.md) for the affected boundary.
-Performance runners are measurements with documented parameters and report fields; they do not replace correctness tests.
-
-Completion has one gate. Both full suites must pass:
-
-```bash
-uv run python -m pytest -q
-npm test
-```
+The [testing guide](../../../docs/testing.md) documents available commands and the
+[test inventory](../../../docs/tests/README.md) maps tests to their affected boundaries.

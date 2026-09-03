@@ -1,22 +1,31 @@
-import { COMPONENT_TYPES } from './constants.js';
+import {
+  COMPONENT_TYPES,
+  COMPOSED_COMPONENT_TYPES,
+  RENDER_COMPOSITION_SCHEMA,
+} from './constants.js';
 import { fail } from './errors.js';
 
 const OPTION_KEYS = Object.freeze(new Set([
-  'hostElement', 'canvas', 'rendererProfile', 'resourceRegistry', 'onHealth', 'signal',
+  'hostElement', 'canvas', 'rendererProfile', 'compositionPlan', 'resourceRegistry', 'onHealth',
+  'signal',
 ]));
 const PROFILE_KEYS = Object.freeze(new Set([
   'drawMode', 'maximumPixelRatio', 'clearRgba', 'antialias', 'alpha', 'shadows', 'toneMapping',
 ]));
 const CREATE_KEYS = Object.freeze(new Set([
-  'nodeName', 'componentKey', 'componentType', 'properties', 'batchable', 'resourceRegistry',
-  'signal',
+  'nodeName', 'componentKey', 'componentType', 'properties', 'batchable', 'compositionGroup',
+  'resourceRegistry', 'signal',
 ]));
+
+const COMPOSITION_PASS_KINDS = Object.freeze(['protected-base', 'ordinary', 'foreground']);
+const MAXIMUM_COMPOSITION_GROUPS = 30;
 
 export const MAX_PROXIMITY_RADIUS_PIXELS = 256;
 
 export function normalizeOptions(value) {
   const record = exactRecord(value, OPTION_KEYS, 'three-backend-options-invalid');
-  for (const key of ['hostElement', 'canvas', 'rendererProfile', 'resourceRegistry']) {
+  for (const key of ['hostElement', 'canvas', 'rendererProfile', 'compositionPlan',
+    'resourceRegistry']) {
     if (!Object.hasOwn(record, key)) fail('three-backend-options-invalid');
   }
   const hostElement = record.hostElement;
@@ -33,6 +42,7 @@ export function normalizeOptions(value) {
     hostElement,
     canvas,
     rendererProfile: normalizeRendererProfile(record.rendererProfile),
+    compositionPlan: normalizeCompositionPlan(record.compositionPlan),
     resourceRegistry: record.resourceRegistry,
     onHealth: record.onHealth ?? null,
     signal: record.signal ?? null,
@@ -56,7 +66,8 @@ export function normalizeRendererProfile(value) {
 
 export function normalizeCreateDescriptor(value, expectedRegistry) {
   const record = exactRecord(value, CREATE_KEYS, 'three-backend-binding-descriptor-invalid');
-  for (const key of ['nodeName', 'componentKey', 'componentType', 'properties', 'resourceRegistry']) {
+  for (const key of ['nodeName', 'componentKey', 'componentType', 'properties', 'compositionGroup',
+    'resourceRegistry']) {
     if (!Object.hasOwn(record, key)) fail('three-backend-binding-descriptor-invalid');
   }
   const nodeName = nonemptyString(record.nodeName, 'three-backend-node-name-invalid');
@@ -69,21 +80,24 @@ export function normalizeCreateDescriptor(value, expectedRegistry) {
   if (record.signal !== undefined) assertAbortSignal(record.signal);
   const properties = clonePlainData(record.properties, 'three-backend-component-properties-invalid');
   if (!isPlainRecord(properties)) fail('three-backend-component-properties-invalid');
+  const compositionGroup = normalizeCompositionGroup(record.componentType, record.compositionGroup);
   return Object.freeze({
     nodeName,
     componentKey,
     componentType: record.componentType,
     properties,
     batchable: record.batchable,
+    compositionGroup,
     resourceRegistry: record.resourceRegistry,
     signal: record.signal ?? null,
   });
 }
 
-export function normalizeUpdatePatch(value, identity) {
+export function normalizeUpdatePatch(value, identity, componentType) {
   const record = exactRecord(value, new Set(['identity', 'worldMatrix', 'panelAnchorWorld',
-    'visible', 'batchable', 'properties']), 'three-backend-binding-patch-invalid');
-  if (Object.keys(record).length !== 6) fail('three-backend-binding-patch-invalid');
+    'visible', 'batchable', 'compositionGroup', 'properties']),
+  'three-backend-binding-patch-invalid');
+  if (Object.keys(record).length !== 7) fail('three-backend-binding-patch-invalid');
   const nextIdentity = exactRecord(record.identity, new Set(['nodeName', 'componentKey']),
     'three-backend-binding-identity-invalid');
   if (Object.keys(nextIdentity).length !== 2 || nextIdentity.nodeName !== identity.nodeName
@@ -102,8 +116,77 @@ export function normalizeUpdatePatch(value, identity) {
       : Object.freeze(finiteTuple(record.panelAnchorWorld, 3, 'three-backend-panel-anchor-invalid')),
     visible: record.visible,
     batchable: record.batchable,
+    compositionGroup: normalizeCompositionGroup(componentType, record.compositionGroup),
     properties,
   });
+}
+
+export function normalizeCompositionPlan(value) {
+  if (value === null) return null;
+  const record = exactRecord(value, new Set([
+    'schema', 'id', 'revision', 'defaultGroup', 'groups', 'passes',
+  ]), 'three-backend-composition-plan-invalid');
+  if (Object.keys(record).length !== 6 || record.schema !== RENDER_COMPOSITION_SCHEMA
+      || typeof record.id !== 'string' || record.id.length === 0 || record.id.trim() !== record.id
+      || !Number.isSafeInteger(record.revision) || record.revision < 0
+      || !Array.isArray(record.groups) || record.groups.length === 0
+      || record.groups.length > MAXIMUM_COMPOSITION_GROUPS
+      || !Array.isArray(record.passes) || record.passes.length !== COMPOSITION_PASS_KINDS.length) {
+    fail('three-backend-composition-plan-invalid');
+  }
+  const groups = record.groups.map((value) => {
+    const entry = exactRecord(value, new Set(['id']), 'three-backend-composition-group-invalid');
+    if (Object.keys(entry).length !== 1) fail('three-backend-composition-group-invalid');
+    return Object.freeze({ id: nonemptyString(entry.id, 'three-backend-composition-group-invalid') });
+  });
+  const groupIds = new Set(groups.map((entry) => entry.id));
+  if (groupIds.size !== groups.length) fail('three-backend-composition-group-duplicate');
+  const assigned = new Set();
+  const passIds = new Set();
+  const passes = record.passes.map((value, index) => {
+    const entry = exactRecord(value, new Set(['id', 'kind', 'groups']),
+      'three-backend-composition-pass-invalid');
+    if (Object.keys(entry).length !== 3 || typeof entry.id !== 'string' || entry.id.length === 0
+        || entry.id.trim() !== entry.id || passIds.has(entry.id)
+        || entry.kind !== COMPOSITION_PASS_KINDS[index]
+        || !Array.isArray(entry.groups) || entry.groups.length === 0) {
+      fail('three-backend-composition-pass-invalid');
+    }
+    passIds.add(entry.id);
+    const passGroups = entry.groups.map((group) => nonemptyString(
+      group, 'three-backend-composition-group-invalid',
+    ));
+    if (new Set(passGroups).size !== passGroups.length) {
+      fail('three-backend-composition-group-duplicate');
+    }
+    for (const group of passGroups) {
+      if (!groupIds.has(group)) fail('three-backend-composition-group-missing');
+      if (assigned.has(group)) fail('three-backend-composition-group-duplicate');
+      assigned.add(group);
+    }
+    return Object.freeze({ id: entry.id, kind: entry.kind, groups: Object.freeze(passGroups) });
+  });
+  if (assigned.size !== groupIds.size) fail('three-backend-composition-group-unassigned');
+  const defaultGroup = nonemptyString(record.defaultGroup,
+    'three-backend-composition-default-group-invalid');
+  if (!groupIds.has(defaultGroup)) fail('three-backend-composition-default-group-invalid');
+  return Object.freeze({
+    schema: RENDER_COMPOSITION_SCHEMA,
+    id: record.id,
+    revision: record.revision,
+    defaultGroup,
+    groups: Object.freeze(groups),
+    passes: Object.freeze(passes),
+  });
+}
+
+function normalizeCompositionGroup(componentType, value) {
+  if (COMPOSED_COMPONENT_TYPES.has(componentType)) {
+    if (value === null) return null;
+    return nonemptyString(value, 'three-backend-composition-group-invalid');
+  }
+  if (value !== null) fail('three-backend-composition-group-invalid');
+  return null;
 }
 
 export function normalizeFrame(value) {

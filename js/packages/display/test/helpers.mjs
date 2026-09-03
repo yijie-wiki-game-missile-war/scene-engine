@@ -142,7 +142,7 @@ export function emptyPrefab({ id = 'target.test.item', gameplayType = 'test.item
 export async function createHarness({ prefabEntries = null, resources = [], sceneNodes = [],
   prefabInstances = [], backendFactory = null, onHealth = null, configureComponents = null,
   bootstrapAuthority = null, runtimeOptions = {}, rawAuthority = false,
-  displayKindEntries = null,
+  displayKindEntries = null, compositionPlan = null,
 } = {}) {
   const componentRegistry = createComponentRegistry();
   configureComponents?.(componentRegistry);
@@ -163,6 +163,7 @@ export async function createHarness({ prefabEntries = null, resources = [], scen
     id: 'main',
     sceneProfile: 'test',
     rendererProfile: RENDERER_PROFILE,
+    compositionPlan,
     activeCameraLocalName: 'camera',
     nodes: [{
       localName: 'camera',

@@ -165,6 +165,7 @@ test('real DisplayRuntime returns no ACK for command or world-overflow commit fa
     id: 'main',
     sceneProfile: 'client-test',
     rendererProfile: RENDERER_PROFILE,
+    compositionPlan: null,
     activeCameraLocalName: 'camera',
     nodes: [{
       localName: 'camera',

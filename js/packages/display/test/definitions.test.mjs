@@ -58,6 +58,7 @@ test('Scene compile is closed and validates active Camera and resource reference
   const invalid = defineScene({
     schema: SCENE_DEFINITION_SCHEMA,
     id: 'main', sceneProfile: 'test', rendererProfile: RENDERER_PROFILE,
+    compositionPlan: null,
     activeCameraLocalName: 'model',
     nodes: [{
       localName: 'model', parentLocalName: null, transform: IDENTITY,
@@ -406,6 +407,7 @@ test('Scene static Prefab instances compile by exact prefabId', () => {
     id: 'main',
     sceneProfile: 'test',
     rendererProfile: RENDERER_PROFILE,
+    compositionPlan: null,
     activeCameraLocalName: 'camera',
     nodes: [{
       localName: 'camera',
@@ -441,6 +443,7 @@ test('Definitions expose no public instantiate shortcut', () => {
     id: 'main',
     sceneProfile: 'test',
     rendererProfile: RENDERER_PROFILE,
+    compositionPlan: null,
     activeCameraLocalName: 'camera',
     nodes: [{
       localName: 'camera',
@@ -488,6 +491,7 @@ test('Resource registry rejects non-asset definitions at register boundary', () 
     id: 'main',
     sceneProfile: 'test',
     rendererProfile: RENDERER_PROFILE,
+    compositionPlan: null,
     activeCameraLocalName: 'camera',
     nodes: [{
       localName: 'camera',

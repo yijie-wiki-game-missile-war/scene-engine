@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 
-import { THREE_RENDER_BACKEND_SCHEMA } from './constants.js';
+import { COMPOSED_COMPONENT_TYPES, THREE_RENDER_BACKEND_SCHEMA } from './constants.js';
 import { ThreeRenderBackendError, fail } from './errors.js';
 import { compensatePanelViewPoint } from './panel-projection.js';
 import { ResourceManager } from './resource-manager.js';
@@ -36,6 +36,8 @@ export class ThreeRenderBackend {
     this._hostElement = normalized.hostElement;
     this._canvas = normalized.canvas;
     this._profile = normalized.rendererProfile;
+    this._compositionPlan = normalized.compositionPlan;
+    this._composition = compileComposition(normalized.compositionPlan);
     this._registry = normalized.resourceRegistry;
     this._onHealth = normalized.onHealth;
     this._implementation = Object.freeze({ ...DEFAULT_THREE_IMPLEMENTATION, ...implementation });
@@ -108,6 +110,7 @@ export class ThreeRenderBackend {
   createBinding(value) {
     this._assertOpen();
     const descriptor = normalizeCreateDescriptor(value, this._registry);
+    this._assertCompositionGroup(descriptor.componentType, descriptor.compositionGroup);
     const resourceIds = resourceIdsForComponent(descriptor.componentType, descriptor.properties);
     const key = identityKey(descriptor);
     if (this._bindings.has(key) || this._reservations.has(key)) fail('three-binding-duplicate');
@@ -123,6 +126,7 @@ export class ThreeRenderBackend {
       componentType: descriptor.componentType,
       properties: descriptor.properties,
       batchable: descriptor.batchable,
+      compositionGroup: descriptor.compositionGroup,
       resourceIds,
       leases: [],
       handle: null,
@@ -168,7 +172,8 @@ export class ThreeRenderBackend {
   updateBinding(binding, value) {
     this._assertOpen();
     const record = this._requireRecord(binding);
-    const patch = normalizeUpdatePatch(value, record.identity);
+    const patch = normalizeUpdatePatch(value, record.identity, record.componentType);
+    this._assertCompositionGroup(record.componentType, patch.compositionGroup);
     if (patch.panelAnchorWorld !== null && record.componentType !== 'render.sprite@3') {
       fail('three-backend-panel-anchor-invalid');
     }
@@ -182,6 +187,11 @@ export class ThreeRenderBackend {
     }
     this._applyRecordVisibility(record);
     if (record.batched) this._dirtyBatchRecords.add(record);
+    const compositionChanged = patch.compositionGroup !== record.compositionGroup;
+    if (compositionChanged && record.batched) this._disposeBatches();
+    record.compositionGroup = patch.compositionGroup;
+    this._applyRecordComposition(record);
+    if (compositionChanged && record.batchable) this._batchDirty = true;
     const eligibilityChanged = patch.batchable !== record.batchable;
     if (eligibilityChanged) {
       // Eligibility is part of the latest logical binding state even while a
@@ -250,7 +260,11 @@ export class ThreeRenderBackend {
     this._assertOpen();
     if (!this._activeCamera?.handle.camera) fail('three-active-camera-required');
     try {
-      this._renderer.render(this._scene, this._activeCamera.handle.camera);
+      if (this._composition === null) {
+        this._renderer.render(this._scene, this._activeCamera.handle.camera);
+      } else {
+        this._renderComposition(this._activeCamera.handle.camera);
+      }
       this._drawCount += 1;
     } catch (error) {
       const wrapped = wrapError('three-render-failed', error); this._failure = wrapped;
@@ -297,6 +311,8 @@ export class ThreeRenderBackend {
     camera.updateWorldMatrix(true, false);
     for (const candidate of candidates) candidate.updateWorldMatrix(true, true);
     raycaster.setFromCamera(pointer, camera);
+    if (this._composition !== null) raycaster.layers.mask = this._composition.allGroupMask;
+    const logicalHits = [];
     for (const hit of raycaster.intersectObjects(candidates, true)) {
       // Raycaster's radial near/far distance does not match the camera's view-
       // space clipping planes away from the optical axis. Test the actual hit
@@ -313,14 +329,21 @@ export class ThreeRenderBackend {
         if (cursor?.userData?.threeBindingToken) record = this._records.get(cursor.userData.threeBindingToken);
         activeRepresentation = record?.batched === false;
       }
-      if (record && activeRepresentation && record.visible && !record.destroyed) return Object.freeze({
-        nodeName: record.identity.nodeName,
-        componentKey: record.identity.componentKey,
-        point: Object.freeze([hit.point.x, hit.point.y, hit.point.z]),
-        distance: hit.distance,
-      });
+      if (record && activeRepresentation && record.visible && !record.destroyed) {
+        logicalHits.push({ record, hit });
+        if (this._composition === null) break;
+      }
     }
-    return null;
+    if (logicalHits.length === 0) return null;
+    const selected = this._composition === null
+      ? logicalHits[0] : selectCompositionHit(logicalHits, this._composition);
+    if (selected === null) return null;
+    return Object.freeze({
+      nodeName: selected.record.identity.nodeName,
+      componentKey: selected.record.identity.componentKey,
+      point: Object.freeze([selected.hit.point.x, selected.hit.point.y, selected.hit.point.z]),
+      distance: selected.hit.distance,
+    });
   }
 
   screenPointToWorldRay(value) {
@@ -366,6 +389,19 @@ export class ThreeRenderBackend {
       });
     }
 
+    if (this._composition !== null) {
+      const exact = this.pick({ clientX: query.clientX, clientY: query.clientY });
+      if (exact !== null) {
+        const depth = new THREE.Vector3(...exact.point).project(camera).z;
+        if (Number.isFinite(depth)) return Object.freeze({
+          nodeName: exact.nodeName,
+          componentKey: exact.componentKey,
+          screenDistancePixels: 0,
+          depth,
+        });
+      }
+    }
+
     const rect = viewportRect(this._hostElement);
     const candidates = [];
     for (const record of this._bindings.values()) {
@@ -381,8 +417,10 @@ export class ThreeRenderBackend {
         record,
         screenDistancePixels,
         depth: bounds.depth,
+        compositionRank: this._composition?.groupRanks.get(record.compositionGroup) ?? 0,
       });
     }
+    if (this._composition !== null) rejectProximityBehindProtected(candidates, this._composition);
     candidates.sort(compareProximityCandidates);
     const selected = candidates[0];
     if (!selected) return null;
@@ -480,6 +518,8 @@ export class ThreeRenderBackend {
       drawCount: this._drawCount,
       resizeCount: this._resizeCount,
       renderTargetCount: 0,
+      compositionPlanId: this._compositionPlan?.id ?? null,
+      compositionPassCount: this._compositionPlan?.passes.length ?? 1,
       rendererCalls: info?.calls ?? 0,
       rendererGeometries: info?.geometries ?? 0,
       rendererTextures: info?.textures ?? 0,
@@ -529,6 +569,7 @@ export class ThreeRenderBackend {
     handle.resize?.(this._width / this._height);
     handle.setPanelAnchor?.(record.panelAnchorWorld);
     record.handle = handle;
+    this._applyRecordComposition(record);
     if (handle.requiresContinuousDraw === true) this._continuousRecords.add(record);
     if (handle.object) {
       record.nodeRoot = this._acquireNodeRoot(record.identity.nodeName);
@@ -570,6 +611,7 @@ export class ThreeRenderBackend {
         this._continuousRecords.delete(record);
         if (previousHandle.object) previousHandle.object.removeFromParent();
         record.handle = handle; record.leases = leases; record.properties = latestProperties;
+        this._applyRecordComposition(record);
         if (handle.requiresContinuousDraw === true) this._continuousRecords.add(record);
         record.resourceIds = resourceIds;
         if (handle.object) {
@@ -684,7 +726,7 @@ export class ThreeRenderBackend {
       if (!record.batchable) continue;
       const fingerprint = record.handle.batchFingerprint;
       if (!fingerprint || typeof record.handle.createBatch !== 'function') continue;
-      const key = `${record.componentType}\u0000${fingerprint}`;
+      const key = `${record.componentType}\u0000${record.compositionGroup ?? ''}\u0000${fingerprint}`;
       if (!groups.has(key)) groups.set(key, []); groups.get(key).push(record);
     }
     const eligible = [...groups.entries()].filter(([, records]) => records.length >= 2)
@@ -698,6 +740,7 @@ export class ThreeRenderBackend {
       batch.object.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
       batch.panelAnchorAttribute?.setUsage(THREE.DynamicDrawUsage);
       created.object.userData.threeBatchRecords = records;
+      this._applyObjectComposition(created.object, records[0].compositionGroup);
       this._batchRoot.add(created.object); this._batches.push(batch);
       for (let index = 0; index < records.length; index += 1) {
         const record = records[index];
@@ -758,6 +801,88 @@ export class ThreeRenderBackend {
     }
     if (record.nodeRoot.parent !== this._root) this._root.add(record.nodeRoot);
     if (object.parent !== record.nodeRoot) record.nodeRoot.add(object);
+  }
+
+  _assertCompositionGroup(componentType, group) {
+    if (!COMPOSED_COMPONENT_TYPES.has(componentType)) {
+      if (group !== null) fail('three-backend-composition-group-invalid');
+      return;
+    }
+    if (this._composition === null) {
+      if (group !== null) fail('three-backend-composition-plan-required');
+      return;
+    }
+    if (!this._composition.groupMasks.has(group)) fail('three-backend-composition-group-missing');
+  }
+
+  _applyRecordComposition(record) {
+    if (!record.handle?.object) return;
+    this._applyObjectComposition(record.handle.object, record.compositionGroup);
+  }
+
+  _applyObjectComposition(object, group) {
+    const mask = this._composition === null || group === null
+      ? (this._composition?.allGroupMask ?? 1)
+      : (1 | this._composition.groupMasks.get(group));
+    object.traverse((child) => { child.layers.mask = mask; });
+  }
+
+  _renderComposition(camera) {
+    const renderer = this._renderer;
+    const previousCameraMask = camera.layers.mask;
+    const previousBackground = this._scene.background;
+    const previousAutoClear = renderer.autoClear;
+    const shadowMap = renderer.shadowMap ?? null;
+    const previousShadowAutoUpdate = shadowMap?.autoUpdate;
+    let depthMaterials = null;
+    try {
+      renderer.autoClear = false;
+      renderer.clear(true, true, true);
+      camera.layers.mask = this._composition.passMasks[0];
+      renderer.render(this._scene, camera);
+      if (shadowMap && typeof previousShadowAutoUpdate === 'boolean') shadowMap.autoUpdate = false;
+
+      this._scene.background = null;
+      camera.layers.mask = this._composition.passMasks[1];
+      renderer.render(this._scene, camera);
+
+      renderer.clearDepth();
+      depthMaterials = this._setProtectedColorWrite(false);
+      camera.layers.mask = this._composition.passMasks[0];
+      renderer.render(this._scene, camera);
+      restoreColorWrite(depthMaterials);
+      depthMaterials = null;
+
+      camera.layers.mask = this._composition.passMasks[2];
+      renderer.render(this._scene, camera);
+    } finally {
+      if (depthMaterials !== null) restoreColorWrite(depthMaterials);
+      if (shadowMap && typeof previousShadowAutoUpdate === 'boolean') {
+        shadowMap.autoUpdate = previousShadowAutoUpdate;
+      }
+      camera.layers.mask = previousCameraMask;
+      this._scene.background = previousBackground;
+      renderer.autoClear = previousAutoClear;
+    }
+  }
+
+  _setProtectedColorWrite(value) {
+    const materials = new Map();
+    const collect = (object) => object?.traverse((child) => {
+      for (const material of Array.isArray(child.material) ? child.material : [child.material]) {
+        if (!material || materials.has(material)) continue;
+        materials.set(material, material.colorWrite);
+        material.colorWrite = value;
+      }
+    });
+    const batches = new Set();
+    for (const record of this._bindings.values()) {
+      if (!this._composition.protectedGroups.has(record.compositionGroup)) continue;
+      if (record.batched && record.batch !== null) batches.add(record.batch);
+      else collect(record.handle?.object);
+    }
+    for (const batch of batches) collect(batch.object);
+    return materials;
   }
 
   _detachEmptyNodeRoots() {
@@ -864,6 +989,88 @@ export function createThreeRenderBackend(options) {
     'requestResize', 'pick', 'screenPointToWorldRay', 'pickProximity',
     'projectWorldPoint', 'focusWorldPoint', 'capture', 'whenIdle', 'diagnostics', 'dispose',
   ].map((method) => [method, implementation[method].bind(implementation)])));
+}
+
+function compileComposition(plan) {
+  if (plan === null) return null;
+  const groupMasks = new Map();
+  let allGroupMask = 0;
+  plan.groups.forEach((entry, index) => {
+    const mask = 1 << (index + 1);
+    groupMasks.set(entry.id, mask);
+    allGroupMask |= mask;
+  });
+  const groupRanks = new Map();
+  const passMasks = plan.passes.map((pass, rank) => {
+    let mask = 0;
+    for (const group of pass.groups) {
+      mask |= groupMasks.get(group);
+      groupRanks.set(group, rank);
+    }
+    return mask;
+  });
+  return Object.freeze({
+    groupMasks,
+    groupRanks,
+    passMasks: Object.freeze(passMasks),
+    allGroupMask,
+    protectedGroups: new Set(plan.passes[0].groups),
+  });
+}
+
+function restoreColorWrite(materials) {
+  for (const [material, value] of materials) material.colorWrite = value;
+}
+
+function selectCompositionHit(hits, composition) {
+  const nearestByRecord = new Map();
+  for (const candidate of hits) {
+    const current = nearestByRecord.get(candidate.record);
+    if (current === undefined || candidate.hit.distance < current.hit.distance) {
+      nearestByRecord.set(candidate.record, candidate);
+    }
+  }
+  const candidates = [...nearestByRecord.values()];
+  const protectedDistance = candidates
+    .filter((candidate) => composition.protectedGroups.has(candidate.record.compositionGroup))
+    .reduce((nearest, candidate) => Math.min(nearest, candidate.hit.distance),
+      Number.POSITIVE_INFINITY);
+  const visible = candidates.filter((candidate) => (
+    composition.protectedGroups.has(candidate.record.compositionGroup)
+      || candidate.hit.distance < protectedDistance
+  ));
+  visible.sort((left, right) => {
+    const leftRank = composition.groupRanks.get(left.record.compositionGroup) ?? 0;
+    const rightRank = composition.groupRanks.get(right.record.compositionGroup) ?? 0;
+    if (leftRank !== rightRank) return rightRank - leftRank;
+    if (left.hit.distance !== right.hit.distance) return left.hit.distance - right.hit.distance;
+    return compareRecordIdentity(left.record, right.record);
+  });
+  return visible[0] ?? null;
+}
+
+function rejectProximityBehindProtected(candidates, composition) {
+  const protectedAtPointer = candidates
+    .filter((candidate) => composition.protectedGroups.has(candidate.record.compositionGroup)
+      && candidate.screenDistancePixels === 0)
+    .reduce((nearest, candidate) => Math.min(nearest, candidate.depth), Number.POSITIVE_INFINITY);
+  if (!Number.isFinite(protectedAtPointer)) return;
+  let writeIndex = 0;
+  for (const candidate of candidates) {
+    if (!composition.protectedGroups.has(candidate.record.compositionGroup)
+        && candidate.screenDistancePixels === 0 && candidate.depth >= protectedAtPointer) continue;
+    candidates[writeIndex] = candidate;
+    writeIndex += 1;
+  }
+  candidates.length = writeIndex;
+}
+
+function compareRecordIdentity(left, right) {
+  if (left.identity.nodeName !== right.identity.nodeName) {
+    return left.identity.nodeName < right.identity.nodeName ? -1 : 1;
+  }
+  if (left.identity.componentKey === right.identity.componentKey) return 0;
+  return left.identity.componentKey < right.identity.componentKey ? -1 : 1;
 }
 
 function identityKey(value) { return JSON.stringify([value.nodeName, value.componentKey]); }
@@ -1025,14 +1232,11 @@ function compareProximityCandidates(left, right) {
   if (left.screenDistancePixels !== right.screenDistancePixels) {
     return left.screenDistancePixels - right.screenDistancePixels;
   }
-  if (left.depth !== right.depth) return left.depth - right.depth;
-  const leftIdentity = left.record.identity;
-  const rightIdentity = right.record.identity;
-  if (leftIdentity.nodeName !== rightIdentity.nodeName) {
-    return leftIdentity.nodeName < rightIdentity.nodeName ? -1 : 1;
+  if (left.compositionRank !== right.compositionRank) {
+    return right.compositionRank - left.compositionRank;
   }
-  if (leftIdentity.componentKey === rightIdentity.componentKey) return 0;
-  return leftIdentity.componentKey < rightIdentity.componentKey ? -1 : 1;
+  if (left.depth !== right.depth) return left.depth - right.depth;
+  return compareRecordIdentity(left.record, right.record);
 }
 function positiveDimension(value) { const number = Number(value); return Number.isFinite(number) && number > 0
   ? Math.max(1, Math.round(number)) : 1; }
@@ -1048,7 +1252,9 @@ function isAbort(error) { return error?.name === 'AbortError'
 function wrapError(code, error) { return error instanceof ThreeRenderBackendError ? error
   : new ThreeRenderBackendError(code, error?.message ?? code, { cause: error }); }
 function resourceFromError(error) { return error?.resourceId ?? null; }
-function requireRenderer(value) { for (const method of ['setPixelRatio', 'setSize', 'render', 'dispose']) {
+function requireRenderer(value) { for (const method of [
+  'setPixelRatio', 'setSize', 'render', 'clear', 'clearDepth', 'dispose',
+]) {
   if (!value || typeof value[method] !== 'function') fail('three-renderer-invalid'); } }
 function rendererInfo(renderer) { const render = renderer.info?.render; const memory = renderer.info?.memory;
   return render && memory ? { calls: render.calls, geometries: memory.geometries, textures: memory.textures } : null; }

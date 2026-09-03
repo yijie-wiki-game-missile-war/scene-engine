@@ -132,6 +132,21 @@ export interface RendererProfile {
   readonly toneMapping: 'none' | 'aces-filmic';
 }
 
+export type RenderCompositionPassKind = 'protected-base' | 'ordinary' | 'foreground';
+
+export interface RenderCompositionPlan {
+  readonly schema: typeof RENDER_COMPOSITION_SCHEMA;
+  readonly id: string;
+  readonly revision: number;
+  readonly defaultGroup: string;
+  readonly groups: readonly Readonly<{ id: string }>[];
+  readonly passes: readonly Readonly<{
+    id: string;
+    kind: RenderCompositionPassKind;
+    groups: readonly string[];
+  }>[];
+}
+
 export interface ComponentDefinition<P extends JSONRecord = JSONRecord> {
   readonly key: string;
   readonly type: string;
@@ -163,6 +178,7 @@ export interface SceneDefinitionInput {
   readonly revision?: number;
   readonly sceneProfile: string;
   readonly rendererProfile: RendererProfile;
+  readonly compositionPlan: RenderCompositionPlan | null;
   readonly activeCameraLocalName: string;
   readonly nodes: readonly SceneNodeDefinition[];
   readonly prefabInstances: readonly ScenePrefabInstanceDefinition[];
@@ -618,6 +634,7 @@ export interface DisplayRuntimeOptions {
     hostElement: unknown;
     canvas: unknown;
     rendererProfile: RendererProfile;
+    compositionPlan: RenderCompositionPlan | null;
     resourceRegistry: ResourceRegistry;
     signal: AbortSignal;
     onHealth: (event: Readonly<Record<string, unknown>>) => void;
@@ -787,6 +804,11 @@ export class MeshRendererComponent extends RenderComponent { static readonly typ
 export class SpriteRendererComponent extends RenderComponent { static readonly typeId: 'render.sprite@3'; }
 export class SurfaceRendererComponent extends RenderComponent { static readonly typeId: 'render.surface@1'; }
 export class ParticleRendererComponent extends RenderComponent { static readonly typeId: 'render.particle@2'; }
+export class RenderCompositionComponent extends Component {
+  static readonly typeId: 'render.composition@1';
+  static readonly allowMultiple: false;
+  readonly properties: Readonly<{ group: string }>;
+}
 export class CameraComponent extends RenderComponent { static readonly typeId: 'render.camera@1'; static readonly allowMultiple: false; }
 export class BackgroundComponent extends RenderComponent { static readonly typeId: 'render.background@1'; static readonly allowMultiple: false; }
 export class AmbientLightComponent extends RenderComponent { static readonly typeId: 'render.ambient-light@1'; }
@@ -812,7 +834,11 @@ export const TICKS_PER_SECOND: 60;
 export const DISPLAY_RUNTIME_SCHEMA: 'scene-engine-display-node@9';
 export const DISPLAY_SUMMARY_SCHEMA: 'scene-engine-display-summary@1';
 export const DISPLAY_CATALOG_MANIFEST_SCHEMA: 'scene-engine-display-catalog-manifest@3';
-export const SCENE_DEFINITION_SCHEMA: 'scene-engine-scene-definition@2';
+export const SCENE_DEFINITION_SCHEMA: 'scene-engine-scene-definition@3';
+export const RENDER_COMPOSITION_SCHEMA: 'scene-engine-render-composition@1';
+export const RENDER_COMPOSITION_PASS_KINDS: readonly [
+  'protected-base', 'ordinary', 'foreground',
+];
 export const PREFAB_DEFINITION_SCHEMA: 'scene-engine-prefab-definition@5';
 export const RESOURCE_REGISTRY_SCHEMA: 'scene-engine-resource-registry@1';
 export const ANIMATION_RESOURCE_SCHEMA: 'scene-engine-animation-resource@2';
@@ -893,6 +919,7 @@ export function sameDisplayCatalogIdentity(left: DisplayCatalogIdentity, right: 
 export function toDisplayCatalogIdentityRecord(value: DisplayCatalogIdentity): DisplayCatalogIdentityRecord;
 
 export function defineScene(value: SceneDefinitionInput): SceneDefinition;
+export function defineRenderComposition(value: RenderCompositionPlan): RenderCompositionPlan;
 export function definePrefab(value: PrefabDefinitionInput): PrefabDefinition;
 export function defineDisplayKind(value: DisplayKindDefinitionInput): DisplayKindDefinition;
 export function defineResources(value: {

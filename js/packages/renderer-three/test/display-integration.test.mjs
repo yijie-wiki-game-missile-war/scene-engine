@@ -25,6 +25,7 @@ test('Display RenderSystem drives the exact backend port and rebuilds from decla
     id: 'main',
     sceneProfile: 'test',
     rendererProfile: PROFILE,
+    compositionPlan: null,
     activeCameraLocalName: 'camera',
     nodes: [
       { localName: 'camera', parentLocalName: null, transform: IDENTITY,

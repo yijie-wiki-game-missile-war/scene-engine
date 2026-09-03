@@ -54,6 +54,7 @@ export function communicationScene() {
     id: COMMUNICATION_SCENE_ID,
     sceneProfile: 'communication.no-render',
     rendererProfile: RENDERER_PROFILE,
+    compositionPlan: null,
     activeCameraLocalName: 'camera',
     nodes: [{
       localName: 'camera',

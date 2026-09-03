@@ -433,5 +433,4 @@ Three backend tests must cover:
 
 Integration tests must combine a real DisplayRuntime and Three backend with a nested pointer target, camera controls, positive
 proximity radius, click/double/context recognition, proximity-to-drag transition, drop target, backend rebuild and final
-disposal. Acceptance requires focused package tests, strict TypeScript declarations and the repository's full `npm test` and
-Python test gates. The implementation remains subject to those same delivery gates as the rest of Scene Engine.
+disposal.

@@ -2,7 +2,7 @@
   "schema": "scene-engine-display-catalog-manifest@3",
   "scenes": [
     {
-      "schema": "scene-engine-scene-definition@2",
+      "schema": "scene-engine-scene-definition@3",
       "id": "main",
       "sceneProfile": "game",
       "rendererProfile": {
@@ -14,6 +14,7 @@
         "shadows": true,
         "toneMapping": "aces-filmic"
       },
+      "compositionPlan": null,
       "activeCameraLocalName": "camera",
       "nodes": [
         {
@@ -186,6 +187,13 @@
     },
     {
       "typeId": "render.camera@1",
+      "allowMultiple": false,
+      "tickPhase": null,
+      "drivesTransform": false,
+      "eventNames": []
+    },
+    {
+      "typeId": "render.composition@1",
       "allowMultiple": false,
       "tickPhase": null,
       "drivesTransform": false,

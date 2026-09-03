@@ -21,6 +21,12 @@ export { DisplayRuntimeError } from './runtime/health.js';
 export { Component } from './component/component.js';
 export { BehaviourComponent } from './component/behaviour-component.js';
 export { RenderComponent } from './render/render-component.js';
+export {
+  RENDER_COMPOSITION_PASS_KINDS,
+  RENDER_COMPOSITION_SCHEMA,
+  RenderCompositionComponent,
+  defineRenderComposition,
+} from './render/composition.js';
 
 export {
   ModelRendererComponent,

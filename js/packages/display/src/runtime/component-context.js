@@ -52,6 +52,7 @@ export function createInternalComponentContext({
   componentEnabledChanged = null,
   componentPropertiesChanged = null,
   componentDetaching = null,
+  validateComponent = null,
 }) {
   const display = publicDisplay ?? createPublicDisplayContext({ scene, nodeIndex, nodeGraph });
   const views = new WeakMap();
@@ -83,6 +84,7 @@ export function createInternalComponentContext({
     componentEnabledChanged,
     componentPropertiesChanged,
     componentDetaching,
+    validateComponent,
   };
   if (animationSystem !== null) {
     // Live contexts apply immediately. Prefab candidate contexts provide a private

@@ -4,7 +4,7 @@ import test from 'node:test';
 
 import * as api from '@scene-engine/display';
 
-test('0.16 root is the exact Display public surface and excludes internal Authority mutation types', async () => {
+test('0.17 root is the exact Display public surface and excludes internal Authority mutation types', async () => {
   assert.deepEqual(Object.keys(api).sort(), [
     'ANIMATION_RESOURCE_SCHEMA',
     'AmbientLightComponent',
@@ -34,8 +34,11 @@ test('0.16 root is the exact Display public surface and excludes internal Author
     'PointerNodeEventHub',
     'PointerTargetComponent',
     'PrefabDefinition',
+    'RENDER_COMPOSITION_PASS_KINDS',
+    'RENDER_COMPOSITION_SCHEMA',
     'RESOURCE_REGISTRY_SCHEMA',
     'RenderComponent',
+    'RenderCompositionComponent',
     'SCENE_DEFINITION_SCHEMA',
     'SceneDefinition',
     'SpotLightComponent',
@@ -57,6 +60,7 @@ test('0.16 root is the exact Display public surface and excludes internal Author
     'defineDisplayKind',
     'defineFrameAnimation',
     'definePrefab',
+    'defineRenderComposition',
     'defineResources',
     'defineScene',
     'normalizeDisplayCatalogIdentity',
@@ -72,5 +76,5 @@ test('0.16 root is the exact Display public surface and excludes internal Author
     'AnimationSystem',
   ]) assert.equal(removed in api, false, removed);
   const packageJson = JSON.parse(await fs.readFile(new URL('../package.json', import.meta.url)));
-  assert.equal(packageJson.version, '0.16.0');
+  assert.equal(packageJson.version, '0.17.0');
 });

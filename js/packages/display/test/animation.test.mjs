@@ -318,7 +318,7 @@ test('animation resource content changes the catalog identity', () => {
     const prefabs = createPrefabRegistry([animatedPrefab()]);
     const scenes = createSceneRegistry([defineScene({
       schema: SCENE_DEFINITION_SCHEMA, id: 'main', sceneProfile: 'test',
-      rendererProfile: RENDERER_PROFILE, activeCameraLocalName: 'camera',
+      rendererProfile: RENDERER_PROFILE, compositionPlan: null, activeCameraLocalName: 'camera',
       nodes: [{
         localName: 'camera', parentLocalName: null, transform: IDENTITY,
         components: [{ key: 'camera', type: 'render.camera@1',
@@ -382,7 +382,7 @@ test('animation players register automatically and placement is root-only', asyn
 
   const sceneWithPlayer = defineScene({
     schema: SCENE_DEFINITION_SCHEMA, id: 'main', sceneProfile: 'test',
-    rendererProfile: RENDERER_PROFILE, activeCameraLocalName: 'camera',
+    rendererProfile: RENDERER_PROFILE, compositionPlan: null, activeCameraLocalName: 'camera',
     nodes: [{
       localName: 'camera', parentLocalName: null, transform: IDENTITY,
       components: [{ key: 'camera', type: 'render.camera@1',

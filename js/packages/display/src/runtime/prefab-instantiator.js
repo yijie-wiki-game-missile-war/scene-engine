@@ -1327,6 +1327,7 @@ export class PrefabInstantiator {
       publicDisplay: candidateSurface.publicDisplay,
       animationSystem: stagedAnimationSystem,
       componentAttached(component) {
+        live.validateComponent?.(component);
         if (component instanceof AnimationPlayerComponent) {
           candidateAnimationSystem.register(component);
         }
@@ -1337,6 +1338,7 @@ export class PrefabInstantiator {
         }
       },
       componentPropertiesChanged(component) {
+        live.validateComponent?.(component);
         if (component instanceof AnimationPlayerComponent) {
           candidateAnimationSystem.propertiesChanged(component);
         }

@@ -33,19 +33,32 @@ export class TestRegistry {
 export class TestRenderer {
   constructor() {
     this.pixelRatio = 1; this.width = 1; this.height = 1; this.draws = 0; this.disposed = false;
+    this.autoClear = true; this.clears = 0; this.depthClears = 0;
+    this.shadowMap = { autoUpdate: true };
+    this.renderStates = [];
     this.info = { render: { calls: 0 }, memory: { geometries: 0, textures: 0 } };
   }
   setPixelRatio(value) { this.pixelRatio = value; }
   setSize(width, height) { this.width = width; this.height = height; }
-  render(scene) {
+  render(scene, camera) {
     scene.updateMatrixWorld(true);
+    const colorWrites = [];
+    scene.traverse((object) => {
+      if (!object.material || !object.layers.test(camera.layers)) return;
+      for (const material of Array.isArray(object.material) ? object.material : [object.material]) {
+        colorWrites.push(material.colorWrite);
+      }
+    });
+    this.renderStates.push({ cameraMask: camera.layers.mask, colorWrites });
     this.draws += 1; this.info.render.calls += 1;
   }
+  clear() { this.clears += 1; }
+  clearDepth() { this.depthClears += 1; }
   dispose() { this.disposed = true; }
 }
 
 export function createHarness({ descriptors = [], loadResource = loadThreeResource,
-  onHealth = null, width = 800, height = 600 } = {}) {
+  onHealth = null, width = 800, height = 600, compositionPlan = null } = {}) {
   const registry = new TestRegistry(descriptors);
   const renderer = new TestRenderer();
   const host = {
@@ -62,21 +75,21 @@ export function createHarness({ descriptors = [], loadResource = loadThreeResour
     disposeResource: disposeThreeResource,
   };
   const backend = new ThreeRenderBackend({ hostElement: host, canvas, rendererProfile: PROFILE,
-    resourceRegistry: registry, onHealth }, implementation);
+    compositionPlan, resourceRegistry: registry, onHealth }, implementation);
   return { backend, registry, renderer, host, canvas,
     get observerDisconnected() { return observerDisconnected; } };
 }
 
 export function descriptor(nodeName, componentKey, componentType, properties, registry,
-  signal = undefined, batchable = true) {
-  return { nodeName, componentKey, componentType, properties, batchable,
+  signal = undefined, batchable = true, compositionGroup = null) {
+  return { nodeName, componentKey, componentType, properties, batchable, compositionGroup,
     resourceRegistry: registry, ...(signal ? { signal } : {}) };
 }
 
 export function patch(nodeName, componentKey, properties, matrix = new THREE.Matrix4(),
-  visible = true, batchable = true) {
+  visible = true, batchable = true, compositionGroup = null) {
   return { identity: { nodeName, componentKey }, worldMatrix: matrix.toArray(), panelAnchorWorld: null,
-    visible, batchable, properties };
+    visible, batchable, compositionGroup, properties };
 }
 
 export const CAMERA_PROPERTIES = Object.freeze({

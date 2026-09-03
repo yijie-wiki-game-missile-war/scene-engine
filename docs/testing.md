@@ -7,8 +7,7 @@ Scene Engine 的测试验证当前产品定义、架构所有权和技术合同�
 
 ## 整体与性能测试分类
 
-整体与性能测试分为三类；三类都沿生产边界验证正确性，性能时间先作为观测数据，不改变项目只有两条
-全量测试命令的完成标准。
+整体与性能测试分为三类；三类都沿生产边界验证正确性，性能时间只作为观测数据。
 
 ### 1. 显示引擎功能与性能
 
@@ -16,9 +15,9 @@ Scene Engine 的测试验证当前产品定义、架构所有权和技术合同�
 简单几何体、Display Kind 选择与空 Authority 根、固定与动态嵌套 Prefab、Node 增删与 reparent、Matrix4 层级直乘与 shear、visibility、完整 state replacement、
 顶层属性 set/unset、同步瞬时事件、Display-local sprite animation，以及 mesh、sprite、model、surface、particle 渲染路径。
 
-默认门禁只执行小规模、离线、确定性的 foundation 与 scale smoke。真实 Three backend 的 Node 测试使用确定性
+仓库级测试命令只执行小规模、离线、确定性的 foundation 与 scale smoke。真实 Three backend 的 Node 测试使用确定性
 TestRenderer，因此验证 CPU 侧绑定、矩阵、批处理、资源和生命周期，但不把 GPU、驱动或浏览器调度时间混入默认
-门禁。10,000、30,000、50,000 bindings 的规模运行，以及真实 Chrome/WebGL 运行，必须显式调用对应 runner。
+测试命令。10,000、30,000、50,000 bindings 的规模运行，以及真实 Chrome/WebGL 运行，通过对应 runner 调用。
 规模 runner 为仓库内部 CPU harness，可读取 package-private diagnostics 来核对所有权归零，但不会把这些入口提升为
 产品 API。浏览器 runner 的时间项是 commit、Display prepare 与 WebGL CPU submit，不等同于 GPU 完成时间或 FPS。
 
@@ -34,13 +33,13 @@ Python 侧另用确定性的 Event/Condition 障碍测试后台 transport sender
 `sleep` 推测调度，也不允许 worker 接触 World、Program、recorder、Session 或 MatrixPool。Transform、reparent、属性与
 事件在编码后都是同一不可变 packet，因此还要验证它们在后台发送前后的 command 顺序和载荷不变。
 
-默认门禁只执行 32 roots 的确定性跨语言 smoke；更多 roots、commits、update ratio 和 roundtrip/windowed profile
+仓库级测试命令只执行 32 roots 的确定性跨语言 smoke；更多 roots、commits、update ratio 和 roundtrip/windowed profile
 通过显式 benchmark runner 运行。
 
 ### 3. Python Matrix4 操作、矩阵池与常驻成本
 
 这一类测量 Python `DisplayTransform` 的只读 NumPy Matrix4 值，以及 `DisplayMatrixPool` 的单一常驻连续
-`(n, 4, 4)` little-endian float32 owner。默认门禁中的 `test_display.py` 和 `test_display_binary.py` 验证数组 shape、
+`(n, 4, 4)` little-endian float32 owner。仓库级测试命令中的 `test_display.py` 和 `test_display_binary.py` 验证数组 shape、
 列主序位布局、只读快照、输入隔离、节点 ID、池增长/墓碑/不复用、dirty ID 与 `(m, 4, 4)` 张量的一次成型编码；
 显式 `scripts/benchmark_python_display_transform.py` runner 观测矩阵操作、池内写入与 gather、命令编码、新进程启动
 路径和池的批量常驻内存。
@@ -50,7 +49,7 @@ stdout 输出 JSON，其中包括 `environment`、各 `operations` 的 best/p50/
 startup、tracemalloc resident 和 correctness。启动项包括子进程创建、根包 import、identity 构造和公开 accessor；
 内存当前值在初始 checkpoint 发布并 GC 后读取，表示 warm process 中包含矩阵池容量的稳态可追踪分配，peak 仍包含
 初始发布的瞬时 bookkeeping；两者都不是 RSS。该数据用于给当前实现建立可复现的本机性能
-报告，不设置跨机器硬阈值，也不替代默认正确性测试或全量门禁。
+报告，不设置跨机器硬阈值，与正确性测试用途不同。
 
 ## 测试方法
 
@@ -79,9 +78,9 @@ checkpoint 墓碑复活。
 
 ### 规模回归与资源现场测试
 
-默认规模 smoke 通过固定的小数量 roots、commits、嵌套实例和生命周期循环，验证同一套功能合同仍成立，并作为
-全量测试的一部分。10,000、30,000、50,000 等大规模用例由显式 runner 执行，避免把开发机性能和本地 Chrome/GPU
-条件变成默认门禁。资源现场测试在进程内实际执行创建、故障注入、重建和销毁，并以最终所有权计数归零作为
+小规模 smoke 通过固定的小数量 roots、commits、嵌套实例和生命周期循环，验证同一套功能合同仍成立，并由
+仓库级测试命令执行。10,000、30,000、50,000 等大规模用例由显式 runner 执行，避免把开发机性能和本地 Chrome/GPU
+条件变成仓库级测试内容。资源现场测试在进程内实际执行创建、故障注入、重建和销毁，并以最终所有权计数归零作为
 断言。
 
 性能 runner 必须报告与自身范围对应的 correctness。状态与通讯 runner 检查结构、cursor、最终状态、健康和释放；
@@ -108,7 +107,7 @@ TypeScript 严格模式编译真实的 Client、Display 和 renderer-three 组�
 
 ## 执行方式
 
-开发过程中可以先运行受影响范围的局部测试：
+局部测试命令示例：
 
 ```bash
 uv run python -m pytest -q tests/test_runtime.py
@@ -117,25 +116,16 @@ npm test --workspace @scene-engine/display
 npm test --workspace @scene-engine/renderer-three
 ```
 
-局部测试只用于缩短反馈时间，不能代替完整测试。
-
-默认全量门禁只运行小规模确定性 smoke，不自动执行 Python Matrix4 benchmark、10,000、30,000、50,000 规模
+仓库级测试命令只运行小规模确定性 smoke，不自动执行 Python Matrix4 benchmark、10,000、30,000、50,000 规模
 runner 或真实 Chrome/WebGL runner。需要性能或规模数据时，按[测试项目](tests/README.md)中的命令显式运行。
 
-## 完成标准
-
-项目只有一个完成标准：从仓库根目录运行以下两个命令，Python 与 JavaScript 全量测试全部通过。
+仓库级测试命令：
 
 ```bash
 uv run python -m pytest -q
 npm test
 ```
 
-判定规则：
-
-- 两个命令都以状态码 0 完成；
-- 所有发现的测试均通过，不以 skip、todo、只运行局部测试或只运行一个语言的测试代替；
-- `npm test` 统一执行各 JavaScript workspace 测试、资源泄漏现场测试和跨包 TypeScript 声明兼容测试；
-- 测试结果以本次命令的状态和输出判定，不要求生成或提交运行结果文件；
-- 显式性能 runner 用于规模观测和结构校验，但不是独立完成条件。
-- 大规模与浏览器 runner 的时间数据不构成跨机器硬门槛；runner 的正确性检查失败仍视为该次显式运行失败。
+`npm test` 统一执行各 JavaScript workspace 测试、资源泄漏现场测试和跨包 TypeScript 声明兼容测试。测试命令
+不生成或提交运行结果文件。显式性能 runner 用于规模观测和结构校验；大规模与浏览器 runner 的时间数据不构成
+跨机器硬门槛。

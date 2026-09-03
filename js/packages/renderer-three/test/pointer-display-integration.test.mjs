@@ -35,6 +35,7 @@ test('real Display and Three route proximity and drag through one target and lif
     id: 'pointer-main',
     sceneProfile: 'test',
     rendererProfile: PROFILE,
+    compositionPlan: null,
     activeCameraLocalName: 'camera',
     nodes: [
       {

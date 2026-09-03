@@ -8,11 +8,11 @@ fallback runtime.
 ```text
 scene-engine Python                 0.19.0
 @scene-engine/client               0.16.0
-@scene-engine/display              0.16.0
-@scene-engine/renderer-three       0.13.0
+@scene-engine/display              0.17.0
+@scene-engine/renderer-three       0.14.0
 wire                               scene-engine-wire@3
 display                            scene-engine-display-node@9
-scene definition                   scene-engine-scene-definition@2
+scene definition                   scene-engine-scene-definition@3
 prefab definition                  scene-engine-prefab-definition@5
 catalog manifest                   scene-engine-display-catalog-manifest@3
 packet log                         scene-engine-packet-log@3
@@ -648,6 +648,44 @@ fail-closed by the new component normalizers; model/sprite/particle use `render.
 
 Resource-dependent checks use the registered descriptor, for example resource-kind compatibility and texture-atlas frame bounds. The
 Three backend keeps defensive validation, but an invalid business record must not first fail on the next RAF after ACK.
+
+## Selective depth composition
+
+Scene definition `scene-engine-scene-definition@3` requires `compositionPlan`. `null` explicitly selects the ordinary
+single-pass renderer. A composed Scene supplies one closed `scene-engine-render-composition@1` value:
+
+```js
+{
+  schema: RENDER_COMPOSITION_SCHEMA,
+  id: 'gameplay-view',
+  revision: 1,
+  defaultGroup: 'ordinary-ground',
+  groups: [
+    { id: 'terrain' },
+    { id: 'ordinary-ground' },
+    { id: 'foreground-subject' },
+  ],
+  passes: [
+    { id: 'base', kind: 'protected-base', groups: ['terrain'] },
+    { id: 'ordinary', kind: 'ordinary', groups: ['ordinary-ground'] },
+    { id: 'foreground', kind: 'foreground', groups: ['foreground-subject'] },
+  ],
+}
+```
+
+The three pass kinds and their order are fixed. Every pass is non-empty, every declared group belongs to exactly one pass,
+group and pass IDs are unique, `defaultGroup` is declared, and at most 30 groups may use the backend layer budget. The complete
+plan is part of the Scene description and therefore the Scene catalog identity. There is no pass graph, saved-depth name or
+product-role branch in version 1.
+
+`render.composition@1` is a non-rendering, non-multiple Component with closed properties `{group}`. A drawable binding uses the
+nearest enabled membership on its Node-parent chain, otherwise the plan's explicit default. A child membership therefore lets a
+contact shadow remain ordinary while its subject body is foreground. Camera, background and light bindings have no membership.
+Declaring the Component without a plan, naming an unknown group in static content or resolving one dynamically fails before the
+candidate can be committed. Membership changes dirty only drawable descendants and are sent as complete binding state.
+
+Composition remains browser-local. It adds no Python record, Wire command, gameplay tick or packet-log field. Replay selects
+the same result through its Display artifact identity and the live Client/Display/backend path.
 
 ## Checkpoint, commit and summary
 

@@ -5,6 +5,19 @@ import { CameraComponent, SpriteRendererComponent } from './components.js';
 import { BillboardComponent } from '../behaviours/billboard.js';
 import { assertRenderBackendPort, bindingIdentity } from './render-backend-port.js';
 import { RenderComponent } from './render-component.js';
+import {
+  RenderCompositionComponent,
+  compositionGroupIds,
+  defineRenderComposition,
+} from './composition.js';
+
+const COMPOSED_RENDER_TYPES = new Set([
+  'render.model@2',
+  'render.mesh@1',
+  'render.sprite@3',
+  'render.surface@1',
+  'render.particle@2',
+]);
 
 function fixedPanelAnchor(node) {
   for (let ancestor = node; ancestor !== null; ancestor = ancestor.parent) {
@@ -48,6 +61,8 @@ export class RenderSystem {
     this._disposed = false;
     this._disposePromise = null;
     this._requiresContinuousDraw = false;
+    this._compositionPlan = null;
+    this._compositionGroups = new Set();
   }
 
   get backend() { return this._backend; }
@@ -56,6 +71,23 @@ export class RenderSystem {
   hasOwnedBackend(backend) {
     return backend !== null && (typeof backend === 'object' || typeof backend === 'function')
       && this._ownedBackends.has(backend);
+  }
+
+  setCompositionPlan(value) {
+    this._assertUsable();
+    if (this._backend !== null || this._entries.size !== 0) {
+      fail('display-render-composition-plan-already-installed');
+    }
+    this._compositionPlan = value === null ? null : defineRenderComposition(value);
+    this._compositionGroups = compositionGroupIds(this._compositionPlan);
+  }
+
+  validateCompositionComponent(component) {
+    if (!(component instanceof RenderCompositionComponent)) return;
+    if (this._compositionPlan === null) fail('display-render-composition-plan-required');
+    if (!this._compositionGroups.has(component.properties.group)) {
+      fail('display-render-composition-group-missing');
+    }
   }
 
   setBackend(backend) {
@@ -193,6 +225,21 @@ export class RenderSystem {
     if (changed) this._onNeedsDraw?.();
   }
 
+  markCompositionSubtreeDirty(sourceNode) {
+    let changed = false;
+    const visit = (node) => {
+      for (const entry of this._byNode.get(node) ?? []) {
+        if (!COMPOSED_RENDER_TYPES.has(entry.component.constructor.typeId)) continue;
+        entry.dirty = true;
+        this._dirtyEntries.add(entry);
+        changed = true;
+      }
+      for (const child of node._children) visit(child);
+    };
+    visit(sourceNode);
+    if (changed) this._onNeedsDraw?.();
+  }
+
   setActiveCamera(nodeName) {
     this._activeCameraName = nodeName;
     this._onNeedsDraw?.();
@@ -216,6 +263,7 @@ export class RenderSystem {
         visible: node.visibleInHierarchy && component.enabled,
         properties: this.effectiveProperties(component),
         batchable: !this._animationOverrides.has(component),
+        compositionGroup: this._compositionGroup(component, node),
       });
       this._runBackend('display-render-binding-update-failed', () => {
         assertSynchronous(
@@ -360,6 +408,8 @@ export class RenderSystem {
     this._animationOverrides = new WeakMap();
     this._activeCameraName = null;
     this._requiresContinuousDraw = false;
+    this._compositionPlan = null;
+    this._compositionGroups.clear();
     this._disposePromise = Promise.resolve().then(async () => {
       try {
         if (backend) await this._disposeBackendOnce(backend);
@@ -404,6 +454,7 @@ export class RenderSystem {
         componentType: entry.component.constructor.typeId,
         properties: this.effectiveProperties(entry.component),
         batchable: !this._animationOverrides.has(entry.component),
+        compositionGroup: this._compositionGroup(entry.component, attachedComponentNode(entry.component)),
         resourceRegistry: this._resourceRegistry,
         signal: this._backendAbortController.signal,
       });
@@ -502,6 +553,19 @@ export class RenderSystem {
       if (entry.state === 'ready') return entry.binding;
     }
     return null;
+  }
+
+  _compositionGroup(component, node) {
+    if (!COMPOSED_RENDER_TYPES.has(component.constructor.typeId)) return null;
+    if (this._compositionPlan === null) return null;
+    for (let cursor = node; cursor !== null; cursor = cursor.parent) {
+      const membership = cursor.getComponent(RenderCompositionComponent);
+      if (membership !== null && membership.enabled && !membership.disposed) {
+        this.validateCompositionComponent(membership);
+        return membership.properties.group;
+      }
+    }
+    return this._compositionPlan.defaultGroup;
   }
 
   _runBackend(code, operation) {

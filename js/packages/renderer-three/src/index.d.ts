@@ -10,10 +10,24 @@ export interface RendererProfile {
   readonly toneMapping: 'none' | 'aces-filmic';
 }
 
+export interface RenderCompositionPlan {
+  readonly schema: 'scene-engine-render-composition@1';
+  readonly id: string;
+  readonly revision: number;
+  readonly defaultGroup: string;
+  readonly groups: readonly Readonly<{ id: string }>[];
+  readonly passes: readonly Readonly<{
+    id: string;
+    kind: 'protected-base' | 'ordinary' | 'foreground';
+    groups: readonly string[];
+  }>[];
+}
+
 export interface ThreeRenderBackendOptions {
   readonly hostElement: unknown;
   readonly canvas: unknown;
   readonly rendererProfile: RendererProfile;
+  readonly compositionPlan: RenderCompositionPlan | null;
   readonly resourceRegistry: {
     require(id: string): unknown;
     get?(id: string): unknown;
@@ -83,7 +97,7 @@ export interface ThreeRenderBackendPort {
   dispose(): Promise<void> | void;
 }
 
-export const THREE_RENDER_BACKEND_SCHEMA: 'scene-engine-three-render-backend@3';
+export const THREE_RENDER_BACKEND_SCHEMA: 'scene-engine-three-render-backend@4';
 
 export class ThreeRenderBackendError extends Error {
   readonly code: string;

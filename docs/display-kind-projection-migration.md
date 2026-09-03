@@ -124,5 +124,4 @@ an implementation becomes a successful degraded projection.
 - state update can select, replace, lose and regain a Prefab deterministically;
 - invalid state/Prefab still produces no ACK;
 - changing only local Prefab/Resource content does not change producer packet bytes;
-- real-time and Replay Client apply identical kind/state sequences;
-- full Python and JavaScript suites pass before release.
+- real-time and Replay Client apply identical kind/state sequences.

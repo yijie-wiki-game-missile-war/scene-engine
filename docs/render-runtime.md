@@ -1,6 +1,6 @@
-# Three RenderBackend 0.13.0
+# Three RenderBackend 0.14.0
 
-`@scene-engine/renderer-three@0.13.0` is the browser composition-root implementation of Display's flat RenderBackendPort. Its
+`@scene-engine/renderer-three@0.14.0` is the browser composition-root implementation of Display's flat RenderBackendPort. Its
 root exports only:
 
 ```text
@@ -13,7 +13,8 @@ The package also publishes `src/index.d.ts`.
 
 ## Boundary
 
-The factory accepts DOM host, canvas, renderer profile, ResourceRegistry, lifecycle AbortSignal and a health observer. It returns
+The factory accepts DOM host, canvas, renderer profile, an explicit composition plan or `null`, ResourceRegistry, lifecycle
+AbortSignal and a health observer. It returns
 15 methods used by DisplayRuntime:
 
 ```text
@@ -35,8 +36,10 @@ picking, capture and disposal. It does not own:
 - product callbacks or controls;
 - caller-visible Three objects.
 
-The backend schema is `scene-engine-three-render-backend@3`. Each `updateBinding` patch has exactly six fields:
-`identity`, `worldMatrix`, `panelAnchorWorld`, `visible`, `batchable`, and `properties`. The anchor is a finite world-space vec3 or `null`;
+The backend schema is `scene-engine-three-render-backend@4`. Each `updateBinding` patch has exactly seven fields:
+`identity`, `worldMatrix`, `panelAnchorWorld`, `visible`, `batchable`, `compositionGroup`, and `properties`. The group is a
+validated catalog-local ID for drawable bindings when a plan is active and `null` for ordinary single-pass rendering and
+non-drawable bindings. The anchor is a finite world-space vec3 or `null`;
 only `render.sprite@3` may have a non-null anchor. `batchable` is a strict boolean port flag set by Display: `false` while the
 Display AnimationSystem owns a transient override for the binding, `true` otherwise. It is not a public Sprite property.
 The two pointer-query methods extend the port without changing the binding record or backend schema.
@@ -67,11 +70,38 @@ disposal also performs the same bulk cleanup. This keeps idle/no-camera churn bo
 leaving a drawable or pickable representation alive. Batch meshes are likewise detached from their shared parent in one
 linear pass before their individual GPU resources are disposed.
 
-Batch membership is rebuilt only when binding membership, eligibility, resources, or a batch fingerprint changes. A steady
+Batch membership is rebuilt only when binding membership, composition group, eligibility, resources, or a batch fingerprint
+changes. A steady
 frame writes only dirty instance records and marks their matrix and panel-anchor attribute ranges for partial GPU upload;
 handles that declare procedural continuous drawing are the only handles sampled every frame. Mesh batch bounds expand
 conservatively when a dirty visible instance moves, so frustum culling and picking cannot use a stale smaller sphere. A later
 batch rebuild resets the bound and lets Three compute it exactly again.
+
+## Selective depth composition
+
+`scene-engine-render-composition@1` has exactly three ordered pass kinds: `protected-base`, `ordinary` and `foreground`.
+Catalog-local groups partition across those passes and one declared group is the default. The backend maps at most 30 groups to
+private Three layers; camera, light and shadow visibility use reserved masks and no caller-visible Three object is exposed.
+
+One logical frame remains one `RenderBackend.render()` call and one Display RAF. With a plan, that call performs:
+
+```text
+clear and draw protected-base color/depth
+draw ordinary against the resulting depth
+clear working depth and redraw protected-base with colorWrite=false
+draw foreground against the restored protected depth
+```
+
+The protected redraw uses the same objects, matrices, vertex shaders, alpha tests and depth-write settings as the color pass;
+material color masks, camera layers, background, shadow update state and renderer clear state are restored in `finally`.
+An alpha-blended protected material that intentionally has `depthWrite=false` does not become an occluder. No duplicate Scene,
+Node tree, RAF, offscreen color target or product-specific post-process is introduced. Capture reads the final composed canvas.
+
+Ordinary objects cannot hide foreground objects, while protected geometry can hide both. Normal geometric depth and stable
+identity ordering remain inside a pass. Exact picking collects the active ordinary or batched hits, rejects non-protected hits
+behind the nearest protected hit, then chooses the highest visible pass before geometric depth. Positive-radius proximity first
+returns that exact composed hit when the pointer covers one; otherwise its existing screen-proxy distance remains primary, with
+composition rank preceding depth for equal-distance candidates and protected proxy depth rejecting covered candidates.
 
 ### Fixed panel vertices
 

@@ -27,6 +27,7 @@ import {
   resolveInteractionPick,
 } from '../interaction/interaction-picking.js';
 import { PointerTargetComponent } from '../interaction/pointer-target-component.js';
+import { RenderCompositionComponent } from '../render/composition.js';
 import { notifyInteractionRuntimeLifecycle } from '../interaction/runtime-lifecycle.js';
 
 export const DISPLAY_RUNTIME_SCHEMA = 'scene-engine-display-node@9';
@@ -206,6 +207,7 @@ export class DisplayRuntime {
       componentEnabledChanged: (component) => this._componentEnabledChanged(component),
       componentPropertiesChanged: (component) => this._componentPropertiesChanged(component),
       componentDetaching: (component) => this._componentDetaching(component),
+      validateComponent: (component) => this._validateComponent(component),
     });
     this._prefabInstantiator = new PrefabInstantiator({
       scene: this._scene,
@@ -241,10 +243,12 @@ export class DisplayRuntime {
     if (this._installed) fail('display-scene-already-installed');
     const definition = this._scene.registries.sceneRegistry.require(sceneName);
     const compiled = definition.compile(this._scene.registries);
+    this._renderSystem.setCompositionPlan(compiled.compositionPlan);
     const backend = assertSynchronous(this._createRenderBackend({
       hostElement: this._hostElement,
       canvas: this._canvas,
       rendererProfile: compiled.rendererProfile,
+      compositionPlan: compiled.compositionPlan,
       resourceRegistry: this._scene.registries.resourceRegistry,
       signal: this._lifecycleAbortController.signal,
       onHealth: (event) => this._handleRenderHealth(event),
@@ -370,6 +374,7 @@ export class DisplayRuntime {
           hostElement: this._hostElement,
           canvas: this._canvas,
           rendererProfile: this._scene.compiledDefinition.rendererProfile,
+          compositionPlan: this._scene.compiledDefinition.compositionPlan,
           resourceRegistry: this._scene.registries.resourceRegistry,
           signal: this._lifecycleAbortController.signal,
           onHealth: (event) => this._handleRenderHealth(event),
@@ -530,8 +535,10 @@ export class DisplayRuntime {
     if (component instanceof AnimationPlayerComponent) this._animationSystem.register(component);
     else if (component instanceof RenderComponent) this._renderSystem.register(component);
     else {
+      this._validateComponent(component);
       this._scheduler.register(component);
       this._panelAnchorSourceChanged(component);
+      this._compositionSourceChanged(component);
     }
   }
   _componentSuspending(component) {
@@ -544,6 +551,7 @@ export class DisplayRuntime {
     else {
       this._scheduler.setEnabled(component, component.enabled);
       this._panelAnchorSourceChanged(component);
+      this._compositionSourceChanged(component);
     }
     if (component instanceof PointerTargetComponent) {
       notifyInteractionRuntimeLifecycle(this, Object.freeze({
@@ -558,7 +566,11 @@ export class DisplayRuntime {
     else if (component instanceof RenderComponent) {
       this._animationSystem.targetPropertiesChanged(component);
       this._renderSystem.markComponentDirty(component);
-    } else this._panelAnchorSourceChanged(component);
+    } else {
+      this._validateComponent(component);
+      this._panelAnchorSourceChanged(component);
+      this._compositionSourceChanged(component);
+    }
     if (component instanceof PointerTargetComponent) {
       notifyInteractionRuntimeLifecycle(this, Object.freeze({
         kind: 'component-changed', component, reason: 'target-role-removed',
@@ -577,6 +589,7 @@ export class DisplayRuntime {
     else {
       this._scheduler.unregister(component);
       this._panelAnchorSourceChanged(component);
+      this._compositionSourceChanged(component);
     }
   }
 
@@ -584,6 +597,18 @@ export class DisplayRuntime {
     if (!(component instanceof BillboardComponent)) return;
     const node = attachedComponentNode(component);
     if (node !== null) this._renderSystem.markPanelAnchorSubtreeDirty(node);
+  }
+
+  _validateComponent(component) {
+    if (component instanceof RenderCompositionComponent) {
+      this._renderSystem.validateCompositionComponent(component);
+    }
+  }
+
+  _compositionSourceChanged(component) {
+    if (!(component instanceof RenderCompositionComponent)) return;
+    const node = attachedComponentNode(component);
+    if (node !== null) this._renderSystem.markCompositionSubtreeDirty(node);
   }
 
   _mutated() { this._revision += 1; this.requestDraw(); }

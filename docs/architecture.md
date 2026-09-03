@@ -11,13 +11,13 @@ mutable product World
   -> one background transport sender
   -> SceneEngineClient 0.16
        -> immutable WorldState + cumulative ACK + O(1) DisplaySummary
-       -> DisplayRuntime 0.16 AuthorityPort + DisplayKindRegistry
+       -> DisplayRuntime 0.17 AuthorityPort + DisplayKindRegistry
             -> one NodeIndex / one NodeGraph / one Component scheduler / one RAF
             -> one private flat Prefab materialization ledger
             -> pointer interaction controller -> Display PointerNodeEventHub
                  -> optional existing engine.input -> product PointerNodeEventHub
             -> RenderSystem
-                 -> flat ThreeRenderBackend 0.13.0 bindings
+                 -> flat ThreeRenderBackend 0.14.0 bindings + selective depth composition
 ```
 
 The boundary is renderer-isolated: product code and Arts definitions use Display contracts, while only the browser composition
@@ -72,6 +72,12 @@ lookup key; `gameplayType` is non-unique state-contract metadata, so multiple Pr
 `scene-engine-prefab-definition@5` can compose exact child Prefab ids through fixed `prefabInstances`, bounded dynamic
 `prefabSlots`. The catalog compiler validates every fixed reference and every slot allowlist, including missing definitions and
 cycles, before the runtime installs any Scene.
+
+Scene definition `scene-engine-scene-definition@3` explicitly carries either `compositionPlan: null` for ordinary single-pass
+rendering or one closed `scene-engine-render-composition@1` plan. The plan has exactly protected-base, ordinary and foreground
+passes, catalog-local group IDs and one explicit default group. The nearest enabled `render.composition@1` component on a Node
+ancestor selects the group for descendant drawable bindings. Display validates static and resolved memberships before exposure;
+the backend receives only the final generic group ID and never product roles.
 
 `node-set-property` and `node-unset-property` update one top-level member of the root's complete authority state, then reuse the
 same synchronous resolver/reconcile path as `node-set-state`; a dot in a name is literal, not a nested path. `null` is a value,
@@ -156,8 +162,9 @@ Animation target scope is established from materialization identity/provenance, 
 starts with `prefab/`. Each nested definition instance therefore gets its own `$root` and local-path namespace even though all
 targets are ordinary Components in the one runtime graph.
 
-The backend owns only renderer resources and flat `(nodeName, componentKey)` bindings. It also owns the screen-space bounds or
-pick proxy used for proximity queries, because only the renderer knows the effective ordinary, batched and compensated
+The backend owns only renderer resources and flat `(nodeName, componentKey)` bindings. It executes the Scene's optional
+selective-depth plan inside the same Scene, camera and RAF, and keeps batch membership separated by composition group. It also
+owns the screen-space bounds or pick proxy used for proximity queries, because only the renderer knows the effective ordinary, batched and compensated
 representation. Display resolves the returned binding through its one Node graph and owns click, context-click, double-click,
 drag and proximity state. Neither layer interprets product metadata or returns Three objects. For an authority-owned target,
 Display exposes the outer numeric Node ID on one frozen pointer-node event. Display and Python listener hubs key on that same ID

@@ -145,6 +145,8 @@ export class DeterministicThreeRenderer {
     this.pixelRatio = 1;
     this.width = 1;
     this.height = 1;
+    this.autoClear = true;
+    this.shadowMap = { autoUpdate: true };
     this.info = Object.freeze({
       render: { calls: 0 },
       memory: { geometries: 0, textures: 0 },
@@ -158,6 +160,8 @@ export class DeterministicThreeRenderer {
     this.draws += 1;
     this.info.render.calls += 1;
   }
+  clear() {}
+  clearDepth() {}
   dispose() { this.disposed = true; }
 }
 
@@ -500,6 +504,7 @@ function createFoundationScene() {
     id: 'main',
     sceneProfile: 'foundation',
     rendererProfile: PROFILE,
+    compositionPlan: null,
     activeCameraLocalName: 'camera',
     nodes: [
       {

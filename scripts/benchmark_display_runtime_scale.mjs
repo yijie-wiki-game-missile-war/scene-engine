@@ -96,6 +96,8 @@ class TestRenderer {
     this.pixelRatio = 1;
     this.draws = 0;
     this.disposed = false;
+    this.autoClear = true;
+    this.shadowMap = { autoUpdate: true };
     this.info = {
       render: { calls: 0 },
       memory: { geometries: 0, textures: 0 },
@@ -110,6 +112,8 @@ class TestRenderer {
     this.draws += 1;
     this.info.render.calls += 1;
   }
+  clear() {}
+  clearDepth() {}
   dispose() { this.disposed = true; }
 }
 
@@ -296,6 +300,7 @@ function sceneDefinition() {
     id: 'benchmark-scale',
     sceneProfile: 'benchmark.scale.profile',
     rendererProfile: rendererProfile(),
+    compositionPlan: null,
     activeCameraLocalName: 'camera',
     nodes: [{
       localName: 'camera',

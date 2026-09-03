@@ -4,9 +4,38 @@ import { assertLocalPath } from '../node/node-name.js';
 import { fail } from '../runtime/health.js';
 import { AnimationPlayerComponent } from '../animation/animation-player.js';
 import { CameraComponent } from '../render/components.js';
+import {
+  RenderCompositionComponent,
+  compositionGroupIds,
+  defineRenderComposition,
+} from '../render/composition.js';
 import { Resource } from './resource.js';
 
-export const SCENE_DEFINITION_SCHEMA = 'scene-engine-scene-definition@2';
+export const SCENE_DEFINITION_SCHEMA = 'scene-engine-scene-definition@3';
+
+function validateCompositionComponents(components, compositionPlan) {
+  const groups = compositionGroupIds(compositionPlan);
+  for (const component of components) {
+    if (component.type !== RenderCompositionComponent.typeId) continue;
+    if (compositionPlan === null) fail('display-render-composition-plan-required');
+    if (!groups.has(component.properties.group)) fail('display-render-composition-group-missing');
+  }
+}
+
+function validatePrefabComposition(compiled, compositionPlan, visited = new Set()) {
+  if (visited.has(compiled.id)) return;
+  visited.add(compiled.id);
+  validateCompositionComponents(compiled.root.components, compositionPlan);
+  for (const node of compiled.nodes) validateCompositionComponents(node.components, compositionPlan);
+  for (const child of compiled.prefabInstances) {
+    validatePrefabComposition(child.compiledPrefab, compositionPlan, visited);
+  }
+  for (const slot of compiled.prefabSlots) {
+    for (const child of slot.allowedPrefabs) {
+      validatePrefabComposition(child.compiledPrefab, compositionPlan, visited);
+    }
+  }
+}
 
 function normalizeRendererProfile(value) {
   const record = exactKeys(value, ['drawMode', 'maximumPixelRatio', 'clearRgba', 'antialias',
@@ -60,11 +89,14 @@ function orderAndValidateParents(entries, code) {
 export class SceneDefinition extends Resource {
   constructor(value) {
     const record = exactKeys(value, ['schema', 'id', 'sceneProfile', 'rendererProfile',
-      'activeCameraLocalName', 'nodes', 'prefabInstances'], ['revision'],
+      'compositionPlan', 'activeCameraLocalName', 'nodes', 'prefabInstances'], ['revision'],
     'display-scene-definition-invalid');
     if (record.schema !== SCENE_DEFINITION_SCHEMA || !Array.isArray(record.nodes)
         || !Array.isArray(record.prefabInstances)) fail('display-scene-definition-invalid');
-    const descriptor = cloneAndFreeze(record, 'display-scene-definition-invalid');
+    const compositionPlan = record.compositionPlan === null
+      ? null : defineRenderComposition(record.compositionPlan);
+    const descriptor = cloneAndFreeze({ ...record, compositionPlan },
+      'display-scene-definition-invalid');
     super({ id: nonemptyString(record.id, 'display-scene-id-invalid'), schema: record.schema,
       revision: record.revision ?? 0, descriptor });
     Object.freeze(this);
@@ -75,6 +107,8 @@ export class SceneDefinition extends Resource {
     const source = this.describe();
     const sceneProfile = nonemptyString(source.sceneProfile, 'display-scene-profile-invalid');
     const rendererProfile = normalizeRendererProfile(source.rendererProfile);
+    const compositionPlan = source.compositionPlan === null
+      ? null : defineRenderComposition(source.compositionPlan);
     const allLocalNames = new Set();
     const nodes = source.nodes.map((value) => {
       const record = exactKeys(value, ['localName', 'parentLocalName', 'components'],
@@ -130,6 +164,10 @@ export class SceneDefinition extends Resource {
       });
     });
     const ordered = orderAndValidateParents([...nodes, ...prefabInstances], 'display-scene-cycle');
+    for (const node of nodes) validateCompositionComponents(node.components, compositionPlan);
+    for (const instance of prefabInstances) {
+      validatePrefabComposition(instance.compiledPrefab, compositionPlan);
+    }
     const activeCameraLocalName = assertLocalPath(source.activeCameraLocalName);
     const cameraNode = nodes.find((node) => node.localName === activeCameraLocalName);
     if (!cameraNode || !cameraNode.components.some((component) => component.type === CameraComponent.typeId)) {
@@ -140,6 +178,7 @@ export class SceneDefinition extends Resource {
       id: this.id,
       sceneProfile,
       rendererProfile,
+      compositionPlan,
       activeCameraLocalName,
       nodes: Object.freeze(nodes),
       prefabInstances: Object.freeze(prefabInstances),
