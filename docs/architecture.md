@@ -11,13 +11,13 @@ mutable product World
   -> one background transport sender
   -> SceneEngineClient 0.16
        -> immutable WorldState + cumulative ACK + O(1) DisplaySummary
-       -> DisplayRuntime 0.17 AuthorityPort + DisplayKindRegistry
+            -> DisplayRuntime 0.18 AuthorityPort + DisplayKindRegistry
             -> one NodeIndex / one NodeGraph / one Component scheduler / one RAF
             -> one private flat Prefab materialization ledger
             -> pointer interaction controller -> Display PointerNodeEventHub
                  -> optional existing engine.input -> product PointerNodeEventHub
             -> RenderSystem
-                 -> flat ThreeRenderBackend 0.14.0 bindings + selective depth composition
+                 -> flat ThreeRenderBackend 0.15.0 bindings + material-owned depth state
 ```
 
 The boundary is renderer-isolated: product code and Arts definitions use Display contracts, while only the browser composition
@@ -73,8 +73,8 @@ lookup key; `gameplayType` is non-unique state-contract metadata, so multiple Pr
 `prefabSlots`. The catalog compiler validates every fixed reference and every slot allowlist, including missing definitions and
 cycles, before the runtime installs any Scene.
 
-Scene definition `scene-engine-scene-definition@3` explicitly carries either `compositionPlan: null` for ordinary single-pass
-rendering or one closed `scene-engine-render-composition@1` plan. The plan has exactly protected-base, ordinary and foreground
+Scene definition `scene-engine-scene-definition@3` defaults an omitted or null `compositionPlan` to ordinary single-pass
+rendering and may carry one closed `scene-engine-render-composition@1` plan. The plan has exactly protected-base, ordinary and foreground
 passes, catalog-local group IDs and one explicit default group. The nearest enabled `render.composition@1` component on a Node
 ancestor selects the group for descendant drawable bindings. Display validates static and resolved memberships before exposure;
 the backend receives only the final generic group ID and never product roles.
@@ -148,7 +148,7 @@ RenderSystem.prepareFrame
 RenderBackend.render()
 ```
 
-All built-in render properties, including nested material overrides, sprite atlas frames, surface parameters and particle
+All built-in render properties, including Material-owned depth test/write flags, nested material overrides, sprite atlas frames, surface parameters and particle
 parameters, are normalized and resource-validated before node state changes or commit seal. The Three backend repeats
 defensive checks but must not be the first layer to discover an invalid business record.
 

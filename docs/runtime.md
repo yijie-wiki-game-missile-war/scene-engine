@@ -313,7 +313,7 @@ clears only the rows captured by that packet; an encoding failure does not silen
 
 ## Nested Prefab projection
 
-Nested Prefabs are entirely inside `@scene-engine/display@0.17.0` and Prefab definition schema
+Nested Prefabs are entirely inside `@scene-engine/display@0.18.0` and Prefab definition schema
 `scene-engine-prefab-definition@5`. Property/event commands use `scene-engine-display-node@9`; they do not add a Wire packet
 kind, attachment, second event channel or packet-log schema.
 

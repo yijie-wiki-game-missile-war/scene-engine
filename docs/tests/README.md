@@ -56,7 +56,7 @@ Python 测试由 `uv run python -m pytest -q` 按 `pyproject.toml` 的 `tests/` 
 | [`display-transform.test.mjs`](../../js/packages/display/test/display-transform.test.mjs) | 公共不可变 Matrix4 便利 API、float32 canonicalization、self/parent 乘法次序、shear 保留、点/向量及完整 affine inverse。 |
 | [`node-core.test.mjs`](../../js/packages/display/test/node-core.test.mjs) | Node 名称语法、float32 Matrix4 规范化、真实 NodeGraph `parentWorld*local`、shear、派生 world 溢出拒绝、NodeIndex、dirty-root 合并、最大深度、Billboard 和 LookAt。 |
 | [`node-graph-forest-audit.test.mjs`](../../js/packages/display/test/node-graph-forest-audit.test.mjs) | forest detach/restore 的封闭性、兄弟顺序、身份、dirty 状态和失败前零写入。 |
-| [`definitions.test.mjs`](../../js/packages/display/test/definitions.test.mjs) | Scene、Prefab、Resource 与 built-in Component 的封闭定义、注册、引用、嵌套依赖、深度/规模边界和 exact `prefabId`。 |
+| [`definitions.test.mjs`](../../js/packages/display/test/definitions.test.mjs) | Scene、Prefab、Resource 与 built-in Component 的封闭定义、注册、引用、Material 深度读写、嵌套依赖、深度/规模边界和 exact `prefabId`。 |
 | [`display-kind.test.mjs`](../../js/packages/display/test/display-kind.test.mjs) | Display Kind 0..N Prefab 映射、显式 selector/default、unknown/unimplemented/unresolved 空根、父子层级、有界 diagnostics、state/property 驱动替换/失去/恢复，以及 selector 异常失败关闭。 |
 | [`catalog-identity.test.mjs`](../../js/packages/display/test/catalog-identity.test.mjs) | canonical manifest、构建 artifact、SHA-256、注册顺序独立性、hash domain 隔离和 authority-state schema coverage。 |
 | [`component.test.mjs`](../../js/packages/display/test/component.test.mjs) | Component 同步生命周期、只读能力、pointer-target 封闭角色/JSON data、scheduler 快照、显式事件订阅与同步 handler、final 方法、transform driver 唯一性和资源校验后的原子属性替换。 |
@@ -76,7 +76,7 @@ Python 测试由 `uv run python -m pytest -q` 按 `pyproject.toml` 的 `tests/` 
 | 测试项目 | 覆盖范围 |
 | --- | --- |
 | [`public.test.mjs`](../../js/packages/renderer-three/test/public.test.mjs) | renderer-three 精确公开 API、扁平 RenderBackendPort 和 Three 对象隔离。 |
-| [`backend.test.mjs`](../../js/packages/renderer-three/test/backend.test.mjs) | 扁平 binding、首次更新前的完整 identity world matrix、world matrix、pick/project、相机与灯光、panel compensation、资源替换、sprite batching、surface 和 particle 视觉采样。 |
+| [`backend.test.mjs`](../../js/packages/renderer-three/test/backend.test.mjs) | 扁平 binding、首次更新前的完整 identity world matrix、world matrix、pick/project、相机与灯光、Material 深度读写、panel compensation、资源替换、sprite batching、surface 和 particle 视觉采样。 |
 | [`pointer-queries.test.mjs`](../../js/packages/renderer-three/test/pointer-queries.test.mjs) | CSS 像素半径的 renderer-owned proximity proxy、零半径 exact pick、普通/批处理 binding、稳定距离/深度排序，以及透视/正交相机的有限归一化 world ray。 |
 | [`pointer-display-integration.test.mjs`](../../js/packages/renderer-three/test/pointer-display-integration.test.mjs) | 真实 DisplayRuntime、PointerTarget、Three backend 与相机监听器组合下的 proximity、drag-grab/move/drop、指针捕获、backend rebuild 取消和最终释放。 |
 | [`resource-lifecycle.test.mjs`](../../js/packages/renderer-three/test/resource-lifecycle.test.mjs) | pending load 去重与共享 AbortSignal 扇出取消、资源依赖回收、mesh/texture/model 处理、health envelope、GLTF 部分失败、destroy/recreate 和 backend replacement 释放。 |

@@ -373,6 +373,48 @@ test('sprite has no orientation path and static sprites batch with real Three ob
   backend.dispose();
 });
 
+test('sprite materials apply explicit depth reads and writes independently of alpha mode', async () => {
+  const textureDescriptor = { id: 'texture/depth', kind: 'texture', url: 'memory:depth' };
+  const loadResource = async (resource) => ({
+    kind: resource.kind,
+    descriptor: resource,
+    texture: new THREE.Texture(),
+    ownsTexture: true,
+  });
+  const { backend, registry } = createHarness({
+    descriptors: [textureDescriptor], loadResource,
+  });
+  const properties = {
+    textureResourceId: 'texture/depth', width: 1, height: 1,
+    material: { alphaMode: 'mask', alphaCutoff: 0.035,
+      depthTest: true, depthWrite: false },
+    alpha: 1, frame: 0, renderOrder: 1, pickable: false,
+  };
+  const binding = await backend.createBinding(descriptor(
+    'py/depth', 'sprite', 'render.sprite@3', properties, registry,
+  ));
+  const material = backend._records.get(binding).handle.object.material;
+  assert.equal(material.transparent, false);
+  assert.equal(material.alphaTest, 0.035);
+  assert.equal(material.depthTest, true);
+  assert.equal(material.depthWrite, false);
+
+  const noDepth = { ...properties, material: {
+    ...properties.material, depthTest: false, depthWrite: false,
+  } };
+  backend.updateBinding(binding, patch('py/depth', 'sprite', noDepth));
+  assert.equal(material.depthTest, false);
+  assert.equal(material.depthWrite, false);
+
+  await assert.rejects(() => backend.createBinding(descriptor(
+    'py/invalid-depth', 'sprite', 'render.sprite@3', {
+      ...properties,
+      material: { ...properties.material, depthTest: false, depthWrite: true },
+    }, registry,
+  )), { code: 'three-material-depth-invalid' });
+  backend.dispose();
+});
+
 test('panel compensation keeps its anchor and depth while removing pan-dependent perspective skew', () => {
   const camera = new THREE.PerspectiveCamera(34, 4 / 3, 0.1, 100);
   camera.position.set(0, 8, 10); camera.lookAt(0, 1, 0); camera.updateMatrixWorld(true);

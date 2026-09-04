@@ -1,6 +1,7 @@
 import { cloneAndFreeze, exactKeys, nonemptyString, plainRecord, safeInteger } from '../internal.js';
 import { fail } from '../runtime/health.js';
 import { normalizeAnimationDescriptor } from '../animation/animation-resource.js';
+import { normalizeMaterialProperties } from '../render/components.js';
 import { Resource } from './resource.js';
 
 export const RESOURCE_REGISTRY_SCHEMA = 'scene-engine-resource-registry@1';
@@ -35,7 +36,15 @@ function normalizeDescriptor(value) {
   const permitted = ['id', 'kind', 'schema', 'revision', 'hash', ...shape.required, ...shape.optional];
   for (const key of Object.keys(header)) if (!permitted.includes(key)) fail('display-resource-definition-invalid');
   for (const key of shape.required) if (!Object.hasOwn(header, key)) fail('display-resource-definition-invalid');
-  const descriptor = cloneAndFreeze(header, 'display-resource-definition-invalid');
+  const normalized = kind === 'material'
+    ? {
+      ...header,
+      properties: normalizeMaterialProperties(
+        header.properties ?? {}, false, 'display-resource-definition-invalid',
+      ),
+    }
+    : header;
+  const descriptor = cloneAndFreeze(normalized, 'display-resource-definition-invalid');
   if (Object.hasOwn(descriptor, 'url')) validateUrl(descriptor.url);
   if (Object.hasOwn(descriptor, 'revision')) {
     safeInteger(descriptor.revision, 'display-resource-revision-invalid', { minimum: 0 });

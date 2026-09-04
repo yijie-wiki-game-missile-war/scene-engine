@@ -8,8 +8,8 @@ fallback runtime.
 ```text
 scene-engine Python                 0.19.0
 @scene-engine/client               0.16.0
-@scene-engine/display              0.17.0
-@scene-engine/renderer-three       0.14.0
+@scene-engine/display              0.18.0
+@scene-engine/renderer-three       0.15.0
 wire                               scene-engine-wire@3
 display                            scene-engine-display-node@9
 scene definition                   scene-engine-scene-definition@3
@@ -649,9 +649,16 @@ fail-closed by the new component normalizers; model/sprite/particle use `render.
 Resource-dependent checks use the registered descriptor, for example resource-kind compatibility and texture-atlas frame bounds. The
 Three backend keeps defensive validation, but an invalid business record must not first fail on the next RAF after ACK.
 
+Material records own their depth behavior in every Scene. Alongside tint, opacity, emissive and alpha fields, the closed
+record accepts `depthTest` and `depthWrite`. Omitted values preserve the safe defaults: every material tests depth; opaque and
+masked materials write depth, while blended materials do not. A material may explicitly disable either operation, but
+`depthTest=false, depthWrite=true` is rejected because the backend cannot honor that pair as two independent operations.
+Model overrides inherit omitted depth fields from their source material. These fields belong to Material Resource properties
+or inline render-component material records; Scene definitions do not enable or override them.
+
 ## Selective depth composition
 
-Scene definition `scene-engine-scene-definition@3` requires `compositionPlan`. `null` explicitly selects the ordinary
+Scene definition `scene-engine-scene-definition@3` may supply `compositionPlan`; omission or `null` selects the ordinary
 single-pass renderer. A composed Scene supplies one closed `scene-engine-render-composition@1` value:
 
 ```js

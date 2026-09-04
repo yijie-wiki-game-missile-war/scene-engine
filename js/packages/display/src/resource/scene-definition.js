@@ -89,11 +89,11 @@ function orderAndValidateParents(entries, code) {
 export class SceneDefinition extends Resource {
   constructor(value) {
     const record = exactKeys(value, ['schema', 'id', 'sceneProfile', 'rendererProfile',
-      'compositionPlan', 'activeCameraLocalName', 'nodes', 'prefabInstances'], ['revision'],
+      'activeCameraLocalName', 'nodes', 'prefabInstances'], ['revision', 'compositionPlan'],
     'display-scene-definition-invalid');
     if (record.schema !== SCENE_DEFINITION_SCHEMA || !Array.isArray(record.nodes)
         || !Array.isArray(record.prefabInstances)) fail('display-scene-definition-invalid');
-    const compositionPlan = record.compositionPlan === null
+    const compositionPlan = record.compositionPlan === undefined || record.compositionPlan === null
       ? null : defineRenderComposition(record.compositionPlan);
     const descriptor = cloneAndFreeze({ ...record, compositionPlan },
       'display-scene-definition-invalid');
@@ -107,7 +107,7 @@ export class SceneDefinition extends Resource {
     const source = this.describe();
     const sceneProfile = nonemptyString(source.sceneProfile, 'display-scene-profile-invalid');
     const rendererProfile = normalizeRendererProfile(source.rendererProfile);
-    const compositionPlan = source.compositionPlan === null
+    const compositionPlan = source.compositionPlan === undefined || source.compositionPlan === null
       ? null : defineRenderComposition(source.compositionPlan);
     const allLocalNames = new Set();
     const nodes = source.nodes.map((value) => {

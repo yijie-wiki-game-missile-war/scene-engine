@@ -15,6 +15,7 @@ import { RenderComponent } from './render-component.js';
 const PROPERTY_ERROR = 'display-component-properties-invalid';
 const MATERIAL_FIELDS = Object.freeze([
   'tintRgba', 'opacity', 'emissive', 'alphaMode', 'alphaCutoff',
+  'depthTest', 'depthWrite',
 ]);
 const MATERIAL_FIELD_SET = new Set(MATERIAL_FIELDS);
 
@@ -51,21 +52,40 @@ function descriptorFor(resourceRegistry, id) {
   return resourceRegistry?.require?.(id)?.describe?.() ?? null;
 }
 
-function normalizeMaterial(value, allowInherit) {
-  const record = exactKeys(value, [], MATERIAL_FIELDS, PROPERTY_ERROR);
+export function normalizeMaterialProperties(value, allowInherit = false, code = PROPERTY_ERROR) {
+  const record = exactKeys(value, [], MATERIAL_FIELDS, code);
   const alphaMode = record.alphaMode
     ?? (allowInherit ? 'inherit' : 'opaque');
   const modes = allowInherit
     ? ['opaque', 'mask', 'blend', 'inherit'] : ['opaque', 'mask', 'blend'];
-  enumValue(alphaMode, modes, PROPERTY_ERROR);
-  const alphaCutoff = optional(record, 'alphaCutoff', unit, 0);
-  if (alphaMode !== 'mask' && alphaCutoff !== 0) fail(PROPERTY_ERROR);
+  enumValue(alphaMode, modes, code);
+  const normalizeUnit = (entry) => {
+    const number = finiteNumber(entry, code);
+    if (number < 0 || number > 1) fail(code);
+    return number;
+  };
+  const alphaCutoff = optional(record, 'alphaCutoff', normalizeUnit, 0);
+  if (alphaMode !== 'mask' && alphaCutoff !== 0) fail(code);
+  const inheritsDepth = allowInherit && alphaMode === 'inherit';
+  const depthTest = optional(record, 'depthTest', (entry) => booleanValue(entry, code),
+    inheritsDepth ? 'inherit' : true);
+  const depthWrite = optional(record, 'depthWrite', (entry) => booleanValue(entry, code),
+    depthTest === false ? false : inheritsDepth ? 'inherit' : alphaMode !== 'blend');
+  if (depthWrite === true && depthTest !== true) fail(code);
   return {
-    tintRgba: optional(record, 'tintRgba', color, 0xffffffff),
-    opacity: optional(record, 'opacity', unit, 1),
-    emissive: optional(record, 'emissive', nonnegative, 0),
+    tintRgba: optional(record, 'tintRgba', (entry) => safeInteger(
+      entry, code, { minimum: 0, maximum: 0xffffffff },
+    ), 0xffffffff),
+    opacity: optional(record, 'opacity', normalizeUnit, 1),
+    emissive: optional(record, 'emissive', (entry) => {
+      const number = finiteNumber(entry, code);
+      if (number < 0) fail(code);
+      return number;
+    }, 0),
     alphaMode,
     alphaCutoff,
+    depthTest,
+    depthWrite,
   };
 }
 
@@ -73,11 +93,11 @@ function normalizeModelOverrides(value) {
   const record = plainRecord(value, PROPERTY_ERROR);
   const keys = Object.keys(record);
   if (keys.some((key) => MATERIAL_FIELD_SET.has(key))) {
-    return normalizeMaterial(record, true);
+    return normalizeMaterialProperties(record, true);
   }
   return Object.fromEntries(keys.map((name) => [
     nonemptyString(name, PROPERTY_ERROR),
-    normalizeMaterial(record[name], true),
+    normalizeMaterialProperties(record[name], true),
   ]));
 }
 
@@ -132,7 +152,7 @@ function normalizeSprite(value, resourceRegistry) {
     textureResourceId,
     width: positive(record.width),
     height: positive(record.height),
-    material: normalizeMaterial(record.material ?? {}, false),
+    material: normalizeMaterialProperties(record.material ?? {}, false),
     alpha: optional(record, 'alpha', unit, 1),
     frame,
     renderOrder: optional(record, 'renderOrder', (entry) => safeInteger(entry, PROPERTY_ERROR), 0),
@@ -169,7 +189,7 @@ function normalizeSurface(value, resourceRegistry) {
   const descriptor = descriptorFor(resourceRegistry, surfaceResourceId);
   return {
     surfaceResourceId,
-    material: normalizeMaterial(record.material ?? {}, false),
+    material: normalizeMaterialProperties(record.material ?? {}, false),
     parameters: normalizeSurfaceParameters(record.parameters ?? {}, descriptor),
     renderOrder: optional(record, 'renderOrder', (entry) => safeInteger(entry, PROPERTY_ERROR), 0),
     pickable: optional(record, 'pickable', (entry) => booleanValue(entry, PROPERTY_ERROR), false),

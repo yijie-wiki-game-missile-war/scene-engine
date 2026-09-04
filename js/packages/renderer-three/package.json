@@ -1,6 +1,6 @@
 {
   "name": "@scene-engine/renderer-three",
-  "version": "0.14.0",
+  "version": "0.15.0",
   "description": "Flat Three.js RenderBackendPort implementation for Scene Engine Display",
   "type": "module",
   "sideEffects": false,

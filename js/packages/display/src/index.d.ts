@@ -178,7 +178,7 @@ export interface SceneDefinitionInput {
   readonly revision?: number;
   readonly sceneProfile: string;
   readonly rendererProfile: RendererProfile;
-  readonly compositionPlan: RenderCompositionPlan | null;
+  readonly compositionPlan?: RenderCompositionPlan | null;
   readonly activeCameraLocalName: string;
   readonly nodes: readonly SceneNodeDefinition[];
   readonly prefabInstances: readonly ScenePrefabInstanceDefinition[];

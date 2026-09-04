@@ -1,6 +1,6 @@
-# Three RenderBackend 0.14.0
+# Three RenderBackend 0.15.0
 
-`@scene-engine/renderer-three@0.14.0` is the browser composition-root implementation of Display's flat RenderBackendPort. Its
+`@scene-engine/renderer-three@0.15.0` is the browser composition-root implementation of Display's flat RenderBackendPort. Its
 root exports only:
 
 ```text
@@ -135,6 +135,10 @@ cancel.
 Material Resource properties are applied once when the resource is created. Mesh bindings clone that configured material;
 ordinary meshes and instance batches retain the same tint and opacity without multiplying the descriptor a second time.
 Each binding owns its clone, so updates, batch rebuilding and disposal do not alter the shared resource or other bindings.
+`depthTest` and `depthWrite` are Material-owned booleans, independent of Scene composition. Omitted values default to
+`true/true` for opaque or masked materials and `true/false` for blended materials. Explicit values are applied unchanged to
+sprites, Material Resources, model overrides and standard or water surfaces; the impossible
+`depthTest=false, depthWrite=true` pair is rejected by Display and defensively by this backend.
 
 The renderer never owns a playable timeline. Display's AnimationSystem samples each player against its own local
 `visualSeconds` origin and delivers only final effective properties (`sprite.frame` today); the backend applies the value

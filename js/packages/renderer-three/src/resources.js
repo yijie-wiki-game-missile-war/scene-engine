@@ -11,6 +11,7 @@ const DISPOSED_ASSETS = new WeakSet();
 const MATERIAL_BASE = new WeakMap();
 const MATERIAL_FIELDS = Object.freeze(new Set([
   'tintRgba', 'opacity', 'emissive', 'alphaMode', 'alphaCutoff',
+  'depthTest', 'depthWrite',
 ]));
 const IDENTITY_MATRIX = Object.freeze([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
 
@@ -710,9 +711,16 @@ function normalizeMaterial(value, allowInherit) {
   }
   const alphaCutoff = unit(record.alphaCutoff ?? 0);
   if (alphaMode !== 'mask' && alphaCutoff !== 0) fail('three-material-alpha-invalid');
+  const inheritsDepth = allowInherit && alphaMode === 'inherit';
+  const depthTest = Object.hasOwn(record, 'depthTest')
+    ? boolean(record.depthTest) : inheritsDepth ? 'inherit' : true;
+  const depthWrite = Object.hasOwn(record, 'depthWrite')
+    ? boolean(record.depthWrite)
+    : depthTest === false ? false : inheritsDepth ? 'inherit' : alphaMode !== 'blend';
+  if (depthWrite === true && depthTest !== true) fail('three-material-depth-invalid');
   return Object.freeze({ tintRgba: uint32(record.tintRgba ?? 0xffff_ffff),
     opacity: unit(record.opacity ?? 1), emissive: nonnegative(record.emissive ?? 0),
-    alphaMode, alphaCutoff });
+    alphaMode, alphaCutoff, depthTest, depthWrite });
 }
 
 function validateModelOverrides(roots, overrides) {
@@ -774,7 +782,7 @@ function rememberMaterialBase(material) {
   MATERIAL_BASE.set(material, { color: material.color?.clone?.() ?? null,
     emissive: material.emissive?.clone?.() ?? null, opacity: material.opacity ?? 1,
     transparent: material.transparent ?? false, depthWrite: material.depthWrite ?? true,
-    alphaTest: material.alphaTest ?? 0 });
+    depthTest: material.depthTest ?? true, alphaTest: material.alphaTest ?? 0 });
 }
 
 function applyMaterial(material, value, allowInherit, externalOpacity = 1) {
@@ -790,14 +798,17 @@ function applyMaterial(material, value, allowInherit, externalOpacity = 1) {
   material.opacity = opacity;
   if (spec.alphaMode === 'inherit') {
     material.alphaTest = base.alphaTest; material.transparent = base.transparent || opacity < 1;
-    material.depthWrite = opacity < 1 ? false : base.depthWrite;
   } else if (spec.alphaMode === 'opaque') {
-    material.alphaTest = 0; material.transparent = false; material.depthWrite = true;
+    material.alphaTest = 0; material.transparent = false;
   } else if (spec.alphaMode === 'mask') {
-    material.alphaTest = spec.alphaCutoff; material.transparent = false; material.depthWrite = true;
+    material.alphaTest = spec.alphaCutoff; material.transparent = false;
   } else {
-    material.alphaTest = 0; material.transparent = true; material.depthWrite = false;
+    material.alphaTest = 0; material.transparent = true;
   }
+  material.depthTest = spec.depthTest === 'inherit' ? base.depthTest : spec.depthTest;
+  material.depthWrite = spec.depthWrite === 'inherit'
+    ? (opacity < 1 ? false : base.depthWrite) : spec.depthWrite;
+  if (!material.depthTest) material.depthWrite = false;
   material.needsUpdate = true;
 }
 
@@ -837,7 +848,9 @@ function updateWaterMaterial(material, properties) {
   material.transparent = properties.material.alphaMode === 'blend';
   material.alphaTest = properties.material.alphaMode === 'mask'
     ? properties.material.alphaCutoff : 0;
-  material.depthWrite = !material.transparent; material.needsUpdate = true;
+  material.depthTest = properties.material.depthTest;
+  material.depthWrite = properties.material.depthWrite;
+  material.needsUpdate = true;
 }
 
 function applyTextureScale(texture, scale) {

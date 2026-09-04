@@ -58,7 +58,6 @@ test('Scene compile is closed and validates active Camera and resource reference
   const invalid = defineScene({
     schema: SCENE_DEFINITION_SCHEMA,
     id: 'main', sceneProfile: 'test', rendererProfile: RENDERER_PROFILE,
-    compositionPlan: null,
     activeCameraLocalName: 'model',
     nodes: [{
       localName: 'model', parentLocalName: null, transform: IDENTITY,
@@ -66,6 +65,7 @@ test('Scene compile is closed and validates active Camera and resource reference
     }],
     prefabInstances: [],
   });
+  assert.equal(invalid.describe().compositionPlan, null);
   assert.throws(() => invalid.compile({ componentRegistry: components, resourceRegistry: resources,
     prefabRegistry: prefabs }), { code: 'display-resource-missing' });
   assert.throws(() => defineScene({ ...invalid.describe(), unknown: true }),
@@ -73,6 +73,52 @@ test('Scene compile is closed and validates active Camera and resource reference
   assert.throws(() => defineScene({
     ...invalid.describe(), schema: 'scene-engine-scene-definition@1',
   }), { code: 'display-scene-definition-invalid' });
+});
+
+test('Material depth reads and writes are closed, normalized, and independent of Scene', () => {
+  const components = createComponentRegistry();
+  const resources = createResourceRegistry([
+    { id: 'texture/card', kind: 'texture', url: './card.png' },
+    {
+      id: 'material/card', kind: 'material', family: 'material.unlit',
+      properties: { alphaMode: 'mask', alphaCutoff: 0.035,
+        depthTest: true, depthWrite: false },
+    },
+  ]);
+  assert.deepEqual(resources.require('material/card').describe().properties, {
+    tintRgba: 0xffffffff,
+    opacity: 1,
+    emissive: 0,
+    alphaMode: 'mask',
+    alphaCutoff: 0.035,
+    depthTest: true,
+    depthWrite: false,
+  });
+
+  const sprite = components.compile({
+    key: 'sprite', type: 'render.sprite@3', properties: {
+      textureResourceId: 'texture/card', width: 1, height: 1,
+      material: { alphaMode: 'blend' },
+    },
+  }, resources);
+  assert.equal(sprite.properties.material.depthTest, true);
+  assert.equal(sprite.properties.material.depthWrite, false);
+
+  for (const material of [
+    { depthTest: false, depthWrite: true },
+    { depthTest: 'yes' },
+    { depthWrite: 1 },
+  ]) {
+    assert.throws(() => components.compile({
+      key: 'sprite', type: 'render.sprite@3', properties: {
+        textureResourceId: 'texture/card', width: 1, height: 1, material,
+      },
+    }, resources), { code: 'display-component-properties-invalid' });
+  }
+  assert.throws(() => createResourceRegistry([{
+    id: 'material/invalid', kind: 'material', family: 'material.unlit',
+    properties: { depthTest: false, depthWrite: true },
+  }]), { code: 'display-resource-definition-invalid' });
 });
 
 test('Prefab compile rejects non-identity root, duplicate local paths, and unknown fields', () => {
