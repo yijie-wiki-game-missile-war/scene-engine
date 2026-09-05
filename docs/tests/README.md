@@ -76,7 +76,7 @@ Python 测试由 `uv run python -m pytest -q` 按 `pyproject.toml` 的 `tests/` 
 | 测试项目 | 覆盖范围 |
 | --- | --- |
 | [`public.test.mjs`](../../js/packages/renderer-three/test/public.test.mjs) | renderer-three 精确公开 API、扁平 RenderBackendPort 和 Three 对象隔离。 |
-| [`backend.test.mjs`](../../js/packages/renderer-three/test/backend.test.mjs) | 扁平 binding、首次更新前的完整 identity world matrix、world matrix、pick/project、相机与灯光、Material 深度读写、panel compensation、资源替换、sprite batching、surface 和 particle 视觉采样。 |
+| [`backend.test.mjs`](../../js/packages/renderer-three/test/backend.test.mjs) | 扁平 binding、首次更新前的完整 identity world matrix、world matrix、pick/project、相机与灯光、Material 深度读写、panel compensation、资源替换、sprite batching、surface 和 particle 视觉采样、低 seed 多轴去相关，以及隐藏/零强度 emitter 的空闲与恢复。 |
 | [`pointer-queries.test.mjs`](../../js/packages/renderer-three/test/pointer-queries.test.mjs) | CSS 像素半径的 renderer-owned proximity proxy、零半径 exact pick、普通/批处理 binding、稳定距离/深度排序，以及透视/正交相机的有限归一化 world ray。 |
 | [`pointer-display-integration.test.mjs`](../../js/packages/renderer-three/test/pointer-display-integration.test.mjs) | 真实 DisplayRuntime、PointerTarget、Three backend 与相机监听器组合下的 proximity、drag-grab/move/drop、指针捕获、backend rebuild 取消和最终释放。 |
 | [`resource-lifecycle.test.mjs`](../../js/packages/renderer-three/test/resource-lifecycle.test.mjs) | pending load 去重与共享 AbortSignal 扇出取消、资源依赖回收、mesh/texture/model 处理、health envelope、GLTF 部分失败、destroy/recreate 和 backend replacement 释放。 |

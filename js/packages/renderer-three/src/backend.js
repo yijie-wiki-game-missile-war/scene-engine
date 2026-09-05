@@ -249,10 +249,15 @@ export class ThreeRenderBackend {
       fail('three-active-camera-invalid');
     }
     this._activeCamera = cameraRecord;
-    for (const record of this._continuousRecords) record.handle.sample(frame);
+    let activeContinuousRecord = false;
+    for (const record of this._continuousRecords) {
+      if (!continuousRecordIsActive(record)) continue;
+      record.handle.sample(frame);
+      activeContinuousRecord = true;
+    }
     this._updateBatches();
     const requiresContinuousDraw = this._pending.size > 0
-      || this._continuousRecords.size > 0;
+      || activeContinuousRecord;
     return Object.freeze({ requiresContinuousDraw });
   }
 
@@ -1016,6 +1021,12 @@ function compileComposition(plan) {
     allGroupMask,
     protectedGroups: new Set(plan.passes[0].groups),
   });
+}
+
+function continuousRecordIsActive(record) {
+  if (!record.visible) return false;
+  const predicate = record.handle.isContinuousDrawActive;
+  return typeof predicate !== 'function' || predicate.call(record.handle) === true;
 }
 
 function restoreColorWrite(materials) {

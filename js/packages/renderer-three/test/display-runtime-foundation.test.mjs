@@ -105,6 +105,11 @@ test('DisplayRuntime drives geometry, nested Prefabs, authority activity, animat
       assert.equal(moverRecords.sprite.handle.object.geometry.type, 'PlaneGeometry');
       assert.equal(moverRecords.model.handle.object.isGroup, true);
       assert.equal(moverRecords.model.handle.object.children[0].isMesh, true);
+      assert.equal(moverRecords.model.handle.object.children[0].material.opacity, 0.75);
+      assert.equal(moverRecords.model.handle.object.children[0].material.transparent, true);
+      assert.equal(moverRecords.model.handle.object.children[0].material.depthTest, true);
+      assert.equal(moverRecords.model.handle.object.children[0].material.depthWrite, false,
+        'Display-normalized inherited depth disables writes for a translucent model override');
       assert.equal(moverRecords.surface.handle.object.isMesh, true);
       assert.equal(moverRecords.surface.handle.object.material.type, 'ShaderMaterial');
       assert.equal(moverRecords.particle.handle.object.isPoints, true);

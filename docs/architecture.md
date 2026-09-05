@@ -17,7 +17,7 @@ mutable product World
             -> pointer interaction controller -> Display PointerNodeEventHub
                  -> optional existing engine.input -> product PointerNodeEventHub
             -> RenderSystem
-                 -> flat ThreeRenderBackend 0.15.0 bindings + material-owned depth state
+                 -> flat ThreeRenderBackend 0.15.3 bindings + material-owned depth state
 ```
 
 The boundary is renderer-isolated: product code and Arts definitions use Display contracts, while only the browser composition

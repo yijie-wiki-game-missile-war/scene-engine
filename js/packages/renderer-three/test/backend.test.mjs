@@ -536,3 +536,102 @@ test('water and particle visual samplers request continuous draw without RenderT
   assert.equal(particleObject.geometry.attributes.position.version > 0, true);
   backend.dispose();
 });
+
+test('hidden and zero-intensity particle emitters idle, clear, and resume continuous drawing', async () => {
+  const descriptors = [
+    { id: 'particle/trail', kind: 'particle', maximumCapacity: 64,
+      textureResourceId: null, defaults: {} },
+  ];
+  const { backend, registry } = createHarness({ descriptors });
+  const camera = await backend.createBinding(descriptor('scene/camera', 'camera',
+    'render.camera@1', CAMERA_PROPERTIES, registry));
+  const activeProperties = { particleResourceId: 'particle/trail', intensity: 1,
+    parameters: { durationTicks: 60, capacity: 32, seed: 11, rate: 30, size: 0.2,
+      velocity: [0, 2, 0], spread: [1, 0, 1], gravity: [0, -9.8, 0],
+      blendMode: 'normal' }, renderOrder: 1 };
+  const particle = await backend.createBinding(descriptor('py/trail', 'particle',
+    'render.particle@2', activeProperties, registry));
+  backend.updateBinding(camera, patch('scene/camera', 'camera', CAMERA_PROPERTIES));
+  backend.updateBinding(particle, patch('py/trail', 'particle', activeProperties));
+
+  assert.equal(backend.prepareFrame(frame(camera, 0, 0)).requiresContinuousDraw, true);
+  backend.prepareFrame(frame(camera, 60, 1));
+  const particleObject = backend._records.get(particle).handle.object;
+  assert.equal(particleObject.geometry.drawRange.count > 0, true);
+
+  backend.updateBinding(particle, patch('py/trail', 'particle', activeProperties,
+    new THREE.Matrix4(), false));
+  const hiddenPositionVersion = particleObject.geometry.attributes.position.version;
+  assert.equal(backend.prepareFrame(frame(camera, 120, 2)).requiresContinuousDraw, false);
+  assert.equal(particleObject.geometry.attributes.position.version, hiddenPositionVersion,
+    'hidden emitters are not sampled');
+
+  backend.updateBinding(particle, patch('py/trail', 'particle', activeProperties));
+  assert.equal(backend.prepareFrame(frame(camera, 180, 3)).requiresContinuousDraw, true);
+  assert.equal(particleObject.geometry.attributes.position.version > hiddenPositionVersion, true,
+    'restoring visibility resumes sampling');
+
+  const idleProperties = { ...activeProperties, intensity: 0 };
+  backend.updateBinding(particle, patch('py/trail', 'particle', idleProperties));
+  assert.equal(particleObject.geometry.drawRange.count, 0,
+    'zero intensity clears particles left by the previous active sample');
+  const idlePositionVersion = particleObject.geometry.attributes.position.version;
+  assert.equal(backend.prepareFrame(frame(camera, 240, 4)).requiresContinuousDraw, false);
+  assert.equal(particleObject.geometry.attributes.position.version, idlePositionVersion,
+    'zero-intensity emitters are not sampled');
+
+  backend.updateBinding(particle, patch('py/trail', 'particle', activeProperties));
+  assert.equal(backend.prepareFrame(frame(camera, 300, 5)).requiresContinuousDraw, true);
+  assert.equal(particleObject.geometry.drawRange.count > 0, true);
+  assert.equal(particleObject.geometry.attributes.position.version > idlePositionVersion, true,
+    'restoring intensity resumes sampling');
+  backend.dispose();
+});
+
+test('small particle seeds produce decorrelated two-axis radial spread', async () => {
+  const descriptors = [
+    { id: 'particle/radial', kind: 'particle', maximumCapacity: 64,
+      textureResourceId: null, defaults: {} },
+  ];
+  const { backend, registry } = createHarness({ descriptors });
+  const camera = await backend.createBinding(descriptor('scene/camera', 'camera',
+    'render.camera@1', CAMERA_PROPERTIES, registry));
+  const properties = { particleResourceId: 'particle/radial', intensity: 1,
+    parameters: { durationTicks: 600, capacity: 64, seed: 442, rate: 256, size: 0.2,
+      velocity: [0, 0, 0], spread: [1, 0, 1], gravity: [0, 0, 0],
+      blendMode: 'additive' }, renderOrder: 1 };
+  const particle = await backend.createBinding(descriptor('py/radial', 'particle',
+    'render.particle@2', properties, registry));
+  const copy = await backend.createBinding(descriptor('py/radial-copy', 'particle',
+    'render.particle@2', properties, registry));
+  backend.updateBinding(camera, patch('scene/camera', 'camera', CAMERA_PROPERTIES));
+  backend.updateBinding(particle, patch('py/radial', 'particle', properties));
+  backend.updateBinding(copy, patch('py/radial-copy', 'particle', properties));
+
+  backend.prepareFrame(frame(camera, 0, 0));
+  backend.prepareFrame(frame(camera, 60, 1));
+  const particleObject = backend._records.get(particle).handle.object;
+  assert.equal(particleObject.geometry.drawRange.count, 64);
+  const positions = particleObject.geometry.attributes.position.array;
+  const copyPositions = backend._records.get(copy).handle.object.geometry.attributes.position.array;
+  assert.deepEqual(copyPositions, positions, 'the same seed and sample time remain exact');
+  const x = []; const z = [];
+  for (let index = 0; index < 64; index += 1) {
+    x.push(positions[index * 3]); z.push(positions[index * 3 + 2]);
+  }
+  assert.ok(Math.min(...x) < -0.2 && Math.max(...x) > 0.2,
+    'X spread covers both signs');
+  assert.ok(Math.min(...z) < -0.2 && Math.max(...z) > 0.2,
+    'Z spread covers both signs');
+  const meanX = x.reduce((sum, value) => sum + value, 0) / x.length;
+  const meanZ = z.reduce((sum, value) => sum + value, 0) / z.length;
+  let covariance = 0; let varianceX = 0; let varianceZ = 0;
+  for (let index = 0; index < x.length; index += 1) {
+    const dx = x[index] - meanX; const dz = z[index] - meanZ;
+    covariance += dx * dz; varianceX += dx * dx; varianceZ += dz * dz;
+  }
+  const correlation = covariance / Math.sqrt(varianceX * varianceZ);
+  assert.ok(Math.abs(correlation) < 0.8,
+    `X/Z spread must not collapse to a near-line correlation: ${correlation}`);
+  backend.dispose();
+});
