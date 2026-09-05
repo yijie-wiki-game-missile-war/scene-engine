@@ -356,8 +356,8 @@ the nine fixed names, while `PointerNodeEventHub.dispatch_engine_input` provides
 `handle_input`. It is not a second runtime callback or transport channel; the product still owns validation and the returned
 `MutationResult`.
 
-`start()` always builds and validates a checkpoint, even without clients or a recorder. Scene name, World codec, Display codec
-and catalog identities are frozen for one stream. Later checkpoints must match them and are read-only with respect to the
+`start()` always builds and validates a checkpoint, even without clients or a recorder. Scene name, World codec and Display codec
+are frozen for one stream; Arts catalog identities remain browser-local. Later checkpoints must match the stream identities and are read-only with respect to the
 resident matrix pool. Runtime checks the pool generation so a new-client or periodic checkpoint cannot consume a change that
 existing clients have not received through a commit.
 

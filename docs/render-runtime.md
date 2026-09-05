@@ -1,6 +1,6 @@
-# Three RenderBackend 0.15.0
+# Three RenderBackend 0.15.3
 
-`@scene-engine/renderer-three@0.15.0` is the browser composition-root implementation of Display's flat RenderBackendPort. Its
+`@scene-engine/renderer-three@0.15.3` is the browser composition-root implementation of Display's flat RenderBackendPort. Its
 root exports only:
 
 ```text
@@ -73,7 +73,11 @@ linear pass before their individual GPU resources are disposed.
 Batch membership is rebuilt only when binding membership, composition group, eligibility, resources, or a batch fingerprint
 changes. A steady
 frame writes only dirty instance records and marks their matrix and panel-anchor attribute ranges for partial GPU upload;
-handles that declare procedural continuous drawing are the only handles sampled every frame. Mesh batch bounds expand
+handles that declare procedural continuous drawing are the only handles sampled every frame. A hidden binding is not sampled
+and does not keep requested-mode RAF alive. A continuous handle may additionally expose a renderer-private dynamic activity
+predicate; particle emitters use it to idle at zero intensity, clear any previously drawn points and resume automatically when
+their intensity becomes positive. Particle seed sampling avalanches the complete 32-bit input before conversion to a unit
+value, so adjacent small seeds remain deterministic without collapsing multi-axis spread into a correlated line. Mesh batch bounds expand
 conservatively when a dirty visible instance moves, so frustum culling and picking cannot use a stale smaller sphere. A later
 batch rebuild resets the bound and lets Three compute it exactly again.
 
@@ -135,6 +139,8 @@ cancel.
 Material Resource properties are applied once when the resource is created. Mesh bindings clone that configured material;
 ordinary meshes and instance batches retain the same tint and opacity without multiplying the descriptor a second time.
 Each binding owns its clone, so updates, batch rebuilding and disposal do not alter the shared resource or other bindings.
+Display-normalized model overrides may carry `inherit` for depth reads and writes; the backend preserves those values until
+the cloned source material is available and then resolves them against that material's original depth state.
 `depthTest` and `depthWrite` are Material-owned booleans, independent of Scene composition. Omitted values default to
 `true/true` for opaque or masked materials and `true/false` for blended materials. Explicit values are applied unchanged to
 sprites, Material Resources, model overrides and standard or water surfaces; the impossible

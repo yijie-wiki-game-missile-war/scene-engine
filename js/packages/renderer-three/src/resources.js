@@ -338,6 +338,7 @@ function createParticleHandle(asset, initialProperties) {
     material.blending = values.blendMode === 'additive'
       ? THREE.AdditiveBlending : THREE.NormalBlending;
     material.needsUpdate = true; object.renderOrder = properties.renderOrder;
+    if (properties.intensity === 0) object.geometry.setDrawRange(0, 0);
   };
   configure();
   // Procedural emitter time is renderer-local: a newly created emitter starts from its
@@ -348,6 +349,7 @@ function createParticleHandle(asset, initialProperties) {
     camera: null,
     pickable: false,
     requiresContinuousDraw: true,
+    isContinuousDrawActive() { return properties.intensity > 0; },
     batchFingerprint: null,
     createBatch: null,
     update(nextValue) {
@@ -713,9 +715,9 @@ function normalizeMaterial(value, allowInherit) {
   if (alphaMode !== 'mask' && alphaCutoff !== 0) fail('three-material-alpha-invalid');
   const inheritsDepth = allowInherit && alphaMode === 'inherit';
   const depthTest = Object.hasOwn(record, 'depthTest')
-    ? boolean(record.depthTest) : inheritsDepth ? 'inherit' : true;
+    ? inheritedBoolean(record.depthTest, inheritsDepth) : inheritsDepth ? 'inherit' : true;
   const depthWrite = Object.hasOwn(record, 'depthWrite')
-    ? boolean(record.depthWrite)
+    ? inheritedBoolean(record.depthWrite, inheritsDepth)
     : depthTest === false ? false : inheritsDepth ? 'inherit' : alphaMode !== 'blend';
   if (depthWrite === true && depthTest !== true) fail('three-material-depth-invalid');
   return Object.freeze({ tintRgba: uint32(record.tintRgba ?? 0xffff_ffff),
@@ -959,6 +961,9 @@ function requiredId(value) { if (typeof value !== 'string' || !value || value.tr
   fail('three-resource-id-invalid'); } return value; }
 function assertNotAborted(signal) { if (signal?.aborted) fail('three-resource-load-aborted'); }
 function boolean(value) { if (typeof value !== 'boolean') fail('three-property-boolean-invalid'); return value; }
+function inheritedBoolean(value, allowed) {
+  return allowed && value === 'inherit' ? value : boolean(value);
+}
 function finite(value) { if (typeof value !== 'number' || !Number.isFinite(value)) fail('three-property-number-invalid'); return value; }
 function positive(value) { return typeof value === 'number' && Number.isFinite(value) && value > 0; }
 function positiveNumber(value) { value = finite(value); if (value <= 0) fail('three-property-positive-invalid'); return value; }
@@ -970,5 +975,12 @@ function unit(value) { value = finite(value); if (value < 0 || value > 1) fail('
 function uint32(value) { if (!Number.isSafeInteger(value) || value < 0 || value > 0xffff_ffff) {
   fail('three-property-color-invalid'); } return value; }
 function vector(value) { return Object.freeze(finiteTuple(value, 3, 'three-property-vector-invalid')); }
-function randomUnit(seed) { let value = seed >>> 0; value ^= value << 13; value ^= value >>> 17;
-  value ^= value << 5; return (value >>> 0) / 0xffff_ffff; }
+function randomUnit(seed) {
+  // Offset then avalanche the complete 32-bit input. A bare xorshift keeps nearby
+  // small seeds strongly correlated, which collapses multi-axis particle spread.
+  let value = ((seed >>> 0) + 0x9e37_79b9) >>> 0;
+  value ^= value >>> 16; value = Math.imul(value, 0x85eb_ca6b);
+  value ^= value >>> 13; value = Math.imul(value, 0xc2b2_ae35);
+  value ^= value >>> 16;
+  return (value >>> 0) / 0x1_0000_0000;
+}

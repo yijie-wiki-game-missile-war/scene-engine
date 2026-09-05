@@ -1,0 +1,17 @@
+image: node:24-bookworm
+
+stages: [validate]
+
+validate:
+  stage: validate
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq python3-venv
+    - python3 -m venv /tmp/engine-ci-tools
+    - /tmp/engine-ci-tools/bin/pip install uv==0.12.5
+    - export PATH="/tmp/engine-ci-tools/bin:$PATH"
+    - uv sync --frozen
+    - npm ci
+  script:
+    - uv run --frozen python -m pytest -q
+    - export SCENE_ENGINE_PYTHON="$PWD/.venv/bin/python"
+    - npm test

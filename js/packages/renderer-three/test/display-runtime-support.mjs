@@ -383,7 +383,11 @@ function createGeometryPrefab() {
             type: 'render.model@2',
             properties: {
               modelResourceId: 'foundation/model',
-              materialOverrides: {},
+              materialOverrides: {
+                tintRgba: 0xcc88_44ff,
+                opacity: 0.75,
+                emissive: 0.1,
+              },
               pickable: true,
             },
           }],

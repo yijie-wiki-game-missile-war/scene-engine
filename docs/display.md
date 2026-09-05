@@ -9,7 +9,7 @@ fallback runtime.
 scene-engine Python                 0.19.0
 @scene-engine/client               0.16.0
 @scene-engine/display              0.18.0
-@scene-engine/renderer-three       0.15.0
+@scene-engine/renderer-three       0.15.3
 wire                               scene-engine-wire@3
 display                            scene-engine-display-node@9
 scene definition                   scene-engine-scene-definition@3
