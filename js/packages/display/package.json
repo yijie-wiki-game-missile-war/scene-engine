@@ -1,6 +1,6 @@
 {
   "name": "@scene-engine/display",
-  "version": "0.18.0",
+  "version": "0.21.0",
   "description": "Renderer-isolated browser Scene, Prefab, Node, Component, Resource, and projection runtime",
   "type": "module",
   "sideEffects": false,

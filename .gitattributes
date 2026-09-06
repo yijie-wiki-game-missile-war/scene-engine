@@ -1,0 +1,4 @@
+# Packet-log manifests hash the exact UTF-8 index bytes. Checkout must preserve
+# the generator's LF encoding on Windows as well as Unix.
+/js/packages/client/fixtures/packet-log/**/*.json text eol=lf
+/js/packages/client/fixtures/packet-log/**/*.bin binary

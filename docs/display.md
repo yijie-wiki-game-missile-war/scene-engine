@@ -8,8 +8,8 @@ fallback runtime.
 ```text
 scene-engine Python                 0.19.0
 @scene-engine/client               0.16.0
-@scene-engine/display              0.18.0
-@scene-engine/renderer-three       0.15.3
+@scene-engine/display              0.21.0
+@scene-engine/renderer-three       0.18.0
 wire                               scene-engine-wire@3
 display                            scene-engine-display-node@9
 scene definition                   scene-engine-scene-definition@3
@@ -744,6 +744,22 @@ only that mode may name a camera. Version 1 is not registered or aliased.
 The backend receives the resulting Node world matrix unchanged. Ground decals and models without this behaviour retain their
 declared transforms; there is no renderer-only rotation, product-name branch or second picking transform.
 
+### Shared camera projection
+
+`CameraProperties` accepts optional `projectionProfile: {mode:'upper-field',startNdcY,strength}` for perspective or
+orthographic cameras. The closed profile validates the whole viewport's inverse margin; its data participates in the existing
+component/catalog identity. Display root exports `normalizeProjectionProfile`, `deriveUpperFieldProjection`,
+`projectUpperFieldY`, `unprojectUpperFieldY` and `UPPER_FIELD_INVERSE_MARGIN`. The derivation helper is for an explicitly
+supplied symmetric perspective FOV/downward pitch with no roll, not a camera mode. See
+[the renderer projection contract](render-runtime.md#upper-field-projection-terminal) for rasterization, memory/device bounds
+and supported geometry semantics.
+
+`WorldPointProjection` is now a union: finite projected points have number coordinates/depth and final-viewport visibility;
+unprojectable points have null coordinates/depth and `visible:false`. A visible point need not be unoccluded. Callers must
+check the nullable branch before using its coordinates. Ray and pick queries share the inverse projection. A known
+`display-projection-domain` during a claimed drag skips that movement sample and retains capture, allowing re-entry and
+normal cancel/drop. Domain errors are expected input conditions, not renderer health failures.
+
 ### Fixed panel projection
 
 `render.sprite@3` retains the closed sprite properties and adds shared anchor-relative vertex compensation. Display resolves
@@ -786,3 +802,17 @@ Repeated `dispose()` calls return the same completion operation.
 
 Renderer failure can use explicit `rebuildRenderBackend()` when recoverable; this remounts declarative bindings while preserving
 Node and Component identity. Authority/Display projection failure instead requires a fresh checkpoint/session.
+
+
+Program resources and shared procedural time controls are specified in [Procedural programs](procedural-programs.md).
+`runtime.generatedTextures` reserves source generations and accepts bounded CPU data regions;
+readiness, cancellation, limits and rebuild behavior are specified in [Generated data textures](generated-textures.md).
+
+Sprite projection defaults to full geometry. Explicit `projectionSemantics: 'anchor-extent'` uses the Node-local
+`anchorOffset` (default center) and view-aligned world-unit width/height; local extents are not compressed a second time.
+`pivot` (default `[0.5,0.5]`) locates the image relative to that projected anchor, from a bottom-left image origin.
+The public `SpriteProjectionProperties` type describes the geometry/anchor union; `SpriteProperties` additionally closes
+its mutually exclusive texture/program-material resource branches. Program sprites require anchor-extent, reject
+inline material/alpha/frame, and accept typed updateable `parameters`; see [program sprites](procedural-programs.md#program-sprites). Combining this mode with inherited
+fixed-panel compensation is rejected before draw. Dimensions, clipping, batching and display-hit proxy details are in
+[Sprite projection semantics](render-runtime.md#sprite-projection-semantics).

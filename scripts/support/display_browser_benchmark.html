@@ -11,6 +11,7 @@
   <script type="importmap">
     {
       "imports": {
+        "@scene-engine/display": "/js/packages/display/src/index.js",
         "three": "/node_modules/three/build/three.module.js",
         "three/addons/": "/node_modules/three/examples/jsm/"
       }
@@ -44,10 +45,17 @@
     const bindingCount = positiveInteger(params.get('bindings') ?? '500', 'bindings');
     const ticks = positiveInteger(params.get('ticks') ?? '60', 'ticks');
     const updateRatio = boundedRatio(params.get('updateRatio') ?? '0.01');
+    const host = document.querySelector('#host'), canvas = document.querySelector('#canvas');
+    host.style.width = `${positiveInteger(params.get('width') ?? '640', 'width')}px`;
+    host.style.height = `${positiveInteger(params.get('height') ?? '480', 'height')}px`;
+    const webgl = canvas.getContext('webgl2');
+    let linkCount = 0;
+    const linkProgram = webgl.linkProgram.bind(webgl);
+    webgl.linkProgram = (...args) => { linkCount += 1; return linkProgram(...args); };
     const identity = IDENTITY_MATRIX;
     const profile = Object.freeze({
       drawMode: 'requested',
-      maximumPixelRatio: 1,
+      maximumPixelRatio: 2,
       clearRgba: 0x0810_18ff,
       antialias: false,
       alpha: false,
@@ -232,6 +240,9 @@
         samples.push(performance.now() - started);
       }
       const activeDiagnostics = backends.at(-1).diagnostics();
+      const { dataUrl: _image, ...renderCapture } = backends.at(-1).capture();
+      const viewport = { css: [host.clientWidth, host.clientHeight], buffer: [canvas.width, canvas.height], devicePixelRatio };
+      const activeLinkCount = linkCount;
       const finalSummary = runtime.summary();
       const finalView = runtime.currentView();
       const transformSamples = [...new Set([0, Math.floor((bindingCount - 1) / 2), bindingCount - 1])]
@@ -283,10 +294,10 @@
         schema: 'scene-engine-browser-display-scale@2',
         status: correct ? 'READY' : 'NOT READY',
         parameters: { bindingCount, ticks, updateRatio, updatesPerTick },
-        environment: { userAgent: navigator.userAgent, gpu },
+        environment: { userAgent: navigator.userAgent, gpu, viewport },
         startup: { runtimeConstructMs: round(constructedMs), installReadyFirstFrameMs: round(installReadyFirstFrameMs) },
         commitAndCpuSubmit: summarize(samples),
-        active: { summary: finalSummary, backend: activeDiagnostics, transformSamples },
+        active: { summary: finalSummary, backend: activeDiagnostics, renderCapture, programLinkCount: activeLinkCount, transformSamples },
         dispose: {
           durationMs: round(disposeMs),
           backend: disposedDiagnostics,

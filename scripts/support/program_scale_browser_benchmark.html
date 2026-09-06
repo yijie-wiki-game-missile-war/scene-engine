@@ -1,0 +1,65 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Program scale benchmark</title>
+<style>body{margin:0}canvas{width:100%;height:100%;display:block}</style>
+<script type="importmap">{"imports":{"@scene-engine/display":"/js/packages/display/src/index.js","three":"/node_modules/three/build/three.module.js","three/addons/":"/node_modules/three/examples/jsm/"}}</script>
+</head><body><div id="host"><canvas></canvas></div><script type="module">
+import {createResourceRegistry,deriveUpperFieldProjection} from '@scene-engine/display';
+import {createThreeRenderBackend} from '/js/packages/renderer-three/src/index.js';
+const query=new URLSearchParams(location.search),host=document.querySelector('#host'),canvas=document.querySelector('canvas');
+const sprites=query.get('representation')==='sprite';
+const count=Number(query.get('bindings')??1000),ticks=Number(query.get('ticks')??120),ratio=Number(query.get('updateRatio')??.01);
+host.style.width=`${Number(query.get('width')??640)}px`;host.style.height=`${Number(query.get('height')??480)}px`;
+const gl=canvas.getContext('webgl2'),errors=[],checks={};let backend,items,camera,links=0;
+const linkProgram=gl.linkProgram.bind(gl);gl.linkProgram=(...args)=>{links++;return linkProgram(...args)};
+const original=console.error;console.error=(...args)=>{errors.push(args.map(String).join(' '));original(...args)};
+const matrix=(x=0,y=0,z=0)=>[1,0,0,0,0,1,0,0,0,0,1,0,x,y,z,1];
+const program={id:'program/scale',kind:'program',revision:1,language:'glsl-module@1',stage:'surface',timeChannel:'water',textureSlots:{},
+ parameterSchema:{color:{type:'color',default:[.2,.6,.9],min:0,max:1,updateable:true},amount:{type:'float',default:.5,min:0,max:1,updateable:true}},
+ source:'vec4 evaluate(ProgramInput data){return vec4(p_color*(p_amount+0.1*sin(data.visualSeconds+data.worldPosition.x)),1.0);}'};
+const registry=createResourceRegistry([program,
+ {id:'mesh/quad',kind:'mesh',positions:[-.4,-.4,0,.4,-.4,0,.4,.4,0,-.4,.4,0],indices:[0,1,2,0,2,3]},
+ {id:'material/program',kind:'material',family:'material.program',programResourceId:program.id,textures:{},parameters:{},properties:{alphaMode:sprites?'blend':'opaque',opacity:sprites?.35:1,depthTest:true,depthWrite:!sprites}}]);
+const cameraProps={projection:'perspective',fovYDegrees:55,near:.1,far:1000,
+ projectionProfile:deriveUpperFieldProjection({pitchDegrees:35,fovYDegrees:34,startNdcY:.1,targetNdcY:.79})};
+const desc=(name,type,properties,batchable)=>({nodeName:name,componentKey:'visual',componentType:type,properties,batchable,compositionGroup:null,resourceRegistry:registry});
+const props=amount=>({...(sprites?{width:1,height:1,projectionSemantics:'anchor-extent',pivot:[.5,.2]}:{meshResourceId:'mesh/quad'}),materialResourceId:'material/program',parameters:{amount},pickable:false});
+function update(item,visible=true){backend.updateBinding(item.binding,{identity:{nodeName:item.name,componentKey:'visual'},worldMatrix:item.matrix,panelAnchorWorld:null,visible,batchable:true,compositionGroup:null,properties:props(item.amount)})}
+async function install(saved){
+ backend=createThreeRenderBackend({hostElement:host,canvas,rendererProfile:{drawMode:'requested',maximumPixelRatio:2,clearRgba:0x000000ff,antialias:false,alpha:false,shadows:false,toneMapping:'none'},compositionPlan:null,resourceRegistry:registry,onHealth:event=>errors.push(JSON.stringify(event))});
+ camera=await backend.createBinding(desc('camera','render.camera@1',cameraProps,false));
+ backend.updateBinding(camera,{identity:{nodeName:'camera',componentKey:'visual'},worldMatrix:matrix(0,0,Math.max(50,Math.sqrt(count)*1.2)),panelAnchorWorld:null,visible:true,batchable:false,compositionGroup:null,properties:cameraProps});
+ const columns=Math.ceil(Math.sqrt(count));items=[];
+ for(let i=0;i<count;i++){const item={name:`item/${i}`,amount:saved?.[i]??.5,matrix:matrix(i%columns-columns/2,Math.floor(i/columns)-columns/2),binding:await backend.createBinding(desc(`item/${i}`,sprites?'render.sprite@3':'render.mesh@1',props(saved?.[i]??.5),true))};items.push(item);update(item)}
+ await backend.whenIdle();
+}
+function frame(seconds,running=false){backend.prepareFrame({sourceTick:0,visualSeconds:seconds,visualTimes:{water:{seconds,running}},activeCameraBinding:camera,dirtyBindings:[]});backend.render()}
+function pixels(){const data=new Uint8Array(canvas.width*canvas.height*4);gl.readPixels(0,0,canvas.width,canvas.height,gl.RGBA,gl.UNSIGNED_BYTE,data);return data}
+function same(a,b){return a.length===b.length&&a.every((v,i)=>v===b[i])}
+function snapshot(){const {dataUrl,...capture}=backend.capture();return {capture,diagnostics:backend.diagnostics(),programLinkCount:links}}
+function distribution(values){const sorted=[...values].sort((a,b)=>a-b),p=r=>sorted[Math.ceil(r*sorted.length)-1];return {samples:values.length,p50Ms:p(.5),p95Ms:p(.95),p99Ms:p(.99),maximumMs:sorted.at(-1)}}
+try{
+ if(!Number.isSafeInteger(count)||count<2||count>5000||!Number.isSafeInteger(ticks)||ticks<1||ticks>1000||!Number.isFinite(ratio)||ratio<0||ratio>1)throw Error('fixture bounds: 2..5000 instances, 1..1000 ticks, updateRatio 0..1');
+ const started=performance.now();await install();frame(0);const startupMs=performance.now()-started;
+ for(let i=0;i<20;i++)frame(i/60,true);gl.finish();
+ const initial=snapshot(),updatesPerTick=Math.round(count*ratio),samples=[];
+ for(let tick=0;tick<ticks;tick++){
+  const start=performance.now();for(let j=0;j<updatesPerTick;j++){const item=items[(tick*updatesPerTick+j)%count];item.amount=.3+(tick%60)/100;update(item)}
+  frame(tick/60,true);samples.push(performance.now()-start);
+ }
+ const active=snapshot();checks.representation=sprites?active.diagnostics.batchCount===0&&active.capture.renderer.calls===count+1:active.diagnostics.batchCount===1&&active.diagnostics.instanceCount===count;
+ checks.noRecompile=links===initial.programLinkCount;checks.resourceStable=active.diagnostics.resourceCount===initial.diagnostics.resourceCount&&active.capture.renderer.textures===initial.capture.renderer.textures;
+ frame(3,false);const frozen=pixels();for(let i=0;i<10;i++)frame(3,false);checks.pausedPixels=same(frozen,pixels());
+ items.forEach(item=>update(item,false));frame(3,false);const hidden=snapshot(),hiddenPixels=pixels();
+ checks.hiddenNoWorldDraw=hidden.capture.renderer.calls===1&&hidden.capture.renderer.triangles===1;
+ checks.hiddenClear=hiddenPixels.every((v,i)=>i%4===3||v===0);
+ const saved=items.map(item=>item.amount);backend.dispose();const released=backend.diagnostics();checks.released=released.resourceCount===0&&released.resourceLeaseCount===0;
+ await install(saved);frame(3,false);checks.rebuildPixels=same(frozen,pixels());const rebuilt=snapshot();backend.dispose();checks.finalRelease=backend.diagnostics().resourceCount===0;
+ checks.noErrors=errors.length===0&&gl.getError()===gl.NO_ERROR;
+ const ext=gl.getExtension('WEBGL_debug_renderer_info');publish({schema:'scene-engine-browser-program-scale@1',status:Object.values(checks).every(Boolean)?'READY':'NOT READY',
+  parameters:{representation:sprites?'ordinary program sprites':'instanced program meshes',bindingCount:count,ticks,updateRatio:ratio,updatesPerTick,warmupFrames:20,trianglesPerInstance:2},
+  environment:{userAgent:navigator.userAgent,gpu:ext?gl.getParameter(ext.UNMASKED_RENDERER_WEBGL):gl.getParameter(gl.RENDERER),viewport:{css:[host.clientWidth,host.clientHeight],buffer:[canvas.width,canvas.height],devicePixelRatio}},
+  scope:'CPU parameter update + prepare + WebGL submit; no GPU timer or FPS inference. Backend lifecycle probe; scheduler idle is tested separately by Display runtime tests.',
+  coverage:{summedRectangleAreaCss:sprites?count*Math.pow(host.clientHeight/(2*Math.tan(55*Math.PI/360)*Math.max(50,Math.sqrt(count)*1.2)),2):null,meaning:'sum of unclipped projected rectangles, counting overlap; not GPU time'},
+  startupMs,parameterUpdateAndCpuSubmit:distribution(samples),initial,active,hidden,released,rebuilt,checks,errors});
+}catch(error){backend?.dispose();publish({status:'NOT READY',checks,error:String(error.stack??error),errors})}
+function publish(report){document.body.dataset.result=btoa(unescape(encodeURIComponent(JSON.stringify(report))));document.title=report.status}
+</script></body></html>

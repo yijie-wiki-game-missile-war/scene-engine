@@ -1,3 +1,5 @@
+import { VisualTimeChannels } from './visual-time.js';
+import { GeneratedTextureStore } from './generated-texture-store.js';
 import { ComponentScheduler } from '../component/component-scheduler.js';
 import {
   buildDisplayCatalogManifest,
@@ -8,6 +10,7 @@ import { assertSynchronous, cloneAndFreeze, exactKeys, safeInteger } from '../in
 import { NodeGraph } from '../node/node-graph.js';
 import { NodeIndex } from '../node/node-index.js';
 import { RenderSystem } from '../render/render-system.js';
+import { ProgramInputSystem } from '../render/program-input-system.js';
 import { RenderComponent } from '../render/render-component.js';
 import { AnimationPlayerComponent } from '../animation/animation-player.js';
 import { AnimationSystem } from '../animation/animation-system.js';
@@ -126,6 +129,10 @@ export class DisplayRuntime {
     this._rafId = null;
     this._drawRequested = false;
     this._visualOrigin = null;
+    this._visualTimes = new VisualTimeChannels([...resourceRegistry.values()].map((resource) => resource.describe())
+      .filter((descriptor) => descriptor.kind === 'program').map((descriptor) => descriptor.timeChannel));
+    this._generatedTextures = new GeneratedTextureStore(resourceRegistry, () => this.requestDraw());
+    this.generatedTextures = this._generatedTextures.publicPort;
     this._sceneName = null;
     this._lastFrameTime = null;
     this._frameIndex = 0;
@@ -169,6 +176,7 @@ export class DisplayRuntime {
       onHealth: (event) => this._handleRenderHealth(event),
       onNeedsDraw: () => this.requestDraw(),
     });
+    this._programInputSystem = new ProgramInputSystem({ resourceRegistry, renderSystem: this._renderSystem });
     this._animationSystem = new AnimationSystem({
       resourceRegistry,
       renderSystem: this._renderSystem,
@@ -202,6 +210,7 @@ export class DisplayRuntime {
       nodeIndex: this._nodeIndex,
       nodeGraph: this._nodeGraph,
       animationSystem: this._animationSystem,
+      programInputSystem: this._programInputSystem,
       componentAttached: (component) => this._componentAttached(component),
       componentSuspending: (component) => this._componentSuspending(component),
       componentEnabledChanged: (component) => this._componentEnabledChanged(component),
@@ -250,6 +259,7 @@ export class DisplayRuntime {
       rendererProfile: compiled.rendererProfile,
       compositionPlan: compiled.compositionPlan,
       resourceRegistry: this._scene.registries.resourceRegistry,
+      generatedTextureSource: this._generatedTextures.sourcePort,
       signal: this._lifecycleAbortController.signal,
       onHealth: (event) => this._handleRenderHealth(event),
     }), 'display-render-backend-factory-async');
@@ -300,6 +310,22 @@ export class DisplayRuntime {
     if (this._disposed) return;
     this._drawRequested = true;
     this._scheduleFrame();
+  }
+
+  setVisualTimeControl(channel, control) {
+    this._assertNotDisposed();
+    const seconds = this._visualOrigin === null ? 0 : Math.max(0, (this._frameAdapter.now() - this._visualOrigin) / 1000);
+    const result = this._visualTimes.set(channel, control, seconds);
+    this.requestDraw();
+    return result;
+  }
+
+  setVisualTimePaused(paused) {
+    this._assertNotDisposed();
+    const seconds = this._visualOrigin === null ? 0 : Math.max(0, (this._frameAdapter.now() - this._visualOrigin) / 1000);
+    const result = this._visualTimes.setPaused(paused, seconds);
+    this.requestDraw();
+    return result;
   }
 
   async whenReady() { this._assertNotDisposed(); await this._renderSystem.whenIdle(); }
@@ -376,6 +402,7 @@ export class DisplayRuntime {
           rendererProfile: this._scene.compiledDefinition.rendererProfile,
           compositionPlan: this._scene.compiledDefinition.compositionPlan,
           resourceRegistry: this._scene.registries.resourceRegistry,
+          generatedTextureSource: this._generatedTextures.sourcePort,
           signal: this._lifecycleAbortController.signal,
           onHealth: (event) => this._handleRenderHealth(event),
         });
@@ -419,6 +446,7 @@ export class DisplayRuntime {
     this._drawGateOpen = false;
     this._pendingCursor = null;
     this._disposed = true;
+    this._generatedTextures.dispose();
     this._health = 'disposing';
     this._lifecycleAbortController.abort();
     const rebuild = this._rebuildPromise;
@@ -442,6 +470,7 @@ export class DisplayRuntime {
         // Animation players must drop ownership and transient overrides before the
         // RenderSystem and its backend disappear.
         try { this._animationSystem.clear(); } catch (error) { cleanupErrors.push(error); }
+        try { this._programInputSystem.dispose(); } catch (error) { cleanupErrors.push(error); }
         let renderDisposal = null;
         try { renderDisposal = renderSystem.dispose(); } catch (error) { cleanupErrors.push(error); }
         try { scheduler.clear(); } catch (error) { cleanupErrors.push(error); }
@@ -472,6 +501,7 @@ export class DisplayRuntime {
         this._nodeIndex = null;
         this._scheduler = null;
         this._renderSystem = null;
+        this._programInputSystem = null;
         this._animationSystem = null;
         this._nodeGraph = null;
         this._scene = null;
@@ -512,6 +542,7 @@ export class DisplayRuntime {
     this.authority._assertMatrixPoolSettled();
     this._animationSystem.validateAndApplyPendingChanges();
     this._nodeGraph.flushWorldTransforms();
+    this._renderSystem.validatePendingProjection();
     this._cursor = next;
     this._pendingCursor = null;
     this._drawGateOpen = true;
@@ -532,6 +563,7 @@ export class DisplayRuntime {
   }
 
   _componentAttached(component) {
+    if (this._pendingCursor === null) this._renderSystem.validateProjectionComponent(component);
     if (component instanceof AnimationPlayerComponent) this._animationSystem.register(component);
     else if (component instanceof RenderComponent) this._renderSystem.register(component);
     else {
@@ -542,10 +574,15 @@ export class DisplayRuntime {
     }
   }
   _componentSuspending(component) {
-    return component instanceof AnimationPlayerComponent
-      ? this._animationSystem.suspend(component) : null;
+    if (component instanceof AnimationPlayerComponent) return this._animationSystem.suspend(component);
+    const restoreInputs = this._programInputSystem.suspend(component);
+    if (restoreInputs === null) return null;
+    this._componentDetaching(component);
+    return () => { this._componentAttached(component); restoreInputs(); };
   }
   _componentEnabledChanged(component) {
+    if (this._pendingCursor === null) this._renderSystem.validateProjectionComponent(component);
+    if (!component.enabled) this._programInputSystem.release(component);
     if (component instanceof AnimationPlayerComponent) this._animationSystem.setEnabled(component);
     else if (component instanceof RenderComponent) this._renderSystem.setEnabled(component);
     else {
@@ -562,6 +599,10 @@ export class DisplayRuntime {
     this.requestDraw();
   }
   _componentPropertiesChanged(component) {
+    // A complete Authority candidate is checked at seal; standalone Registry and
+    // enable changes validate before callbacks so Component's rollback stays atomic.
+    if (this._pendingCursor === null) this._renderSystem.validateProjectionComponent(component);
+    this._programInputSystem.propertiesChanged(component);
     if (component instanceof AnimationPlayerComponent) this._animationSystem.propertiesChanged(component);
     else if (component instanceof RenderComponent) {
       this._animationSystem.targetPropertiesChanged(component);
@@ -579,6 +620,7 @@ export class DisplayRuntime {
     this.requestDraw();
   }
   _componentDetaching(component) {
+    this._programInputSystem.release(component);
     if (component instanceof PointerTargetComponent) {
       notifyInteractionRuntimeLifecycle(this, Object.freeze({
         kind: 'component-changed', component, reason: 'target-removed',
@@ -635,6 +677,7 @@ export class DisplayRuntime {
     const frame = Object.freeze({
       sourceTick: this._cursor.sourceTick,
       visualSeconds: Math.max(0, (now - this._visualOrigin) / 1000),
+      visualTimes: this._visualTimes.snapshot(Math.max(0, (now - this._visualOrigin) / 1000)),
       deltaSeconds,
       frameIndex: this._frameIndex,
       display: this._componentContext.publicDisplay,
@@ -668,7 +711,8 @@ export class DisplayRuntime {
   _handleRenderHealth(event) {
     const code = event?.code ?? event?.errorCode ?? 'display-render-backend-health-invalid';
     const message = event?.message ?? event?.errorCode ?? code;
-    if (!this._disposed && this._health !== 'projection-invalid' && this._health !== 'disposed') {
+    const isolatedProgram = event?.isolation === 'program' && code === 'three-program-compile-failed';
+    if (!isolatedProgram && !this._disposed && this._health !== 'projection-invalid' && this._health !== 'disposed') {
       this._health = 'renderer-unhealthy';
       this._cancelFrame();
     }
@@ -678,6 +722,9 @@ export class DisplayRuntime {
       componentKey: event?.componentKey ?? null,
       resourceId: event?.resourceId ?? null,
       recoverable: event?.recoverable === true,
+      ...(isolatedProgram ? { severity: 'warning', isolation: 'program' } : {}),
+      ...(event?.programStage ? { revision: event.revision, programStage: event.programStage,
+        affectedBindingCount: event.affectedBindingCount, diagnostic: event.diagnostic } : {}),
     });
   }
   _failRuntime(code, error, details = {}) {

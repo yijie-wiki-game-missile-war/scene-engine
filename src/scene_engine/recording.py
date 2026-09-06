@@ -256,7 +256,10 @@ class PacketLogWriter:
                 fsync=self._fsync,
             )
             self._paths[PACKET_LOG_INCOMPLETE].unlink()
-            if self._fsync:
+            # Windows does not expose directory descriptors through os.open.
+            # File contents were fsynced above; retain directory durability on
+            # platforms that support it, without hiding genuine POSIX I/O errors.
+            if self._fsync and os.name != "nt":
                 directory_fd = os.open(self.directory, os.O_RDONLY)
                 try:
                     os.fsync(directory_fd)

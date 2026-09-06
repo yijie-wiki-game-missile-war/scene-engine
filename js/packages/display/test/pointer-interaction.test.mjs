@@ -155,6 +155,54 @@ function pointerTargetDefinition({ key = 'pointer', enabled = true, roles = ['se
   return { key, type: 'interaction.pointer-target@1', enabled, properties: { roles, data } };
 }
 
+test('expected projection-domain and unfit-focus queries do not poison Display renderer health', async () => {
+  const fake = createFakeRenderBackend();
+  const ray = fake.backend.screenPointToWorldRay;
+  const { runtime } = await createHarness({ backendFactory: () => fake.backend });
+  fake.backend.screenPointToWorldRay = () => {
+    throw Object.assign(new Error('domain'), { code: 'display-projection-domain' });
+  };
+  assert.throws(() => runtime.screenPointToWorldRay({ clientX: 0, clientY: -100 }),
+    { code: 'display-projection-domain' });
+  fake.backend.screenPointToWorldRay = ray;
+  assert.doesNotThrow(() => runtime.screenPointToWorldRay({ clientX: 0, clientY: 0 }));
+  fake.backend.focusWorldPoint = () => {
+    throw Object.assign(new Error('unfit'), { code: 'three-focus-bounds-unfit' });
+  };
+  assert.throws(() => runtime.focusWorldPoint({ position: [0,0,0], radius: 100 }),
+    { code: 'three-focus-bounds-unfit' });
+  assert.doesNotThrow(() => runtime.screenPointToWorldRay({ clientX: 0, clientY: 0 }));
+  await runtime.dispose();
+});
+
+test('projection-domain movement retains a claimed drag and re-entry can still drop', () => {
+  const { runtime } = controllerRuntime({ exact: exactInteraction() });
+  const ordinaryRay = runtime.screenPointToWorldRay;
+  runtime.screenPointToWorldRay = (query) => {
+    if (query.clientY < 0) throw Object.assign(new Error('outside inverse domain'),
+      { code: 'display-projection-domain' });
+    return ordinaryRay(query);
+  };
+  const element = new FakePointerElement();
+  const events = [], errors = [];
+  const controller = createPointerInteractionController({
+    element, runtime: () => runtime, claim: () => 'claimed',
+    onDragGrab: () => events.push('grab'), onDragMove: () => events.push('move'),
+    onDragDrop: () => events.push('drop'), onCancel: () => events.push('cancel'),
+    onError: (error) => errors.push(error),
+  });
+  element.dispatch('pointerdown', { clientX: 10, clientY: 20 });
+  element.dispatch('pointermove', { clientX: 30, clientY: 20, buttons: 1 });
+  element.dispatch('pointermove', { clientX: 30, clientY: -200, buttons: 1 });
+  assert.deepEqual(events, ['grab']);
+  assert.equal(element.captured.has(1), true);
+  element.dispatch('pointermove', { clientX: 35, clientY: 20, buttons: 1 });
+  element.dispatch('pointerup', { clientX: 35, clientY: 20 });
+  assert.deepEqual(events, ['grab', 'move', 'drop']);
+  assert.deepEqual(errors, []);
+  controller.dispose();
+});
+
 test('pointer-target is a closed default component with ordered roles and deeply frozen JSON data', () => {
   assert.deepEqual(POINTER_TARGET_ROLES, [
     'proximity', 'select', 'drag-source', 'drop-surface', 'drop-target',

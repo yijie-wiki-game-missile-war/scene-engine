@@ -25,6 +25,7 @@ Scene Engine 是面向**服务端权威浏览器游戏**的运行时基础设施
   旋转、缩放和点/向量空间转换，而不引入第二份 TRS 状态。
 - **浏览器 3D 渲染**：当前由隔离的 Three.js 后端负责资源加载、批处理、材质自有的深度读写、选择性深度合成、
   与画面一致的拾取、坐标投影、聚焦和截图，产品与美术定义不需要直接依赖 Three.js 对象。
+- **程序化视觉**：通过受控程序材质、命名纹理、类型化参数和共享视觉时间表达动态表面与背景；面片可组合程序采样、锚点展开与图像定位，投影、深度和查询由引擎统一处理。
 - **统一指针交互**：Display 把点击、右键点击、双击、拖动抓取/移动/放下和带 CSS 像素半径的靠近生命周期
   归一为 renderer-neutral 事件；应用仍负责认领、相机仲裁和把结果映射为产品输入。
 - **玩法与视觉分离**：玩法发布权威状态与真实运动；需要跨 checkpoint 存续的“死亡”等事实使用属性，一次性的
@@ -98,3 +99,7 @@ Scene Engine 不负责：
 - [开发环境](docs/development.md)
 - [测试方法与标准](docs/testing.md)
 - [测试项目](docs/tests/README.md)
+
+
+- [Procedural programs](docs/procedural-programs.md)
+- [CPU generated data textures](docs/generated-textures.md)

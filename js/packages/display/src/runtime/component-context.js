@@ -46,6 +46,7 @@ export function createInternalComponentContext({
   nodeIndex,
   nodeGraph,
   animationSystem = null,
+  programInputSystem = null,
   publicDisplay = null,
   componentAttached = null,
   componentSuspending = null,
@@ -86,6 +87,10 @@ export function createInternalComponentContext({
     componentDetaching,
     validateComponent,
   };
+  if (programInputSystem !== null) {
+    context.setProgramParameters = (requester, key, patch) => programInputSystem.set(requester, key, patch);
+    context.captureProgramInputs = component => programInputSystem.capture(component);
+  }
   if (animationSystem !== null) {
     // Live contexts apply immediately. Prefab candidate contexts provide a private
     // queueing adapter and replay only after the complete staged bundle is adopted.

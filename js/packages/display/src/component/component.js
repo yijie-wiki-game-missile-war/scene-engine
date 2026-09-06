@@ -7,6 +7,7 @@ const FINAL_INSTANCE_METHODS = Object.freeze([
   'attach',
   'setEnabled',
   'setDrivenLocalTransform',
+  'setProgramParameters',
   'setAnimation',
   'playAnimation',
   'stopAnimation',
@@ -150,6 +151,11 @@ export function replaceComponentProperties(component, properties) {
   return component[REPLACE_PROPERTIES](COMPONENT_MUTATION_TOKEN, properties);
 }
 
+// Transaction-local closure; never enters the public Component capability surface.
+export function captureComponentVisualInputs(component) {
+  return ATTACHMENTS.get(component)?.context.captureProgramInputs?.(component) ?? null;
+}
+
 /** Package-private synchronous event barrier used only by AuthorityPort. */
 export function dispatchComponentEvent(component, event) {
   if (!(component instanceof Component) || component._disposed) {
@@ -262,6 +268,15 @@ export class Component {
     return this;
   }
 
+  setProgramParameters(renderKey, patch) {
+    if (this._disposed) fail('display-component-disposed');
+    nonemptyString(renderKey, 'display-program-input-invalid');
+    const attachment = ATTACHMENTS.get(this);
+    if (!this._attached || !attachment?.registered) fail('display-component-not-attached');
+    if (typeof attachment.context.setProgramParameters !== 'function') fail('display-program-input-unavailable');
+    attachment.context.setProgramParameters(this, renderKey, patch);
+  }
+
   setEnabled(enabled) {
     if (this._disposed) fail('display-component-disposed');
     if (typeof enabled !== 'boolean') fail('display-component-enabled-invalid');
@@ -340,12 +355,14 @@ export class Component {
     if (token !== COMPONENT_MUTATION_TOKEN) fail('display-component-properties-readonly');
     if (this._disposed) fail('display-component-disposed');
     const previous = this.#properties;
+    const restoreInputs = captureComponentVisualInputs(this);
     this.#properties = properties;
     const attachment = ATTACHMENTS.get(this);
     try {
       if (this._attached) attachment.context.componentPropertiesChanged?.(this);
     } catch (error) {
       this.#properties = previous;
+      restoreInputs?.();
       throw error;
     }
     return this.#properties;

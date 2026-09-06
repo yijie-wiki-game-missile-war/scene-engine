@@ -22,6 +22,10 @@ function requireAnimationDescriptor(resourceRegistry, animationId) {
 }
 
 function atlasFrameLimit(resourceRegistry, spriteProperties, animationId, trackIndex, track) {
+  if (spriteProperties.materialResourceId !== undefined) {
+    fail('display-animation-target-type-invalid',
+      `Animation ${animationId} track ${trackIndex} targets program sprite ${describeTarget(track)} without an atlas frame channel.`);
+  }
   const texture = resourceRegistry.require(spriteProperties.textureResourceId).describe();
   if (texture.kind !== 'texture-atlas') {
     fail('display-animation-target-type-invalid',

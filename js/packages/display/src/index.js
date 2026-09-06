@@ -5,6 +5,8 @@ export {
   createDisplayRuntime,
 } from './runtime/display-runtime.js';
 export { TICKS_PER_SECOND } from './constants.js';
+export { UPPER_FIELD_INVERSE_MARGIN, normalizeProjectionProfile, projectUpperFieldY,
+  unprojectUpperFieldY, deriveUpperFieldProjection } from './math/projection.js';
 export { DisplayTransform } from './math/display-transform.js';
 export {
   DISPLAY_CATALOG_MANIFEST_SCHEMA,
@@ -81,3 +83,6 @@ export {
   createPrefabRegistry,
 } from './resource/registries.js';
 export { createComponentRegistry } from './component/component-registry.js';
+
+export { PROGRAM_RESOURCE_SCHEMA, normalizeProgramParameters } from './resource/program-resource.js';
+export { GENERATED_TEXTURE_RESOURCE_SCHEMA, GENERATED_TEXTURE_LIMITS } from './resource/generated-texture-resource.js';

@@ -476,6 +476,9 @@ class PointerInteractionControllerImplementation {
       if (runtime === null || this._active === null) return;
       let query;
       try { query = this._query(runtime, event, false); } catch (error) {
+        // An out-of-domain pointer has no ray; retain the claimed gesture and
+        // its last valid sample so re-entry and cancel/drop remain available.
+        if (error?.code === 'display-projection-domain') return;
         this._cancelGesture('query-failed', event);
         this._reportError(error);
         return;
@@ -902,6 +905,7 @@ class PointerInteractionControllerImplementation {
   }
 
   _reportError(error) {
+    if (error?.code === 'display-projection-domain') return;
     const callback = this._callbacks?.onError ?? null;
     if (callback === null) return;
     try { this._invokeSynchronous('onError', callback, [error]); } catch {

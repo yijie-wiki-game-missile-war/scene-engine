@@ -2,16 +2,19 @@ import { cloneAndFreeze, exactKeys, nonemptyString, plainRecord, safeInteger } f
 import { fail } from '../runtime/health.js';
 import { normalizeAnimationDescriptor } from '../animation/animation-resource.js';
 import { normalizeMaterialProperties } from '../render/components.js';
+import { normalizeProgramDescriptor, normalizeProgramParameters, validateProgramTextures } from './program-resource.js';
 import { Resource } from './resource.js';
+import { normalizeGeneratedTextureDescriptor } from './generated-texture-resource.js';
+import { validateTextureSampling, requireOrdinaryTextureSampling } from './texture-sampling.js';
 
 export const RESOURCE_REGISTRY_SCHEMA = 'scene-engine-resource-registry@1';
 
 const SHAPES = Object.freeze({
   model: { required: ['url'], optional: ['lodUrls'] },
   mesh: { required: [], optional: ['url', 'positions', 'normals', 'uvs', 'indices'] },
-  texture: { required: ['url'], optional: ['colorSpace', 'wrap'] },
+  texture: { required: ['url'], optional: ['colorSpace', 'wrap', 'filter', 'minFilter', 'magFilter', 'mipmaps', 'alphaEncoding', 'alphaSampling'] },
   'texture-atlas': { required: ['columns', 'rows'], optional: ['url', 'textureResourceId', 'colorSpace', 'wrap'] },
-  material: { required: ['family'], optional: ['properties', 'textureResourceIds'] },
+  material: { required: ['family'], optional: ['properties', 'textureResourceIds', 'programResourceId', 'textures', 'parameters'] },
   surface: { required: ['family', 'geometry'], optional: ['textureResourceIds', 'defaults'] },
   particle: { required: ['maximumCapacity'], optional: ['textureResourceId', 'defaults'] },
 });
@@ -23,6 +26,8 @@ function validateUrl(value) {
 }
 
 function normalizeDescriptor(value) {
+  if (plainRecord(value, 'display-resource-definition-invalid').kind === 'generated-texture') return normalizeGeneratedTextureDescriptor(value);
+  if (plainRecord(value, 'display-resource-definition-invalid').kind === 'program') return normalizeProgramDescriptor(value);
   // Animation resources carry their own closed schema; every other kind uses SHAPES.
   if (plainRecord(value, 'display-resource-definition-invalid').kind === 'animation') {
     return normalizeAnimationDescriptor(value);
@@ -67,6 +72,15 @@ function normalizeDescriptor(value) {
       + Number(Object.hasOwn(descriptor, 'textureResourceId'));
     if (sourceCount !== 1) fail('display-resource-definition-invalid');
   }
+  if (kind === 'texture') {
+    if (descriptor.colorSpace !== undefined && !['linear', 'srgb'].includes(descriptor.colorSpace)) fail('display-resource-definition-invalid');
+    if (descriptor.wrap !== undefined) {
+      const wrap = typeof descriptor.wrap === 'string' ? { s: descriptor.wrap, t: descriptor.wrap } : descriptor.wrap;
+      if (!wrap || Object.keys(wrap).length !== 2 || !['clamp', 'repeat', 'mirror'].includes(wrap.s) || !['clamp', 'repeat', 'mirror'].includes(wrap.t)) fail('display-resource-definition-invalid');
+    }
+    validateTextureSampling(descriptor);
+  }
+  if (kind === 'material' && descriptor.family !== 'material.program' && ['programResourceId', 'textures', 'parameters'].some((key) => Object.hasOwn(descriptor, key))) fail('display-resource-definition-invalid');
   if (kind === 'particle') {
     safeInteger(descriptor.maximumCapacity, 'display-resource-definition-invalid', { minimum: 1 });
   }
@@ -104,6 +118,7 @@ export class ResourceRegistry {
     const requireKind = (id, allowed) => {
       const resource = this.require(id);
       if (!allowed.includes(resource.describe().kind)) fail('display-resource-reference-kind-invalid');
+      requireOrdinaryTextureSampling(resource.describe());
     };
     for (const resource of this._resources.values()) {
       const descriptor = resource.describe();
@@ -112,6 +127,13 @@ export class ResourceRegistry {
       }
       if (descriptor.kind === 'particle' && descriptor.textureResourceId) {
         requireKind(descriptor.textureResourceId, ['texture']);
+      }
+      if (descriptor.kind === 'material' && descriptor.family === 'material.program') {
+        requireKind(descriptor.programResourceId, ['program']);
+        const program = this.require(descriptor.programResourceId).describe();
+        if (program.stage !== 'surface' || descriptor.textureResourceIds !== undefined) fail('display-program-invalid');
+        normalizeProgramParameters(program, descriptor.parameters ?? {});
+        validateProgramTextures(program, descriptor.textures ?? {}, this);
       }
       if (descriptor.kind === 'material') {
         for (const id of descriptor.textureResourceIds ?? []) requireKind(id, ['texture', 'texture-atlas']);

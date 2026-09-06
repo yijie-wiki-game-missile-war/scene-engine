@@ -11,13 +11,13 @@ mutable product World
   -> one background transport sender
   -> SceneEngineClient 0.16
        -> immutable WorldState + cumulative ACK + O(1) DisplaySummary
-            -> DisplayRuntime 0.18 AuthorityPort + DisplayKindRegistry
+            -> DisplayRuntime 0.21 AuthorityPort + DisplayKindRegistry
             -> one NodeIndex / one NodeGraph / one Component scheduler / one RAF
             -> one private flat Prefab materialization ledger
             -> pointer interaction controller -> Display PointerNodeEventHub
                  -> optional existing engine.input -> product PointerNodeEventHub
             -> RenderSystem
-                 -> flat ThreeRenderBackend 0.15.3 bindings + material-owned depth state
+                 -> flat ThreeRenderBackend 0.18.0 bindings + material-owned depth state
 ```
 
 The boundary is renderer-isolated: product code and Arts definitions use Display contracts, while only the browser composition
@@ -136,6 +136,12 @@ checkpoint/session.
 
 ## Display and renderer lifecycle
 
+Generated data textures retain bounded CPU pixel sources and source/generation
+identity in DisplayRuntime. The backend owns GPU leases, budgeted prepareFrame
+uploads and fence readiness; retirement preserves the CPU source, while removal
+cancels unfinished work. CPU derivation remains caller-owned outside ACK. See the
+[closed generated-resource contract](generated-textures.md).
+
 DisplayRuntime owns the only application RAF. Its frame order is:
 
 ```text
@@ -161,6 +167,16 @@ applies final effective values — it never interprets playable time. Global pro
 Animation target scope is established from materialization identity/provenance, not by testing whether a canonical Node name
 starts with `prefab/`. Each nested definition instance therefore gets its own `$root` and local-path namespace even though all
 targets are ordinary Components in the one runtime graph.
+
+Ordinary texture sprites and program-material sprites share the backend's anchor-extent coverage, image pivot, depth and
+query representation. Display validates the mutually exclusive resource branches before exposure and owns transient parameter
+claims. Query preparation retains only the projection profile; each world pass prepares the shared camera/viewport once,
+then updates each active representation's anchor/program uniforms and compile state together. No parallel sprite renderer is introduced.
+
+An optional upper-field camera profile belongs to Display's closed camera data and shared math. The backend implements its
+nonlinear screen map through one bounded offscreen target and a terminal triangle in the same Scene/camera, after the existing
+world/depth composition. Temporary inverse-frustum expansion preserves native clipping/interpolation and never changes the
+NodeGraph or CPU query camera. No extra Scene, camera, state tree or RAF is introduced; see [projection](render-runtime.md#upper-field-projection-terminal).
 
 The backend owns only renderer resources and flat `(nodeName, componentKey)` bindings. It executes the Scene's optional
 selective-depth plan inside the same Scene, camera and RAF, and keeps batch membership separated by composition group. It also

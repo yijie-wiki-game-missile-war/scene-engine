@@ -25,6 +25,19 @@ from scene_engine.recording import (
 from scene_engine.wire import encode_checkpoint, encode_commit
 
 
+def test_default_durable_writer_seals_and_reopens_on_host_platform(tmp_path):
+    directory = tmp_path / "durable-log"
+    writer = PacketLogWriter(directory)
+    raw = checkpoint()
+    writer.append(raw, checkpoint=True)
+    manifest = writer.seal()
+    assert manifest["complete"] is True
+    assert not (directory / "INCOMPLETE").exists()
+    reopened = read_packet_log(directory)
+    assert reopened.manifest == manifest
+    assert reopened.entries[0].commit_seq == 0
+
+
 def checkpoint(
     *,
     stream_id: str = "stream-1",

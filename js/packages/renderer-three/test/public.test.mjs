@@ -9,7 +9,7 @@ import { CAMERA_PROPERTIES, createHarness, descriptor, frame } from './support.m
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-test('0.15 root is the exact ThreeRenderBackend public surface', async () => {
+test('0.18 root is the exact ThreeRenderBackend public surface', async () => {
   assert.deepEqual(Object.keys(api).sort(), [
     'THREE_RENDER_BACKEND_SCHEMA',
     'ThreeRenderBackendError',
@@ -17,10 +17,10 @@ test('0.15 root is the exact ThreeRenderBackend public surface', async () => {
   ]);
   assert.equal(api.THREE_RENDER_BACKEND_SCHEMA, 'scene-engine-three-render-backend@4');
   const packageJson = JSON.parse(await fs.readFile(path.join(ROOT, 'package.json'), 'utf8'));
-  assert.equal(packageJson.version, '0.15.3');
+  assert.equal(packageJson.version, '0.18.0');
   assert.deepEqual((await fs.readdir(path.join(ROOT, 'src'))).sort(), [
-    'backend.js', 'constants.js', 'errors.js', 'index.d.ts', 'index.js',
-    'panel-projection.js', 'resource-manager.js', 'resources.js', 'validation.js',
+    'anchor-extent.js', 'backend.js', 'constants.js', 'errors.js', 'generated-texture.js', 'index.d.ts', 'index.js',
+    'panel-projection.js', 'program-instance-parameters.js', 'program-material.js', 'resource-manager.js', 'resources.js', 'texture-sampling.js', 'upper-field.js', 'validation.js',
   ]);
 });
 

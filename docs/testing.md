@@ -129,3 +129,6 @@ npm test
 `npm test` 统一执行各 JavaScript workspace 测试、资源泄漏现场测试和跨包 TypeScript 声明兼容测试。测试命令
 不生成或提交运行结果文件。显式性能 runner 用于规模观测和结构校验；大规模与浏览器 runner 的时间数据不构成
 跨机器硬门槛。
+
+
+程序批次规模可用 `node scripts/benchmark_display_browser.mjs --fixture=program-scale --bindings=1000 --ticks=120 --update-ratio=0.01 --viewport=1280x720` 显式测量，`--dpr=2` 测量双倍像素密度。该有界 fixture 上限为 5,000 实例和 1,000 帧，报告参数行更新、prepare 与 CPU WebGL 提交分布，以及实际 viewport、GPU、程序 link 数、绘制和资源计数；另验冻结、全隐藏跳过世界绘制及重建像素。计时排除 20 个预热帧，不包含 GPU elapsed-time 或 FPS 推断。普通 Display fixture 同样遵守 viewport/DPR 参数，报告 commit + Display 准备 + CPU 提交。三实例 `program-batch` fixture 的冷启动正确性样本不能与已预热的规模分布直接比较。

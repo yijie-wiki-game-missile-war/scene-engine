@@ -1,0 +1,41 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Program WebGL validation</title>
+<style>body{margin:0}#host{width:640px;height:480px;margin:11px 17px}canvas{width:100%;height:100%;display:block}</style>
+<script type="importmap">{"imports":{"@scene-engine/display":"/js/packages/display/src/index.js","three":"/node_modules/three/build/three.module.js","three/addons/":"/node_modules/three/examples/jsm/"}}</script>
+</head><body><div id="host"><canvas id="canvas"></canvas></div><script type="module">
+import { createResourceRegistry, deriveUpperFieldProjection } from '@scene-engine/display';
+import { createThreeRenderBackend } from '/js/packages/renderer-three/src/index.js';
+const host=document.querySelector('#host'),canvas=document.querySelector('canvas');
+const errors=[];const original=console.error;console.error=(...args)=>{errors.push(args.map(String).join(' '));original(...args)};
+let backend;
+try {
+ const registry=createResourceRegistry([{id:'fixture/program',kind:'program',revision:1,language:'glsl-module@1',stage:'background',timeChannel:'water',textureSlots:{},parameterSchema:{level:{type:'float',default:0.2,min:0,max:1,updateable:true}},
+ source:`vec4 evaluate(ProgramInput data){
+   vec3 sky=mix(vec3(0.08,0.12,0.2),vec3(0.2,0.4,0.6),data.screenUv.y);
+   if(data.rayDirection.y<-0.0001){float distanceToPlane=(-1.0-data.rayOrigin.y)/data.rayDirection.y;
+     vec3 p=data.rayOrigin+data.rayDirection*min(distanceToPlane,10000.0);
+     return vec4(p_level+0.03*sin(p.x+data.visualSeconds),0.1,0.08,1.0);}
+   return vec4(sky,1.0);
+ }`}, {id:'fixture/broken',kind:'program',revision:1,language:'glsl-module@1',stage:'background',textureSlots:{},parameterSchema:{},source:'vec4 evaluate(ProgramInput data){return nonexistentFunction();}'}]);
+ backend=createThreeRenderBackend({hostElement:host,canvas,rendererProfile:{drawMode:'requested',maximumPixelRatio:2,clearRgba:0x000000ff,antialias:false,alpha:false,shadows:false,toneMapping:'none'},compositionPlan:null,resourceRegistry:registry,onHealth:e=>errors.push(JSON.stringify(e))});
+ const desc=(nodeName,componentType,properties)=>({nodeName,componentKey:'visual',componentType,properties,batchable:false,compositionGroup:null,resourceRegistry:registry});
+ const camera=await backend.createBinding(desc('camera','render.camera@1',{projection:'perspective',near:0.1,far:1000,fovYDegrees:60,projectionProfile:deriveUpperFieldProjection({pitchDegrees:35,fovYDegrees:34,startNdcY:0.1,targetNdcY:0.79})}));
+ const background=await backend.createBinding(desc('background','render.background@1',{programResourceId:'fixture/program',textures:{},parameters:{level:0.2}}));
+ const gl=canvas.getContext('webgl2');
+ const sample=(seconds)=>{backend.prepareFrame({sourceTick:100,visualSeconds:100,visualTimes:{water:{seconds,running:false}},activeCameraBinding:camera,dirtyBindings:[]});backend.render();const pixels=new Uint8Array(canvas.width*canvas.height*4);gl.readPixels(0,0,canvas.width,canvas.height,gl.RGBA,gl.UNSIGNED_BYTE,pixels);return pixels};
+ const first=sample(3),same=sample(3),changed=sample(4);
+ let stable=true,differences=0,nonblack=0;
+ for(let i=0;i<first.length;i+=4){if(first[i]!==same[i]||first[i+1]!==same[i+1])stable=false;if(first[i]!==changed[i])differences++;if(first[i]+first[i+1]+first[i+2]>0)nonblack++;}
+ const diagnostics=backend.diagnostics();
+ const gpuExt=gl.getExtension('WEBGL_debug_renderer_info');const gpu=gpuExt?gl.getParameter(gpuExt.UNMASKED_RENDERER_WEBGL):gl.getParameter(gl.RENDERER);
+ const checks={stable,dynamic:differences>100,fullCoverage:nonblack===canvas.width*canvas.height,oneBackground:diagnostics.backgroundCount===1,oneCamera:diagnostics.cameraCount===1,noErrors:errors.length===0&&gl.getError()===gl.NO_ERROR};
+ const expectedStart=errors.length;let compileRejected=false;
+ backend.updateBinding(background,{identity:{nodeName:'background',componentKey:'visual'},worldMatrix:[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1],panelAnchorWorld:null,visible:true,batchable:false,compositionGroup:null,properties:{programResourceId:'fixture/broken',textures:{},parameters:{}}});
+ await backend.whenIdle();
+ try{sample(3)}catch(error){compileRejected=String(error).includes('Shader')||String(error).includes('three-render-failed')||String(error).includes('ERROR')||String(error).includes('three-program-compile-failed');}
+ const expectedCompileErrors=errors.splice(expectedStart);
+ checks.compileIsolated=!compileRejected&&expectedCompileErrors.some(error=>error.includes('three-program-compile-failed')&&error.includes('"isolation":"program"'));
+ backend.dispose();checks.released=backend.diagnostics().resourceCount===0;
+ publish({status:Object.values(checks).every(Boolean)?'READY':'NOT READY',checks,differences,environment:{gpu,userAgent:navigator.userAgent,devicePixelRatio},errors,expectedCompileErrors});
+}catch(error){backend?.dispose();publish({status:'NOT READY',error:String(error.stack??error),errors})}
+function publish(report){document.body.dataset.result=btoa(unescape(encodeURIComponent(JSON.stringify(report))));document.title=report.status}
+</script></body></html>

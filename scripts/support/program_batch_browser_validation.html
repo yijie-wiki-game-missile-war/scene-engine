@@ -1,0 +1,125 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Program batch WebGL validation</title>
+<style>body{margin:0}#host{width:640px;height:480px;margin:11px 17px}canvas{width:100%;height:100%;display:block}</style>
+<script type="importmap">{"imports":{"@scene-engine/display":"/js/packages/display/src/index.js","three":"/node_modules/three/build/three.module.js","three/addons/":"/node_modules/three/examples/jsm/"}}</script>
+</head><body><div id="host"><canvas></canvas></div><script type="module">
+import { createResourceRegistry, deriveUpperFieldProjection, normalizeProgramParameters } from '@scene-engine/display';
+import { createThreeRenderBackend } from '/js/packages/renderer-three/src/index.js';
+const host=document.querySelector('#host'),canvas=document.querySelector('canvas');
+const query=new URLSearchParams(location.search);host.style.width=`${Number(query.get('width')??640)}px`;host.style.height=`${Number(query.get('height')??480)}px`;
+const errors=[];const original=console.error;console.error=(...args)=>{errors.push(args.map(String).join(' '));original(...args)};
+const checks={};let backend;
+try {
+ const palette=document.createElement('canvas');palette.width=palette.height=1;palette.getContext('2d').fillStyle='#c0d0e0';palette.getContext('2d').fillRect(0,0,1,1);
+ const program={id:'program/batch',kind:'program',revision:1,language:'glsl-module@1',stage:'surface',timeChannel:'water',
+  textureSlots:{palette:{usage:'color'}},parameterSchema:{color:{type:'color',default:[1,0,0],min:0,max:1,updateable:true},
+   amount:{type:'float',default:.4,min:0,max:1,updateable:true},enabled:{type:'bool',default:true,updateable:true},
+   code:{type:'int',default:16777217,min:-2147483648,max:2147483647,updateable:true},
+   curve:{type:'vec2',length:2,default:[[.1,.2],[.3,.4]],min:0,max:1,updateable:true},
+   fixed:{type:'float',default:.1,min:0,max:1,updateable:false}},
+  source:`vec4 evaluate(ProgramInput data){
+   vec3 c=p_enabled&&p_code==16777217?p_color:vec3(1.0,0.0,1.0);
+   c*=texture2D(t_palette,data.uv).rgb*(p_amount+p_fixed+0.05*sin(data.visualSeconds)+0.01*p_curve[1].y);
+   c+=0.01*abs(data.worldPosition)+0.01*data.screenUv.x;
+   return vec4(c,smoothstep(0.05,0.15,data.uv.x));}`};
+ const resources=[program,{...program,id:'program/broken',textureSlots:{},parameterSchema:{},source:'vec4 evaluate(ProgramInput data){return nonexistentFunction();}'},
+  {...program,id:'program/broken-copy',textureSlots:{},parameterSchema:{},source:'vec4 evaluate(ProgramInput data){return nonexistentFunction();}'},
+  {...program,id:'program/broken-copy2',textureSlots:{},parameterSchema:{},source:'vec4 evaluate(ProgramInput data){return nonexistentFunction();}'},
+  {...program,id:'program/broken-background',stage:'background',textureSlots:{},parameterSchema:{},source:'vec4 evaluate(ProgramInput data){return missingBackground();}'},
+  {...program,id:'program/good-background',stage:'background',textureSlots:{},parameterSchema:{},source:'vec4 evaluate(ProgramInput data){return vec4(0.0,0.0,0.2,1.0);}'},
+  {id:'texture/palette',kind:'texture',url:palette.toDataURL(),colorSpace:'srgb',filter:'nearest',mipmaps:false,alphaEncoding:'straight'},
+  {id:'mesh/quad',kind:'mesh',positions:[-.5,-.5,0,.5,-.5,0,.5,.5,0,-.5,.5,0],indices:[0,1,2,0,2,3],uvs:[0,0,1,0,1,1,0,1]},
+  {id:'material/mask',kind:'material',family:'material.program',programResourceId:program.id,textures:{palette:'texture/palette'},parameters:{fixed:.35},properties:{alphaMode:'mask',alphaCutoff:.5,depthTest:true,depthWrite:true}},
+  {id:'material/other',kind:'material',family:'material.program',programResourceId:program.id,textures:{palette:'texture/palette'},parameters:{fixed:.15},properties:{alphaMode:'opaque',depthTest:true,depthWrite:false}},
+  {id:'material/blend',kind:'material',family:'material.program',programResourceId:program.id,textures:{palette:'texture/palette'},parameters:{fixed:.35},properties:{alphaMode:'blend',opacity:.5,depthTest:true,depthWrite:false}},
+  {id:'material/no-depth-read',kind:'material',family:'material.program',programResourceId:program.id,textures:{palette:'texture/palette'},parameters:{fixed:.35},properties:{alphaMode:'opaque',depthTest:false,depthWrite:false}},
+  {id:'material/no-depth-write',kind:'material',family:'material.program',programResourceId:program.id,textures:{palette:'texture/palette'},parameters:{fixed:.35},properties:{alphaMode:'opaque',depthTest:true,depthWrite:false}},
+  {id:'material/green',kind:'material',family:'material.unlit',properties:{tintRgba:0x00ff00ff,opacity:.5,alphaMode:'blend',depthWrite:false}},
+  {id:'material/broken',kind:'material',family:'material.program',programResourceId:'program/broken',textures:{},parameters:{}}];
+ resources.push({id:'material/broken-copy',kind:'material',family:'material.program',programResourceId:'program/broken-copy',textures:{},parameters:{}});
+ resources.push({id:'material/broken-copy2',kind:'material',family:'material.program',programResourceId:'program/broken-copy2',textures:{},parameters:{}});
+ const registry=createResourceRegistry(resources);
+ const matrix=(x=0,y=0,z=0)=>[1,0,0,0,0,1,0,0,0,0,1,0,x,y,z,1];
+ const profile=deriveUpperFieldProjection({pitchDegrees:35,fovYDegrees:34,startNdcY:.1,targetNdcY:.79});
+ const cameraProps={projection:query.get('projection')==='orthographic'?'orthographic':'perspective',near:.1,far:100,...(query.get('projection')==='orthographic'?{orthoHeight:6}:{fovYDegrees:60}),projectionProfile:profile};
+ const desc=(name,type,properties,batchable=true)=>({nodeName:name,componentKey:'visual',componentType:type,properties,batchable,compositionGroup:null,resourceRegistry:registry});
+ const props=(color,amount=.4,material='material/mask')=>({meshResourceId:'mesh/quad',materialResourceId:material,...(material==='material/green'?{}:{parameters:{color,amount}}),pickable:true});
+ let camera,items;
+ function createBackend(){backend=createThreeRenderBackend({hostElement:host,canvas,rendererProfile:{drawMode:'requested',maximumPixelRatio:2,clearRgba:0x000000ff,antialias:false,alpha:false,shadows:false,toneMapping:'none'},compositionPlan:null,resourceRegistry:registry,onHealth:event=>errors.push(JSON.stringify(event))})}
+ async function install(){createBackend();camera=await backend.createBinding(desc('camera','render.camera@1',cameraProps,false));
+  backend.updateBinding(camera,{identity:{nodeName:'camera',componentKey:'visual'},worldMatrix:matrix(0,0,8),panelAnchorWorld:null,visible:true,batchable:false,compositionGroup:null,properties:cameraProps});
+  items=[];for(const [i,position] of [[0,[-1.3,.8,0]],[1,[1.3,1.8,0]],[2,[0,-.9,0]]]){const p=props([[1,.1,.1],[.1,1,.1],[.1,.1,1]][i]);items.push({name:`item/${i}`,position,properties:p,binding:await backend.createBinding(desc(`item/${i}`,'render.mesh@1',p,false))})}
+ }
+ function update(item,{batchable=true,visible=true,position=item.position,properties=item.properties}={}){item.position=position;item.properties=properties;backend.updateBinding(item.binding,{identity:{nodeName:item.name,componentKey:'visual'},worldMatrix:matrix(...position),panelAnchorWorld:null,visible,batchable,compositionGroup:null,properties})}
+ const gl=canvas.getContext('webgl2');
+ function sample(seconds=3){backend.prepareFrame({sourceTick:100,visualSeconds:100,visualTimes:{water:{seconds,running:false}},activeCameraBinding:camera,dirtyBindings:[]});backend.render();const pixels=new Uint8Array(canvas.width*canvas.height*4);gl.readPixels(0,0,canvas.width,canvas.height,gl.RGBA,gl.UNSIGNED_BYTE,pixels);return pixels}
+ function difference(a,b){let changed=0,max=0;for(let i=0;i<a.length;i++){const delta=Math.abs(a[i]-b[i]);if(delta>1)changed++;max=Math.max(max,delta)}return {changed,max}}
+ function pickItem(item){const projected=backend.projectWorldPoint({position:item.position});return backend.pick({clientX:projected.clientX,clientY:projected.clientY})?.nodeName}
+ await install();items.forEach(item=>update(item,{batchable:false}));const ordinary=sample();
+ items.forEach(item=>update(item));const batched=sample();const initialDifference=difference(ordinary,batched);
+ checks.ordinaryBatchParity=initialDifference.changed===0;checks.oneBatch=backend.diagnostics().batchCount===1;
+ checks.visiblePixels=batched.some((value,index)=>index%4!==3&&value>50);checks.pickIdentity=items.every(item=>pickItem(item)===item.name);
+ const {dataUrl:_image,...initialCapture}=backend.capture();
+ const initialDiagnostics=backend.diagnostics();
+ const viewport={css:[host.clientWidth,host.clientHeight],buffer:[canvas.width,canvas.height],devicePixelRatio};
+ const compiledPrograms=initialCapture.renderer.programs;
+ const beforeUpdate=batched;let updated;
+ for(let i=0;i<20;i++){update(items[1],{properties:props([.1,1,.1],.5+i*.01)});updated=sample()}
+ const {dataUrl:_updatedImage,...parameterUpdateCapture}=backend.capture();
+ checks.parameterChanged=difference(beforeUpdate,updated).changed>50;checks.noProgramGrowth=backend.capture().renderer.programs===compiledPrograms;
+ items.forEach(item=>update(item,{batchable:false}));checks.updatedParity=difference(updated,sample()).changed===0;
+ items.forEach(item=>update(item));sample();update(items[0],{position:[-2,1.4,0]});sample();checks.movedPick=pickItem(items[0])===items[0].name;
+ update(items[0],{visible:false});sample();checks.hiddenPick=pickItem(items[0])!==items[0].name;
+ update(items[0],{properties:props([1,.1,.1],.4,'material/other')});await backend.whenIdle();sample();checks.materialSwitch=backend.diagnostics().batchCount===1&&pickItem(items[0])===items[0].name;
+ const changedTime=sample(9),frozen=sample(3);checks.timeChanges=difference(changedTime,frozen).changed>0;
+ checks.freezeStable=difference(frozen,sample(3)).max===0;
+ const saved=items.map(({position,properties})=>({position:[...position],properties}));backend.dispose();checks.release=backend.diagnostics().resourceCount===0;
+ await install();items.forEach((item,index)=>update(item,saved[index]));await backend.whenIdle();checks.rebuildParity=difference(frozen,sample(3)).changed===0;
+ // Blended programs must remain ordinary so an external transparent drawable can
+ // sort between their depths. Compare eligibility true/false on overlapping quads.
+ items.forEach((item,index)=>update(item,{position:[0,0,index],properties:props([[1,0,0],[0,0,1],[1,0,0]][index],.4,index===1?'material/green':'material/blend')}));
+ await backend.whenIdle();const overlap=sample();checks.blendOrdinary=backend.diagnostics().batchCount===0;
+ items.forEach(item=>update(item,{batchable:false}));checks.blendOverlapParity=difference(overlap,sample()).max===0;
+ update(items[1],{visible:false,batchable:false});checks.externalTransparencyContributes=difference(overlap,sample()).changed>50;
+ for(const material of ['material/no-depth-read','material/no-depth-write']){
+  items.forEach((item,index)=>update(item,{properties:props([[1,0,0],[0,1,0],[0,0,1]][index],.4,index===1?'material/green':material)}));
+  await backend.whenIdle();const depthOrder=sample();checks[`${material}/ordinary`]=backend.diagnostics().batchCount===0;
+  items.forEach(item=>update(item,{batchable:false}));checks[`${material}/parity`]=difference(depthOrder,sample()).max===0;
+ }
+ checks.noUnexpectedErrors=errors.length===0&&gl.getError()===gl.NO_ERROR;
+ try{normalizeProgramParameters(program,{amount:2});checks.invalidParameterRejected=false}catch(error){checks.invalidParameterRejected=error.code==='display-program-invalid'}
+ backend.dispose();createBackend();camera=await backend.createBinding(desc('camera','render.camera@1',cameraProps,false));
+ backend.updateBinding(camera,{identity:{nodeName:'camera',componentKey:'visual'},worldMatrix:matrix(0,0,8),panelAnchorWorld:null,visible:true,batchable:false,compositionGroup:null,properties:cameraProps});
+ const brokenItems=await Promise.all([0,1].map(index=>backend.createBinding(desc(`broken/${index}`,'render.mesh@1',{meshResourceId:'mesh/quad',materialResourceId:'material/broken',parameters:{}}))));
+ const brokenBackground=await backend.createBinding(desc('broken/background','render.background@1',{programResourceId:'program/broken-background',textures:{},parameters:{}},false));
+ const survivor={name:'healthy/entity',position:[1,0,0],properties:props([0,1,0],.8),binding:await backend.createBinding(desc('healthy/entity','render.mesh@1',props([0,1,0],.8),false))};update(survivor,{batchable:false});
+ const expectedStart=errors.length;let rejected=false,isolatedPixels;try{isolatedPixels=sample()}catch(error){rejected=true}const expectedCompileErrors=errors.splice(expectedStart);
+ checks.batchCompileIsolated=!rejected&&expectedCompileErrors.some(error=>error.includes('three-program-compile-failed'));
+ const compileEvents=expectedCompileErrors.filter(error=>error.startsWith('{')).map(error=>JSON.parse(error));
+ const compileHealth=compileEvents.find(event=>event.resourceId==='program/broken');
+ checks.batchCompileIdentity=compileHealth?.resourceId==='program/broken'&&compileHealth.revision===1&&compileHealth.programStage==='surface'
+  &&compileHealth.nodeName==='broken/0'&&compileHealth.componentKey==='visual'&&compileHealth.affectedBindingCount===2
+  &&compileHealth.isolation==='program'&&compileHealth.diagnostic.length<=4096;
+ checks.backgroundCompileIdentity=compileEvents.some(event=>event.resourceId==='program/broken-background'&&event.nodeName==='broken/background'&&event.programStage==='background'&&event.isolation==='program');
+ checks.healthySurvivesIsolation=isolatedPixels?.some((value,index)=>index%4===1&&value>100)&&pickItem(survivor)===survivor.name;
+ for(let i=0;i<5;i++)sample();checks.noCompileRetry=errors.length===0;
+ checks.isolatedUnpickable=backend.pick({clientX:backend.projectWorldPoint({position:[0,0,0]}).clientX,clientY:backend.projectWorldPoint({position:[0,0,0]}).clientY})===null;
+ // Compile a failed ordinary variant, then keep its material leased while a
+ // different Resource ID reuses the exact same GPU program and failure cache.
+ const singleProperties={meshResourceId:'mesh/quad',materialResourceId:'material/broken-copy',parameters:{}};
+ const copy=await backend.createBinding(desc('broken/copy','render.mesh@1',singleProperties,false));
+ sample();const copyErrors=errors.splice(0).map(error=>JSON.parse(error));
+ checks.sameSourceResourceIsolated=copyErrors.length===1&&copyErrors[0].resourceId==='program/broken-copy'&&copyErrors[0].nodeName==='broken/copy';
+ const beforeSharedFailure=backend.capture().renderer.programs;
+ await backend.createBinding(desc('broken/copy2','render.mesh@1',{...singleProperties,materialResourceId:'material/broken-copy2'},false));
+ sample();const sharedErrors=errors.splice(0).map(error=>JSON.parse(error));
+ checks.sharedGpuFailureReattributed=sharedErrors.length===1&&sharedErrors[0].resourceId==='program/broken-copy2'&&sharedErrors[0].nodeName==='broken/copy2'
+  &&backend.capture().renderer.programs===beforeSharedFailure;
+ for(let i=0;i<5;i++)sample();checks.sharedFailureNoRetry=errors.length===0;
+ const repaired={name:'broken/0',position:[-1,0,0],properties:props([1,0,0],.8),binding:brokenItems[0]};update(repaired,{batchable:false});
+ backend.updateBinding(brokenBackground,{identity:{nodeName:'broken/background',componentKey:'visual'},worldMatrix:matrix(),panelAnchorWorld:null,visible:true,batchable:false,compositionGroup:null,properties:{programResourceId:'program/good-background',textures:{},parameters:{}}});
+ await backend.whenIdle();sample();checks.resourceReplacementRestores=pickItem(repaired)===repaired.name&&errors.length===0;
+ backend.dispose();checks.finalRelease=backend.diagnostics().resourceCount===0;
+ const ext=gl.getExtension('WEBGL_debug_renderer_info');publish({status:Object.values(checks).every(Boolean)?'READY':'NOT READY',checks,initialDifference,compiledPrograms,initialCapture,parameterUpdateCapture,initialDiagnostics,viewport,parameters:{bindingCount:3,parameterUpdateFrames:20},environment:{gpu:ext?gl.getParameter(ext.UNMASKED_RENDERER_WEBGL):gl.getParameter(gl.RENDERER),userAgent:navigator.userAgent,devicePixelRatio,projection:cameraProps.projection},errors,expectedCompileErrors});
+}catch(error){backend?.dispose();publish({status:'NOT READY',checks,error:String(error.stack??error),errors})}
+function publish(report){document.body.dataset.result=btoa(unescape(encodeURIComponent(JSON.stringify(report))));document.title=report.status}
+</script></body></html>

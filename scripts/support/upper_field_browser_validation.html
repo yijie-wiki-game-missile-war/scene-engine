@@ -1,0 +1,194 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Upper-field WebGL validation</title>
+<style>body{margin:0;background:#222}#host{width:640px;height:480px;margin:11px 17px}canvas{width:100%;height:100%;display:block}</style>
+<script type="importmap">{"imports":{"@scene-engine/display":"/js/packages/display/src/index.js","three":"/node_modules/three/build/three.module.js","three/addons/":"/node_modules/three/examples/jsm/"}}</script>
+</head><body><div id="host"><canvas id="canvas"></canvas></div>
+<script type="module">
+import { createResourceRegistry, deriveUpperFieldProjection } from '@scene-engine/display';
+import { createThreeRenderBackend } from '/js/packages/renderer-three/src/index.js';
+const host = document.querySelector('#host'), canvas = document.querySelector('canvas');
+const query = new URLSearchParams(location.search);
+host.style.width = (Number(query.get('width')) || 640) + 'px';
+host.style.height = (Number(query.get('height')) || 480) + 'px';
+const profile = deriveUpperFieldProjection({pitchDegrees:35,fovYDegrees:34,startNdcY:0.1,targetNdcY:0.79});
+const identity = [1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1];
+const properties = query.get('projection') === 'orthographic'
+ ? {projection:'orthographic',near:0.1,far:1000,orthoHeight:10,projectionProfile:profile}
+ : {projection:'perspective', near:0.1, far:1000, fovYDegrees:60, projectionProfile:profile};
+const compositionPlan = {schema:'scene-engine-render-composition@1',id:'fixture',revision:1,defaultGroup:'ordinary',groups:[{id:'base'},{id:'ordinary'},{id:'foreground'}],passes:[{id:'base-pass',kind:'protected-base',groups:['base']},{id:'ordinary-pass',kind:'ordinary',groups:['ordinary']},{id:'foreground-pass',kind:'foreground',groups:['foreground']}]};
+const registry = createResourceRegistry([
+ {id:'fixture/large-triangle',kind:'mesh',positions:[-5,-10,-8,5,-10,-8,0,30,-8],indices:[0,1,2]},
+ {id:'fixture/near-triangle',kind:'mesh',positions:[-2,-2,-3,2,-2,-3,0,2,1],indices:[0,1,2]},
+ {id:'fixture/material',kind:'material',family:'material.unlit',properties:{tintRgba:0xffffffff,alphaMode:'opaque'}},
+ {id:'fixture/square',kind:'mesh',positions:[-1,-1,0,1,-1,0,1,1,0,-1,1,0],indices:[0,1,2,0,2,3]},
+ {id:'fixture/occluder',kind:'mesh',positions:[-1,-1,0,1,-1,0,1,1,0,-1,1,0,-1,-1,-.1,1,-1,-.1,1,1,-.1,-1,1,-.1],indices:[0,1,2,0,2,3,4,6,5,4,7,6]},
+ {id:'fixture/red',kind:'material',family:'material.unlit',properties:{tintRgba:0xff0000ff,alphaMode:'opaque'}},
+ {id:'fixture/standard',kind:'material',family:'material.standard',properties:{tintRgba:0xffffffff,alphaMode:'opaque'}},
+ {id:'fixture/slanted',kind:'mesh',positions:[-5,-10,-8,5,-10,-8,0,30,-28],uvs:[0,0,1,0,.5,1],indices:[0,1,2]},
+ ...['uv','world'].flatMap(mode=>[
+   {id:'fixture/'+mode,kind:'program',revision:1,language:'glsl-module@1',stage:'surface',parameterSchema:{},textureSlots:{},
+    source:mode==='uv'?'vec4 evaluate(ProgramInput d){return vec4(d.uv,(-d.worldPosition.z-8.0)/20.0,1.0);}':'vec4 evaluate(ProgramInput d){return vec4((d.worldPosition.x+5.0)/10.0,(d.worldPosition.y+10.0)/40.0,(-d.worldPosition.z-8.0)/20.0,1.0);}'},
+   {id:'fixture/'+mode+'-material',kind:'material',family:'material.program',programResourceId:'fixture/'+mode,textures:{},parameters:{},properties:{alphaMode:'opaque'}},
+ ]),
+]);
+let backend;
+const errors=[]; const originalError=console.error; console.error=(...args)=>{errors.push(args.map(String).join(' '));originalError(...args)};
+try {
+ backend=createThreeRenderBackend({hostElement:host,canvas,rendererProfile:{drawMode:'requested',maximumPixelRatio:2,clearRgba:0x000000ff,antialias:false,alpha:false,shadows:true,toneMapping:'none'},compositionPlan,resourceRegistry:registry,onHealth:e=>errors.push(JSON.stringify(e))});
+ const desc=(nodeName,componentType,properties)=>({nodeName,componentKey:'visual',componentType,properties,batchable:false,compositionGroup:componentType==='render.mesh@1'?'base':null,resourceRegistry:registry});
+ const camera=await backend.createBinding(desc('scene/camera','render.camera@1',properties));
+ const meshProperties={meshResourceId:'fixture/large-triangle',materialResourceId:'fixture/material',castShadow:true,receiveShadow:true,renderOrder:0,pickable:true};
+ const mesh=await backend.createBinding(desc('scene/triangle','render.mesh@1',meshProperties));
+ backend.prepareFrame({sourceTick:0,visualSeconds:0,activeCameraBinding:camera,dirtyBindings:[]});
+ backend.render();
+ const gl=canvas.getContext('webgl2'), rect=host.getBoundingClientRect();
+ const read=()=>{const pixels=new Uint8Array(canvas.width*canvas.height*4);gl.readPixels(0,0,canvas.width,canvas.height,gl.RGBA,gl.UNSIGNED_BYTE,pixels);return pixels};
+ const pixels=read();
+ // Compare the half-coverage contour, not the first bright pixel's center, with
+ // the independent inverse-ray triangle intersection. The white/black source
+ // target is linearly filtered and then sRGB encoded; byte 127 is only ~21%
+ // linear coverage. Decode before interpolating the 50% crossing between pixels.
+ let checked=0, maximumError=0, maximumLegacySampleCenterError=0, roundtripError=0;
+ const isWhite=(x,y)=>pixels[((canvas.height-1-y)*canvas.width+x)*4]>127;
+ const coverage=(x,y)=>{const s=pixels[((canvas.height-1-y)*canvas.width+x)*4]/255;return s<=.04045?s/12.92:((s+.055)/1.055)**2.4};
+ for(let y=4;y<canvas.height-4;y+=3){
+   const clientY=rect.top+(y+0.5)/canvas.height*rect.height;
+   for(const side of ['left','right']){
+     let inside=-1,legacy=-1;
+     const step=side==='left'?1:-1;
+     for(let x=side==='left'?0:canvas.width-1;x>=0&&x<canvas.width;x+=step){
+       if(legacy<0&&isWhite(x,y))legacy=x+.5;
+       if(coverage(x,y)>=.5){inside=x;break;}
+     }
+     if(inside<1||inside>=canvas.width-1)continue;
+     const outside=inside-step,a=coverage(outside,y),b=coverage(inside,y);
+     const actual=outside+.5+step*(.5-a)/(b-a);
+     if(actual<2||actual>canvas.width-3)continue;
+     // Binary search the exact pick transition independently of the bitmap.
+     let lo=side==='left'?0:canvas.width/2,hi=side==='left'?canvas.width/2:canvas.width;
+     for(let n=0;n<24;n++){
+       const mid=(lo+hi)/2;
+       const hit=backend.pick({clientX:rect.left+mid/canvas.width*rect.width,clientY});
+       if((side==='left'&&hit)||(side==='right'&&!hit))hi=mid;else lo=mid;
+     }
+     maximumError=Math.max(maximumError,Math.abs(actual-(lo+hi)/2)*rect.width/canvas.width);
+     maximumLegacySampleCenterError=Math.max(maximumLegacySampleCenterError,Math.abs(legacy-(lo+hi)/2)*rect.width/canvas.width);
+     checked++;
+   }
+   const sample={clientX:rect.left+rect.width/2,clientY};
+   const hit=backend.pick(sample);
+   if(hit){const p=backend.projectWorldPoint({position:hit.point});roundtripError=Math.max(roundtripError,Math.hypot(p.clientX-sample.clientX,p.clientY-sample.clientY));}
+ }
+ const first=backend.diagnostics();
+ const transform=(x,y,z,s=1)=>[s,0,0,0,0,s,0,0,0,0,s,0,x,y,z,1];
+ const update=(binding,nodeName,meshProperties,matrix,group='base')=>backend.updateBinding(binding,{identity:{nodeName,componentKey:'visual'},worldMatrix:matrix,panelAnchorWorld:null,visible:true,batchable:false,compositionGroup:group,properties:meshProperties});
+ const draw=()=>{backend.prepareFrame({sourceTick:0,visualSeconds:0,activeCameraBinding:camera,dirtyBindings:[]});backend.render();return read()};
+ const colorAt=(pixels,position)=>{const p=backend.projectWorldPoint({position});const x=Math.floor((p.clientX-rect.left)*canvas.width/rect.width),y=Math.floor((p.clientY-rect.top)*canvas.height/rect.height);const i=((canvas.height-1-y)*canvas.width+x)*4;return [...pixels.slice(i,i+3)]};
+ const overlayProperties={...meshProperties,meshResourceId:'fixture/square',materialResourceId:'fixture/red'};
+ const overlay=await backend.createBinding({...desc('scene/overlay','render.mesh@1',overlayProperties),compositionGroup:'foreground'});
+ update(overlay,'scene/overlay',overlayProperties,transform(0,2,-10,.4),'foreground');
+ const protectedPixel=colorAt(draw(),[0,2,-10]);
+ update(overlay,'scene/overlay',overlayProperties,transform(0,2,-4,.4),'foreground');
+ const foregroundPixel=colorAt(draw(),[0,2,-4]);
+ const selectiveDepth=protectedPixel[1]>200&&foregroundPixel[0]>200&&foregroundPixel[1]<30;
+ backend.destroyBinding(overlay);
+
+ // Independent analytic ray/plane + barycentric oracle, including perspective
+ // interpolation through a triangle whose depth varies by twenty world units.
+ const inverseY=y=>y<=profile.startNdcY?y:profile.startNdcY+(y-profile.startNdcY)/(1-profile.strength*(y-profile.startNdcY));
+ const srgb=value=>Math.round(255*(value<=.0031308?12.92*value:1.055*Math.pow(value,1/2.4)-.055));
+ const interiorSamples=[];let interiorRayErrorCss=0,interiorWorldError=0,maximumInteriorByteError=0;
+ for(const fy of [.15,.3,.45,.6,.75,.9])for(const fx of [.4,.45,.5,.55,.6]){
+   const px=Math.floor(fx*canvas.width),py=Math.floor(fy*canvas.height);
+   const x=(px+.5)/canvas.width*2-1,y=inverseY(1-(py+.5)/canvas.height*2),aspect=rect.width/rect.height;
+   const ortho=properties.projection==='orthographic',tangent=Math.tan(Math.PI/6);
+   const origin=ortho?[x*aspect*5,y*5,0]:[0,0,0],direction=ortho?[0,0,-1]:[x*aspect*tangent,y*tangent,-1];
+   const t=(-13-origin[2]-.5*origin[1])/(direction[2]+.5*direction[1]);
+   const world=origin.map((v,i)=>v+t*direction[i]),v=(world[1]+10)/40,u=(world[0]+5)/10;
+   if(t<=0||v<.02||v>.98||u-v/2<.02||1-u-v/2<.02)continue;
+   interiorSamples.push({px,py,world,uv:[u,v],clientX:rect.left+(px+.5)/canvas.width*rect.width,clientY:rect.top+(py+.5)/canvas.height*rect.height});
+ }
+ const interiorReports=[];
+ for(const mode of ['uv','world']){
+   update(mesh,'scene/triangle',{...meshProperties,meshResourceId:'fixture/slanted',materialResourceId:'fixture/'+mode+'-material'},identity);
+   await backend.whenIdle();const bitmap=draw();let maximumByteError=0;
+   for(const sample of interiorSamples){
+     const [x,y,z]=sample.world,linear=mode==='uv'?[...sample.uv,(-z-8)/20]:[(x+5)/10,(y+10)/40,(-z-8)/20];
+     const i=((canvas.height-1-sample.py)*canvas.width+sample.px)*4,expected=linear.map(srgb),actual=[...bitmap.slice(i,i+3)];
+     maximumByteError=Math.max(maximumByteError,...actual.map((v,i)=>Math.abs(v-expected[i])));
+     const hit=backend.pick({clientX:sample.clientX,clientY:sample.clientY}),projected=hit&&backend.projectWorldPoint({position:hit.point});
+     const worldError=hit?Math.hypot(...hit.point.map((v,i)=>v-sample.world[i])):Infinity;
+     interiorWorldError=Math.max(interiorWorldError,worldError);
+     if(worldError>1e-5)throw Error('independent interior ray/triangle mismatch');
+     interiorRayErrorCss=Math.max(interiorRayErrorCss,Math.hypot(projected.clientX-sample.clientX,projected.clientY-sample.clientY));
+   }
+   maximumInteriorByteError=Math.max(maximumInteriorByteError,maximumByteError);
+   interiorReports.push({mode,samples:interiorSamples.length,maximumByteError});
+ }
+ // Foreground probes at +/- 0.2% view depth test the actual depth buffer at
+ // several interior positions, independently of the interpolated color outputs.
+ const depthProbe=await backend.createBinding({...desc('scene/interior-depth','render.mesh@1',overlayProperties),compositionGroup:'foreground'});
+ let interiorDepthSamples=0;
+ for(const sample of interiorSamples.filter((_,i)=>i%4===0)){
+   for(const side of ['behind','front']){
+     const factor=side==='behind'?1.002:0.998;
+     const p=properties.projection==='orthographic'?[sample.world[0],sample.world[1],sample.world[2]*factor]:sample.world.map(v=>v*factor);
+     update(depthProbe,'scene/interior-depth',overlayProperties,transform(...p,.12),'foreground');
+     const bitmap=draw(),i=((canvas.height-1-sample.py)*canvas.width+sample.px)*4;
+     const red=bitmap[i]>240&&bitmap[i+1]<15&&bitmap[i+2]<15;
+     if(red!==(side==='front'))throw Error('interior depth mismatch '+side);
+     interiorDepthSamples++;
+   }
+ }
+ backend.destroyBinding(depthProbe);
+ update(mesh,'scene/triangle',meshProperties,identity);await backend.whenIdle();
+
+ // A real directional-light shadow map uses its own light-space camera. The
+ // declared rotation and the standard directional-light origin [0,1,0] /
+ // target [0,0,-1] give the explicit world-space shadow offset below.
+ const receiver={...meshProperties,materialResourceId:'fixture/standard',castShadow:false};
+ update(mesh,'scene/triangle',receiver,identity);
+ const casterProperties={...meshProperties,meshResourceId:'fixture/occluder',receiveShadow:false};
+ const caster=await backend.createBinding(desc('scene/caster','render.mesh@1',casterProperties));
+ update(caster,'scene/caster',casterProperties,transform(0,6,-4,.35));
+ const lightProperties={colorRgba:0xffffffff,intensity:3,castShadow:true};
+ const light=await backend.createBinding(desc('scene/light','render.directional-light@1',lightProperties));
+ const c=Math.cos(Math.PI/9),s=Math.sin(Math.PI/9);
+ update(light,'scene/light',lightProperties,[c,0,-s,0,0,1,0,0,s,0,c,0,0,4,0,1],null);
+ const ambient=await backend.createBinding(desc('scene/ambient','render.ambient-light@1',{colorRgba:0xffffffff,intensity:.08}));
+ const shadowPixels=draw();
+ const shadowPosition=[-Math.tan(Math.PI/9)*4,6-4/c,-8];
+ const shadowColor=colorAt(shadowPixels,shadowPosition),litColor=colorAt(shadowPixels,[-3,shadowPosition[1],-8]);
+ const trueLightShadow=litColor[0]-shadowColor[0]>40;
+ backend.destroyBinding(light);
+ const pointProperties={colorRgba:0xffffffff,intensity:300,range:100,castShadow:true};
+ const pointLight=await backend.createBinding(desc('scene/point-light','render.point-light@1',pointProperties));
+ update(pointLight,'scene/point-light',pointProperties,transform(0,8,0),null);
+ // Count clears of the FBO actually rendered by a compiled distance shader.
+ // This observes WebGL calls; it does not inspect private renderer state.
+ const clears=new Map(),distanceTargets=new Set(),distancePrograms=new Set();let distanceDraws=0;
+ const clear=gl.clear.bind(gl),drawElements=gl.drawElements.bind(gl),drawArrays=gl.drawArrays.bind(gl);
+ gl.clear=function(mask){const fbo=gl.getParameter(gl.DRAW_FRAMEBUFFER_BINDING);if(mask&gl.COLOR_BUFFER_BIT)clears.set(fbo,(clears.get(fbo)??0)+1);return clear(mask)};
+ const recordDistance=()=>{const p=gl.getParameter(gl.CURRENT_PROGRAM);if(!p)return;const shaders=gl.getAttachedShaders(p).map(s=>gl.getShaderSource(s)).join('\n');
+   if(shaders.includes('uniform vec3 referencePosition')&&shaders.includes('nearDistance')){distancePrograms.add(p);distanceTargets.add(gl.getParameter(gl.DRAW_FRAMEBUFFER_BINDING));distanceDraws++;}};
+ gl.drawElements=function(...args){recordDistance();return drawElements(...args)};gl.drawArrays=function(...args){recordDistance();return drawArrays(...args)};
+ let pointPixels;try{pointPixels=draw()}finally{gl.clear=clear;gl.drawElements=drawElements;gl.drawArrays=drawArrays}
+ const pointShadowColor=colorAt(pointPixels,[0,4,-8]),pointLitColor=colorAt(pointPixels,[-2,4,-8]);
+ const pointShadowUpdates=[...distanceTargets].map(fbo=>clears.get(fbo)??0);
+ const truePointLightShadow=pointLitColor[0]-pointShadowColor[0]>40;
+ const onePointShadowUpdate=distanceDraws>0&&distanceTargets.size===1&&pointShadowUpdates[0]===1;
+ backend.destroyBinding(caster);backend.destroyBinding(pointLight);backend.destroyBinding(ambient);
+ update(mesh,'scene/triangle',meshProperties,identity);
+
+ backend.updateBinding(mesh,{identity:{nodeName:'scene/triangle',componentKey:'visual'},worldMatrix:identity,panelAnchorWorld:null,visible:true,batchable:false,compositionGroup:'base',properties:{...meshProperties,meshResourceId:'fixture/near-triangle'}});
+ await backend.whenIdle();backend.prepareFrame({sourceTick:0,visualSeconds:0,activeCameraBinding:camera,dirtyBindings:[]});backend.render();
+ const nearPixels=read();let nearWhite=0;for(let i=0;i<nearPixels.length;i+=4)if(nearPixels[i]>127)nearWhite++;
+ const programs=gl.getParameter(gl.CURRENT_PROGRAM);
+ const gpuExt=gl.getExtension('WEBGL_debug_renderer_info');
+ const gpu=gpuExt?gl.getParameter(gpuExt.UNMASKED_RENDERER_WEBGL):gl.getParameter(gl.RENDERER);
+ const checks={selectiveDepth,trueLightShadow,truePointLightShadow,onePointShadowUpdate,interior:interiorSamples.length>=10&&maximumInteriorByteError<=2&&interiorRayErrorCss<=1&&interiorDepthSamples>=6,edges:checked>20&&maximumError<=1,roundtrip:roundtripError<=1,nearCrossing:nearWhite>100&&nearWhite<canvas.width*canvas.height,finiteBuffer:first.renderTargetCount===1,oneCamera:first.cameraCount===1,noErrors:errors.length===0&&gl.getError()===gl.NO_ERROR};
+ backend.dispose();
+ checks.released=backend.diagnostics().renderTargetCount===0&&backend.diagnostics().resourceCount===0;
+ publish({status:Object.values(checks).every(Boolean)?'READY':'NOT READY',checks,interiorReports,interiorRayErrorCss,interiorWorldError,interiorDepthSamples,pointShadowColor,pointLitColor,pointShadowUpdates,distanceDraws,distanceProgramCount:distancePrograms.size,shadowColor,litColor,protectedPixel,foregroundPixel,checked,edgeMeasurement:'linear-half-coverage-interpolated-contour',maximumEdgeErrorCssPixels:maximumError,maximumLegacySampleCenterErrorCssPixels:maximumLegacySampleCenterError,maximumRayProjectErrorCssPixels:roundtripError,nearCrossingWhitePixels:nearWhite,environment:{gpu,userAgent:navigator.userAgent,devicePixelRatio,projection:properties.projection,cssWidth:rect.width,cssHeight:rect.height},source:first.upperFieldSampling,errors});
+}catch(error){backend?.dispose();publish({status:'NOT READY',error:String(error.stack??error),errors})}
+function publish(report){document.body.dataset.result=btoa(unescape(encodeURIComponent(JSON.stringify(report))));document.title=report.status;}
+</script></body></html>
