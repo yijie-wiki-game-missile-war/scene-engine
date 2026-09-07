@@ -4,7 +4,7 @@ import test from 'node:test';
 
 import * as api from '@scene-engine/display';
 
-test('0.18 root is the exact Display public surface and excludes internal Authority mutation types', async () => {
+test('0.21 root is the exact Display public surface and excludes internal Authority mutation types', async () => {
   assert.deepEqual(Object.keys(api).sort(), [
     'ANIMATION_RESOURCE_SCHEMA',
     'AmbientLightComponent',
@@ -22,6 +22,8 @@ test('0.18 root is the exact Display public surface and excludes internal Author
     'DisplayRuntime',
     'DisplayRuntimeError',
     'DisplayTransform',
+    'GENERATED_TEXTURE_LIMITS',
+    'GENERATED_TEXTURE_RESOURCE_SCHEMA',
     'LookAtComponent',
     'MeshRendererComponent',
     'ModelRendererComponent',
@@ -29,6 +31,7 @@ test('0.18 root is the exact Display public surface and excludes internal Author
     'POINTER_NODE_EVENT_NAMES',
     'POINTER_TARGET_ROLES',
     'PREFAB_DEFINITION_SCHEMA',
+    'PROGRAM_RESOURCE_SCHEMA',
     'ParticleRendererComponent',
     'PointLightComponent',
     'PointerNodeEventHub',
@@ -45,6 +48,7 @@ test('0.18 root is the exact Display public surface and excludes internal Author
     'SpriteRendererComponent',
     'SurfaceRendererComponent',
     'TICKS_PER_SECOND',
+    'UPPER_FIELD_INVERSE_MARGIN',
     'buildDisplayCatalogManifest',
     'canonicalDisplayCatalogJson',
     'computeDisplayCatalogIdentity',
@@ -63,11 +67,16 @@ test('0.18 root is the exact Display public surface and excludes internal Author
     'defineRenderComposition',
     'defineResources',
     'defineScene',
+    'deriveUpperFieldProjection',
     'normalizeDisplayCatalogIdentity',
     'normalizePointerNodeEvent',
+    'normalizeProgramParameters',
+    'normalizeProjectionProfile',
     'pointerNodeEventInput',
+    'projectUpperFieldY',
     'sameDisplayCatalogIdentity',
     'toDisplayCatalogIdentityRecord',
+    'unprojectUpperFieldY',
   ]);
 
   for (const removed of [
@@ -76,5 +85,5 @@ test('0.18 root is the exact Display public surface and excludes internal Author
     'AnimationSystem',
   ]) assert.equal(removed in api, false, removed);
   const packageJson = JSON.parse(await fs.readFile(new URL('../package.json', import.meta.url)));
-  assert.equal(packageJson.version, '0.18.0');
+  assert.equal(packageJson.version, '0.21.0');
 });

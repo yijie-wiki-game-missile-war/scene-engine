@@ -96,7 +96,7 @@ const unitPrefab = definePrefab({
   Global `py/...` names are never valid targets.
 - A player resolves `$root` and local paths only inside its own definition-instance Scope. A parent player cannot cross into a
   nested child instance, and two sibling instances with identical local paths still resolve to different Components.
-- The first-version target must be a `render.sprite@3` using a `texture-atlas`; every
+- The first-version target must be the texture branch of `render.sprite@3` using a `texture-atlas`; program sprites use typed program parameters and are not `sprite.frame` targets. Every
   keyframe value must stay below `columns * rows`.
 
 Prefab compile preflights statically declared bindings; runtime `play` preflights any
@@ -213,3 +213,6 @@ Closed channels such as `node.position`, `sprite.alpha`, `particle.intensity` or
 interpolation. Arbitrary property paths (`children[1].material.opacity`) are out of
 contract. Future transform channels may only drive Prefab-internal visual nodes, never
 authority roots or real gameplay trajectories.
+
+
+Procedural channels are independent of animation-player timelines. Display owns their per-channel pause/rate/fixed-time controls, global `setVisualTimePaused(boolean)` gate (retaining each channel's local controls), and backend-rebuild continuity; see [Procedural programs](procedural-programs.md#time-and-resource-ownership).

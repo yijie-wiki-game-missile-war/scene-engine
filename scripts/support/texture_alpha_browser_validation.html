@@ -1,0 +1,61 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Texture alpha WebGL validation</title>
+<style>body{margin:0}#host{width:320px;height:240px;margin:11px 17px}canvas{width:100%;height:100%;display:block}</style>
+<script type="importmap">{"imports":{"@scene-engine/display":"/js/packages/display/src/index.js","three":"/node_modules/three/build/three.module.js","three/addons/":"/node_modules/three/examples/jsm/"}}</script>
+</head><body><div id="host"><canvas></canvas></div><script type="module">
+import {createResourceRegistry} from '@scene-engine/display';
+import {createThreeRenderBackend} from '/js/packages/renderer-three/src/index.js';
+const host=document.querySelector('#host'),canvas=document.querySelector('canvas'),errors=[],checks={};
+const oldError=console.error;console.error=(...args)=>{errors.push(args.map(String).join(' '));oldError(...args)};
+let backend;
+try{
+ const program={id:'program/color',kind:'program',revision:1,language:'glsl-module@1',stage:'surface',textureSlots:{image:{usage:'color'}},
+ parameterSchema:{uvScale:{type:'float',default:1,min:0,max:128,updateable:true},opacity:{type:'float',default:1,min:0,max:1,updateable:true}},
+ source:'vec4 evaluate(ProgramInput d){vec4 c=texture2D(/* direct named sample */ t_image,d.uv*p_uvScale);return vec4(c.rgb,c.a*p_opacity);}'};
+ const resources=[program,{...program,id:'program/data',textureSlots:{image:{usage:'data'}}},
+ {id:'mesh/quad',kind:'mesh',positions:[-1,-1,0,1,-1,0,1,1,0,-1,1,0],indices:[0,1,2,0,2,3],uvs:[0,0,1,0,1,1,0,1]}];
+ for(const name of ['straight','premultiplied','data','palette','atlas']){
+  resources.push({id:'texture/'+name,kind:'texture',url:'/scripts/support/texture-alpha/'+name+'.png',colorSpace:name==='data'?'linear':'srgb',
+   ...(name==='straight'?{alphaSampling:'premultiplied'}:name==='premultiplied'?{alphaEncoding:'premultiplied'}:{}),
+   minFilter:name==='atlas'?'linear':'linear-mipmap-linear',magFilter:'linear',mipmaps:name!=='atlas',wrap:'clamp'});
+  resources.push({id:'material/'+name,kind:'material',family:'material.program',programResourceId:name==='data'?'program/data':'program/color',textures:{image:'texture/'+name},parameters:{},
+    properties:{alphaMode:['straight','premultiplied'].includes(name)?'blend':'opaque',depthWrite:false,depthTest:true}});
+ }
+ const registry=createResourceRegistry(resources);
+ const descriptor=(name,type,properties)=>({nodeName:name,componentKey:'visual',componentType:type,properties,batchable:false,compositionGroup:null,resourceRegistry:registry});
+ const matrix=(scale=1,z=0)=>[scale,0,0,0,0,scale,0,0,0,0,1,0,0,0,z,1];
+ const samples=[];
+ async function render(name,background,scale=1,opacity=1,uvScale=1){
+  backend?.dispose();
+  backend=createThreeRenderBackend({hostElement:host,canvas,rendererProfile:{drawMode:'requested',maximumPixelRatio:2,clearRgba:background,antialias:false,alpha:false,shadows:false,toneMapping:'none'},compositionPlan:null,resourceRegistry:registry,onHealth:e=>errors.push(JSON.stringify(e))});
+  const camera=await backend.createBinding(descriptor('camera','render.camera@1',{projection:'orthographic',near:.1,far:10,orthoHeight:2.2}));
+  const properties={meshResourceId:'mesh/quad',materialResourceId:'material/'+name,parameters:{opacity,uvScale},pickable:false};
+  const binding=await backend.createBinding(descriptor('surface','render.mesh@1',properties));
+  backend.updateBinding(binding,{identity:{nodeName:'surface',componentKey:'visual'},worldMatrix:matrix(scale,-2),panelAnchorWorld:null,visible:true,batchable:false,compositionGroup:null,properties});
+  backend.prepareFrame({sourceTick:0,visualSeconds:3,visualTimes:{default:{seconds:3,running:false}},activeCameraBinding:camera,dirtyBindings:[]});backend.render();
+  const gl=canvas.getContext('webgl2'),pixels=new Uint8Array(canvas.width*canvas.height*4);gl.readPixels(0,0,canvas.width,canvas.height,gl.RGBA,gl.UNSIGNED_BYTE,pixels);
+  if(gl.getError()!==gl.NO_ERROR)throw Error('GPU error');
+  return pixels;
+ }
+ let maxConventionDifference=0,maxNeutralDifference=0,whiteBackgroundHalo=0;
+ for(const background of [0x000000ff,0xffffffff])for(const scale of [1,.075,.017])for(const opacity of [1,.4]){
+  const a=await render('straight',background,scale,opacity),b=await render('premultiplied',background,scale,opacity);
+  let difference=0,neutral=0,changed=0;const bg=background===0xffffffff?255:0;
+  for(let i=0;i<a.length;i+=4){for(let c=0;c<3;c++)difference=Math.max(difference,Math.abs(a[i+c]-b[i+c]));neutral=Math.max(neutral,Math.abs(a[i]-a[i+1]),Math.abs(a[i]-a[i+2]));if(a[i]!==bg)changed++}
+  maxConventionDifference=Math.max(maxConventionDifference,difference);maxNeutralDifference=Math.max(maxNeutralDifference,neutral);
+  samples.push({background,scale,opacity,maxDifference:difference,nonBackgroundPixels:changed});
+  if(background===0xffffffff)whiteBackgroundHalo+=changed;
+  if(changed===0&&background!==0xffffffff)throw Error('Empty alpha sample');
+ }
+ checks.noHaloOverWhite=whiteBackgroundHalo===0;checks.alphaConventionsEquivalent=maxConventionDifference<=2;checks.neutralEdges=maxNeutralDifference<=1;
+ const center=p=>Array.from(p.slice((Math.floor(canvas.height/2)*canvas.width+Math.floor(canvas.width/2))*4,(Math.floor(canvas.height/2)*canvas.width+Math.floor(canvas.width/2))*4+4));
+ const palette=center(await render('palette',0x000000ff)),data=center(await render('data',0x000000ff));
+ checks.singleSrgbDecode=palette.slice(0,3).every((v,i)=>Math.abs(v-[64,128,192][i])<=1);
+ checks.dataRemainsLinear=data.slice(0,3).every(v=>Math.abs(v-188)<=1);
+ const atlas=center(await render('atlas',0x000000ff,.2,1,.45));
+ checks.atlasExplicitInsetNoNeighbor=atlas[0]>=254&&atlas[1]<=1&&atlas[2]<=1;
+ const gl=canvas.getContext('webgl2'),ext=gl.getExtension('WEBGL_debug_renderer_info');
+ backend.dispose();checks.released=backend.diagnostics().resourceCount===0;checks.noErrors=errors.length===0;
+ publish({status:Object.values(checks).every(Boolean)?'READY':'NOT READY',checks,maxConventionDifference,maxNeutralDifference,palette,data,atlas,samples,environment:{gpu:ext?gl.getParameter(ext.UNMASKED_RENDERER_WEBGL):gl.getParameter(gl.RENDERER),devicePixelRatio,userAgent:navigator.userAgent},errors});
+}catch(error){backend?.dispose();publish({status:'NOT READY',error:String(error.stack??error),checks,errors})}
+function publish(report){document.body.dataset.result=btoa(unescape(encodeURIComponent(JSON.stringify(report))));document.title=report.status}
+</script></body></html>

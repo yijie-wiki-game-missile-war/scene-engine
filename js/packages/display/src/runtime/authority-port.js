@@ -76,7 +76,7 @@ export class AuthorityPort {
         state,
         null,
         {},
-        { ownerName: name },
+        { ownerName: name, parentNode: parent },
       );
       this._scene.nodeGraph.validateSubtreePlacement(parent, validatedPatch.graphHeight);
     }
@@ -306,7 +306,7 @@ export class AuthorityPort {
         state,
         null,
         {},
-        { ownerName: node.name },
+        { ownerName: node.name, parentNode: node.parent },
       );
       this._scene.nodeGraph.validateSubtreePlacement(node.parent, validatedPatch.graphHeight);
       this._prefabInstantiator.prepareExistingRoot({
@@ -340,7 +340,7 @@ export class AuthorityPort {
       state,
       null,
       {},
-      { ownerName: node.name },
+      { ownerName: node.name, parentNode: node.parent },
     );
     const replacementAuthority = new AuthorityComponent({
       displayKindId,

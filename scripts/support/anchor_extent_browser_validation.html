@@ -1,0 +1,91 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Anchor extent validation</title>
+<style>body{margin:0}#host{margin:11px 17px;width:640px;height:480px}canvas{width:100%;height:100%;display:block}</style>
+<script type="importmap">{"imports":{"@scene-engine/display":"/js/packages/display/src/index.js","three":"/node_modules/three/build/three.module.js","three/addons/":"/node_modules/three/examples/jsm/"}}</script>
+</head><body><div id="host"><canvas></canvas></div><script type="module">
+import {createResourceRegistry,deriveUpperFieldProjection} from '@scene-engine/display';
+import {createThreeRenderBackend} from '/js/packages/renderer-three/src/index.js';
+const host=document.querySelector('#host'),canvas=document.querySelector('canvas'),query=new URLSearchParams(location.search);
+host.style.width=(Number(query.get('width'))||640)+'px';host.style.height=(Number(query.get('height'))||480)+'px';
+const profile=deriveUpperFieldProjection({pitchDegrees:35,fovYDegrees:34,startNdcY:0.1,targetNdcY:0.79});
+const orthographic=query.get('projection')==='orthographic';
+const cameraProperties=orthographic?{projection:'orthographic',near:.1,far:1000,orthoHeight:10,projectionProfile:profile}
+ :{projection:'perspective',near:.1,far:1000,fovYDegrees:60,projectionProfile:profile};
+const image=document.createElement('canvas');image.width=16;image.height=16;const imageContext=image.getContext('2d');imageContext.fillStyle='white';imageContext.fillRect(0,0,16,16);const white=image.toDataURL('image/png');
+imageContext.fillStyle='#ff0000';imageContext.fillRect(0,0,16,8);imageContext.fillStyle='#00ff00';imageContext.fillRect(0,8,16,8);const uvImage=image.toDataURL('image/png');
+const registry=createResourceRegistry([{id:'fixture/white',kind:'texture',url:white,colorSpace:'srgb'},
+ {id:'fixture/uv',kind:'texture',url:uvImage,colorSpace:'srgb'},
+ {id:'fixture/square',kind:'mesh',positions:[-2,-2,0,2,-2,0,2,2,0,-2,2,0],indices:[0,1,2,0,2,3]},
+ {id:'fixture/red',kind:'material',family:'material.unlit',properties:{tintRgba:0xff0000ff,alphaMode:'opaque'}}]);
+const compositionPlan={schema:'scene-engine-render-composition@1',id:'anchor',revision:1,defaultGroup:'ordinary',groups:[{id:'base'},{id:'ordinary'},{id:'foreground'}],passes:[{id:'base-pass',kind:'protected-base',groups:['base']},{id:'ordinary-pass',kind:'ordinary',groups:['ordinary']},{id:'foreground-pass',kind:'foreground',groups:['foreground']}]};
+const spriteProperties={textureResourceId:'fixture/white',width:2,height:2,projectionSemantics:'anchor-extent',anchorOffset:[0,0,0],pickable:true,material:{alphaMode:'opaque'}};
+const identity=[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1];
+const matrix=(x,y,z)=>{const m=[...identity];m[12]=x;m[13]=y;m[14]=z;return m};
+const errors=[];let backend;
+try {
+ backend=createThreeRenderBackend({hostElement:host,canvas,compositionPlan,resourceRegistry:registry,onHealth:e=>errors.push(e),rendererProfile:{drawMode:'requested',maximumPixelRatio:2,clearRgba:0x000000ff,antialias:false,alpha:false,shadows:false,toneMapping:'none'}});
+ const desc=(name,type,properties,batchable=false)=>({nodeName:name,componentKey:'visual',componentType:type,properties,batchable,compositionGroup:type==='render.sprite@3'?'base':type==='render.mesh@1'?'foreground':null,resourceRegistry:registry});
+ const camera=await backend.createBinding(desc('camera','render.camera@1',cameraProperties));
+ const draw=()=>{backend.prepareFrame({sourceTick:0,visualSeconds:0,activeCameraBinding:camera,dirtyBindings:[]});backend.render();};
+ const gl=canvas.getContext('webgl2'),rect=host.getBoundingClientRect();
+ let maximumError=0,roundtripError=0,checked=0;const cases=[];
+ for(const [label,positions,batchable] of [['join',[[0,0,-5]],false],['upper',[[0,5,-5]],false],['instances',[[-1.4,3,-5],[1.4,3,-5]],true],['outside',[[orthographic?7:4.5,0,-5]],false],['near',[[0,0,-.01]],false],['behind',[[0,0,1]],false],['far',[[0,0,-1001]],false]]){
+   const handles=[];
+   for(let index=0;index<positions.length;index++){
+     const name=label+'/'+index;const binding=await backend.createBinding(desc(name,'render.sprite@3',spriteProperties,batchable));handles.push(binding);
+     backend.updateBinding(binding,{identity:{nodeName:name,componentKey:'visual'},worldMatrix:matrix(...positions[index]),panelAnchorWorld:null,visible:true,batchable,compositionGroup:'base',properties:spriteProperties});
+   }
+   draw();const pixels=new Uint8Array(canvas.width*canvas.height*4);gl.readPixels(0,0,canvas.width,canvas.height,gl.RGBA,gl.UNSIGNED_BYTE,pixels);
+   const white=(x,y)=>pixels[((canvas.height-1-y)*canvas.width+x)*4]>127;
+   let visible=0;for(let index=0;index<pixels.length;index+=4)if(pixels[index]>127)visible++;
+   if(['near','behind','far'].includes(label)&&visible!==0)throw new Error(label+' anchor was not fully clipped');
+   if(!['near','behind','far'].includes(label)&&visible===0)throw new Error(label+' disappeared');
+   const rectangles=positions.filter(p=>-p[2]>=cameraProperties.near&&-p[2]<=cameraProperties.far).map(position=>{
+     const center=backend.projectWorldPoint({position});
+     const size=orthographic?rect.height*2/10:rect.height/(Math.tan(Math.PI/6)*-position[2]);
+     return {left:center.clientX-size/2,right:center.clientX+size/2,top:center.clientY-size/2,bottom:center.clientY+size/2};
+   });
+   for(const axis of ['x','y']){
+     const main=axis==='x'?canvas.width:canvas.height,cross=axis==='x'?canvas.height:canvas.width;
+     const point=(a,b)=>({clientX:rect.left+(axis==='x'?a:b)*rect.width/canvas.width,clientY:rect.top+(axis==='x'?b:a)*rect.height/canvas.height});
+     for(let b=3;b<cross-3;b+=11)for(let a=1;a<main-1;a++){
+       const current=axis==='x'?white(a,b):white(b,a),previous=axis==='x'?white(a-1,b):white(b,a-1);
+       if(current===previous)continue;
+       // Distance to the mathematical rectangle boundary remains meaningful at
+       // antialiased corners, where an axis scan may have no exact pick transition.
+       const edge=point(a,b+.5);
+       const error=Math.min(...rectangles.map(r=>{
+         const dx=Math.max(r.left-edge.clientX,0,edge.clientX-r.right),dy=Math.max(r.top-edge.clientY,0,edge.clientY-r.bottom);
+         if(dx>0||dy>0)return Math.hypot(dx,dy);
+         return Math.min(edge.clientX-r.left,r.right-edge.clientX,edge.clientY-r.top,r.bottom-edge.clientY);
+       }));
+       maximumError=Math.max(maximumError,error);checked++;
+       const sample=point(current?a+.5:a-1.5,b+.5),hit=backend.pick(sample);
+       if(hit){const projected=backend.projectWorldPoint({position:hit.point});roundtripError=Math.max(roundtripError,Math.hypot(projected.clientX-sample.clientX,projected.clientY-sample.clientY));}
+     }
+   }
+   cases.push({label,visiblePixels:visible,batches:backend.diagnostics().batchCount});
+   for(const binding of handles)backend.destroyBinding(binding);
+ }
+ const update=(binding,name,properties,position,group)=>backend.updateBinding(binding,{identity:{nodeName:name,componentKey:'visual'},worldMatrix:matrix(...position),panelAnchorWorld:null,visible:true,batchable:false,compositionGroup:group,properties});
+ const color=(clientX,clientY)=>{const pixel=new Uint8Array(4);gl.readPixels(Math.floor((clientX-rect.left)*canvas.width/rect.width),canvas.height-1-Math.floor((clientY-rect.top)*canvas.height/rect.height),1,1,gl.RGBA,gl.UNSIGNED_BYTE,pixel);return [...pixel]};
+ const uvProperties={...spriteProperties,height:1,textureResourceId:'fixture/uv',anchorOffset:[.25,.5,0]};
+ const uv=await backend.createBinding(desc('uv','render.sprite@3',uvProperties));update(uv,'uv',uvProperties,[0,5,-5],'base');draw();
+ const uvCenter=backend.projectWorldPoint({position:[.25,5.5,-5]});
+ const sizeCss=orthographic?rect.height/10:rect.height/(2*Math.tan(Math.PI/6)*5);
+ const top=color(uvCenter.clientX,uvCenter.clientY-sizeCss/4),bottom=color(uvCenter.clientX,uvCenter.clientY+sizeCss/4);
+ const uvCorrect=top[0]>220&&top[1]<20&&bottom[1]>220&&bottom[0]<20;
+ backend.destroyBinding(uv);
+ const center=backend.projectWorldPoint({position:[0,5,-5]});
+ const anchor=await backend.createBinding(desc('depth-anchor','render.sprite@3',spriteProperties));update(anchor,'depth-anchor',spriteProperties,[0,5,-5],'base');
+ const meshProperties={meshResourceId:'fixture/square',materialResourceId:'fixture/red',pickable:true};
+ const overlay=await backend.createBinding(desc('overlay','render.mesh@1',meshProperties));
+ update(overlay,'overlay',meshProperties,[0,orthographic?5:8,-8],'foreground');draw();const protectedColor=color(center.clientX,center.clientY);const protectedPick=backend.pick({clientX:center.clientX,clientY:center.clientY})?.nodeName;
+ update(overlay,'overlay',meshProperties,[0,orthographic?5:4,-4],'foreground');draw();const foregroundColor=color(center.clientX,center.clientY);const foregroundPick=backend.pick({clientX:center.clientX,clientY:center.clientY})?.nodeName;
+ const selectiveDepth=protectedColor[1]>220&&foregroundColor[0]>220&&foregroundColor[1]<20&&protectedPick==='depth-anchor'&&foregroundPick==='overlay';
+ const extension=gl.getExtension('WEBGL_debug_renderer_info');
+ const environment={gpu:extension?gl.getParameter(extension.UNMASKED_RENDERER_WEBGL):gl.getParameter(gl.RENDERER),userAgent:navigator.userAgent,capturedAt:new Date().toISOString()};
+ const glError=gl.getError();backend.dispose();
+ publish({status:maximumError<=1&&roundtripError<=1&&checked>0&&errors.length===0&&glError===0&&uvCorrect&&selectiveDepth?'READY':'FAILED',environment,projection:cameraProperties.projection,viewport:{width:rect.width,height:rect.height,dpr:canvas.width/rect.width},maximumErrorCss:maximumError,roundtripErrorCss:roundtripError,checked,cases,uvCorrect,top,bottom,selectiveDepth,protectedColor,foregroundColor,protectedPick,foregroundPick,errors,glError,disposed:backend.diagnostics().disposed});
+}catch(error){publish({status:'FAILED',error:String(error),stack:error.stack,errors});backend?.dispose();}
+function publish(report){document.body.dataset.result=btoa(unescape(encodeURIComponent(JSON.stringify(report))));document.title=report.status;}
+</script></body></html>

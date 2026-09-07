@@ -1,3 +1,4 @@
+export * from './generated-textures.js';
 export type JSONPrimitive = null | boolean | number | string;
 export type JSONValue = JSONPrimitive | readonly JSONValue[] | { readonly [key: string]: JSONValue };
 export type JSONRecord = { readonly [key: string]: JSONValue };
@@ -247,12 +248,57 @@ export interface PrefabDefinitionInput {
   ) => PrefabStatePatch | null | undefined;
 }
 
+export type ProgramParameterType = 'float' | 'int' | 'bool' | 'vec2' | 'vec3' | 'vec4' | 'color';
+export interface ProgramParameterSchema {
+  readonly type: ProgramParameterType;
+  readonly default: number | boolean | readonly unknown[];
+  readonly updateable: boolean;
+  readonly min?: number;
+  readonly max?: number;
+  readonly length?: number;
+}
+export interface ProgramResourceDescriptor extends ResourceDescriptor {
+  readonly kind: 'program';
+  readonly schema?: 'scene-engine-program-resource@1';
+  readonly revision: number;
+  readonly language: 'glsl-module@1';
+  readonly stage: 'background' | 'surface';
+  readonly source: string;
+  readonly timeChannel?: string;
+  readonly parameterSchema: Readonly<Record<string, ProgramParameterSchema>>;
+  readonly textureSlots: Readonly<Record<string, Readonly<{ usage: 'color' | 'data' }>>>;
+}
+export const PROGRAM_RESOURCE_SCHEMA: 'scene-engine-program-resource@1';
+export function normalizeProgramParameters(program: ProgramResourceDescriptor,
+  values?: Readonly<Record<string, unknown>>, options?: { readonly dynamic?: boolean }): JSONRecord;
+export interface VisualTimeControl {
+  readonly paused?: boolean;
+  readonly rate?: number;
+  readonly freezeSeconds?: number | null;
+}
+export interface VisualTimeSample { readonly seconds: number; readonly running: boolean; }
+
 export interface ResourceDescriptor {
   readonly id: string;
   readonly kind: string;
   readonly revision?: number;
   readonly hash?: string;
   readonly [key: string]: unknown;
+}
+
+export type TextureMinFilter = 'nearest' | 'linear' | 'nearest-mipmap-nearest'
+  | 'nearest-mipmap-linear' | 'linear-mipmap-nearest' | 'linear-mipmap-linear';
+export interface TextureResourceDescriptor extends ResourceDescriptor {
+  readonly kind: 'texture';
+  readonly url: string;
+  readonly colorSpace?: 'srgb' | 'linear';
+  readonly filter?: 'nearest' | 'linear';
+  readonly minFilter?: TextureMinFilter;
+  readonly magFilter?: 'nearest' | 'linear';
+  readonly mipmaps?: boolean;
+  readonly alphaEncoding?: 'straight' | 'premultiplied';
+  readonly alphaSampling?: 'straight' | 'premultiplied';
+  readonly wrap?: 'clamp' | 'repeat' | 'mirror' | Readonly<{ s: 'clamp' | 'repeat' | 'mirror'; t: 'clamp' | 'repeat' | 'mirror' }>;
 }
 
 export interface Resource {
@@ -338,6 +384,7 @@ export interface PublicDisplayContext {
 export interface DisplayFrame {
   readonly sourceTick: number;
   readonly visualSeconds: number;
+  readonly visualTimes?: Readonly<Record<string, VisualTimeSample>>;
   readonly deltaSeconds: number;
   readonly frameIndex: number;
   readonly display: PublicDisplayContext;
@@ -363,6 +410,8 @@ export class Component<P extends JSONRecord = JSONRecord> {
   readonly drivesTransform: boolean;
   setEnabled(enabled: boolean): void;
   setDrivenLocalTransform(transform: Matrix4Input): void;
+  /** Behaviour-only transient parameters for one program binding on the same Node. Null releases the claim. */
+  setProgramParameters(renderKey: string, patch: Readonly<Record<string, ProgramParameterValue>> | null): void;
   setAnimation(playerKey: string, animationId: string): void;
   playAnimation(playerKey: string, animationId: string): void;
   stopAnimation(playerKey: string): void;
@@ -370,6 +419,8 @@ export class Component<P extends JSONRecord = JSONRecord> {
   onAttach?(display: PublicDisplayContext): void;
   onDispose?(display: PublicDisplayContext, reason: string): void;
 }
+
+export type ProgramParameterValue = number | boolean | readonly number[] | readonly boolean[] | readonly (readonly number[])[];
 
 export class BehaviourComponent<P extends JSONRecord = JSONRecord> extends Component<P> {
   static readonly tickPhase: 'update' | 'before-render' | null;
@@ -581,12 +632,25 @@ export interface InteractionProximityPick {
   readonly target: InteractionTarget | null;
 }
 
-export interface WorldPointProjection {
-  readonly clientX: number;
-  readonly clientY: number;
-  readonly visible: boolean;
-  readonly depth: number;
+export interface UpperFieldProjectionProfile {
+  readonly mode: 'upper-field';
+  readonly startNdcY: number;
+  readonly strength: number;
 }
+export const UPPER_FIELD_INVERSE_MARGIN: 0.01;
+export function normalizeProjectionProfile(value: unknown): UpperFieldProjectionProfile | null;
+export function projectUpperFieldY(y: number, profile: UpperFieldProjectionProfile | null): number;
+export function unprojectUpperFieldY(y: number, profile: UpperFieldProjectionProfile | null): number;
+export function deriveUpperFieldProjection(value: Readonly<{
+  pitchDegrees: number; fovYDegrees: number; startNdcY: number; targetNdcY: number;
+}>): UpperFieldProjectionProfile;
+export type CameraProperties = Readonly<{
+  near: number; far: number; projectionProfile?: UpperFieldProjectionProfile | null;
+}> & (Readonly<{ projection: 'perspective'; fovYDegrees?: number }>
+  | Readonly<{ projection: 'orthographic'; orthoHeight?: number }>);
+export type WorldPointProjection = Readonly<{
+  clientX: number; clientY: number; visible: boolean; depth: number;
+}> | Readonly<{ clientX: null; clientY: null; visible: false; depth: null }>;
 
 export interface WorldPointFocus {
   readonly nodeName: string;
@@ -610,7 +674,7 @@ export interface RenderBackendPort {
   }>): ProximityPickHit | null;
   screenPointToWorldRay(query: Readonly<{ clientX: number; clientY: number }>): WorldRay;
   projectWorldPoint(point: Readonly<{ position: Vec3 }>): WorldPointProjection;
-  focusWorldPoint(target: Readonly<{ position: Vec3; radius: number }>): WorldPointFocus;
+  focusWorldPoint(target: Readonly<{ position: Vec3; radius: number; halfExtents?: never } | { position: Vec3; halfExtents: Vec3; radius?: never }>): WorldPointFocus;
   capture(): unknown;
   whenIdle(): Promise<void> | void;
   diagnostics(): unknown;
@@ -621,6 +685,15 @@ export interface FrameAdapter {
   request(callback: (time: number) => void): unknown;
   cancel(identity: unknown): void;
   now(): number;
+}
+
+export interface RenderHealthEvent {
+  readonly [key: string]: unknown;
+  readonly revision?: number;
+  readonly programStage?: 'surface' | 'background';
+  readonly affectedBindingCount?: number;
+  readonly diagnostic?: string;
+  readonly isolation?: 'program';
 }
 
 export interface DisplayRuntimeOptions {
@@ -636,13 +709,14 @@ export interface DisplayRuntimeOptions {
     rendererProfile: RendererProfile;
     compositionPlan: RenderCompositionPlan | null;
     resourceRegistry: ResourceRegistry;
+    generatedTextureSource: import('./generated-textures.js').GeneratedTextureSourcePort;
     signal: AbortSignal;
-    onHealth: (event: Readonly<Record<string, unknown>>) => void;
+    onHealth: (event: RenderHealthEvent) => void;
   }>) => RenderBackendPort;
   readonly hostElement?: unknown;
   readonly canvas?: unknown;
   readonly frameAdapter?: FrameAdapter | null;
-  readonly onHealth?: ((event: Readonly<Record<string, unknown>>) => void) | null;
+  readonly onHealth?: ((event: RenderHealthEvent) => void) | null;
   readonly onDiagnostic?: ((transition: DisplayDiagnosticTransition) => void) | null;
 }
 
@@ -668,6 +742,7 @@ export interface DisplayDiagnostics {
 }
 
 export class DisplayRuntime {
+  readonly generatedTextures: import('./generated-textures.js').GeneratedTextures;
   constructor(options: DisplayRuntimeOptions);
   readonly authority: Readonly<AuthorityPort>;
   readonly commitGate: Readonly<CommitGate>;
@@ -678,6 +753,9 @@ export class DisplayRuntime {
   start(): undefined;
   stop(): undefined;
   requestDraw(): undefined;
+  setVisualTimeControl(channel: string, control: VisualTimeControl): VisualTimeSample;
+  /** Pause all procedural channels while retaining independent controls and phases. */
+  setVisualTimePaused(paused: boolean): Readonly<Record<string, VisualTimeSample>>;
   whenReady(): Promise<void>;
   summary(): DisplaySummary;
   currentView(): DisplayView;
@@ -693,7 +771,7 @@ export class DisplayRuntime {
   }>): InteractionProximityPick | null;
   screenPointToWorldRay(query: Readonly<{ clientX: number; clientY: number }>): WorldRay;
   projectWorldPoint(point: Readonly<{ position: Vec3 }>): WorldPointProjection;
-  focusWorldPoint(target: Readonly<{ position: Vec3; radius: number }>): WorldPointFocus;
+  focusWorldPoint(target: Readonly<{ position: Vec3; radius: number; halfExtents?: never } | { position: Vec3; halfExtents: Vec3; radius?: never }>): WorldPointFocus;
   capture(): Readonly<Record<string, unknown>>;
   rebuildRenderBackend(): Promise<void>;
   dispose(): Promise<void>;
@@ -801,6 +879,49 @@ export class DisplayRuntimeError extends Error {
 
 export class ModelRendererComponent extends RenderComponent { static readonly typeId: 'render.model@2'; }
 export class MeshRendererComponent extends RenderComponent { static readonly typeId: 'render.mesh@1'; }
+/** Sprite geometry semantics. Anchor extents are view-aligned world units, not CSS pixels. */
+export type SpriteProjectionProperties = Readonly<{
+  projectionSemantics?: 'geometry';
+  anchorOffset?: never;
+  pivot?: never;
+} | {
+  projectionSemantics: 'anchor-extent';
+  /** World anchor in Node local units, before width/height scaling. */
+  anchorOffset?: Vec3;
+  /** Normalized image position from the bottom-left; defaults to [0.5, 0.5]. */
+  pivot?: readonly [number, number];
+}>;
+export type SpriteProperties = Readonly<{
+  width: number;
+  height: number;
+  renderOrder?: number;
+  pickable?: boolean;
+} & ((SpriteProjectionProperties & {
+  textureResourceId: string;
+  materialResourceId?: never;
+  parameters?: never;
+  material?: Readonly<{
+    tintRgba?: number;
+    opacity?: number;
+    emissive?: number;
+    alphaMode?: 'opaque' | 'mask' | 'blend';
+    alphaCutoff?: number;
+    depthTest?: boolean;
+    depthWrite?: boolean;
+  }>;
+  alpha?: number;
+  frame?: number;
+}) | {
+  materialResourceId: string;
+  projectionSemantics: 'anchor-extent';
+  anchorOffset?: Vec3;
+  pivot?: readonly [number, number];
+  parameters?: Readonly<Record<string, ProgramParameterValue>>;
+  textureResourceId?: never;
+  material?: never;
+  alpha?: never;
+  frame?: never;
+})>;
 export class SpriteRendererComponent extends RenderComponent { static readonly typeId: 'render.sprite@3'; }
 export class SurfaceRendererComponent extends RenderComponent { static readonly typeId: 'render.surface@1'; }
 export class ParticleRendererComponent extends RenderComponent { static readonly typeId: 'render.particle@2'; }

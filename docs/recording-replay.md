@@ -2,6 +2,9 @@
 
 The only packet-log identity is `scene-engine-packet-log@3`. A sealed directory contains `manifest.json`, `index.json`, and
 `packets.bin`; `INCOMPLETE` exists until seal succeeds. `packets.bin` repeats `[u64 LE length][exact Engine packet]`.
+Default durable writes flush and fsync packet, index and manifest files. POSIX additionally fsyncs the containing directory
+after removing `INCOMPLETE`; Windows skips this directory-only step because Python cannot open a Windows directory as a file
+descriptor. File fsync and all write/rename failures remain enforced on Windows; directory metadata durability is not promised.
 
 Index records contain:
 

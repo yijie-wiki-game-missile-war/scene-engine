@@ -1,0 +1,69 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Generated texture WebGL validation</title>
+<style>body{margin:0}#host{width:640px;height:480px;margin:11px 17px}canvas{width:100%;height:100%;display:block}</style>
+<script type="importmap">{"imports":{"@scene-engine/display":"/js/packages/display/src/index.js","three":"/node_modules/three/build/three.module.js","three/addons/":"/node_modules/three/examples/jsm/"}}</script>
+</head><body><div id="host"><canvas id="canvas"></canvas></div><script type="module">
+import {createResourceRegistry,createComponentRegistry,createDisplayKindRegistry,createPrefabRegistry,createSceneRegistry,
+  createDisplayRuntime,defineScene,SCENE_DEFINITION_SCHEMA,deriveUpperFieldProjection} from '@scene-engine/display';
+import {createThreeRenderBackend} from '/js/packages/renderer-three/src/index.js';
+const host=document.querySelector('#host'),canvas=document.querySelector('canvas'),errors=[],backends=[];
+const wait=ms=>new Promise(resolve=>setTimeout(resolve,ms));let runtime;
+try {
+ const texture=(id,format,initialValue)=>({id,kind:'generated-texture',revision:1,width:4,height:4,format,usage:'data',initialValue,
+   filter:'nearest',budget:{maxUpdateBytes:256,maxRegions:4}});
+ const resources=createResourceRegistry([texture('bytes','rgba8unorm',[0,0,255,255]),texture('floats','rgba32float',[-2,0,0,1]),
+  {id:'program',kind:'program',revision:1,language:'glsl-module@1',stage:'background',textureSlots:{bytes:{usage:'data'},floats:{usage:'data'}},parameterSchema:{},
+   source:`vec4 evaluate(ProgramInput data){
+    if(data.screenUv.x<.5)return vec4(texture2D(t_bytes,vec2(data.screenUv.x*2.,data.screenUv.y)).rgb,1.);
+    vec4 field=texture2D(t_floats,vec2((data.screenUv.x-.5)*2.,data.screenUv.y));
+    return vec4((field.r+2.)*.25,field.g,0.,1.);
+   }`}]);
+ const identity=[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1];
+ const scene=defineScene({schema:SCENE_DEFINITION_SCHEMA,id:'main',sceneProfile:'generated-fixture',
+   rendererProfile:{drawMode:'requested',maximumPixelRatio:2,clearRgba:0x000000ff,antialias:false,alpha:false,shadows:false,toneMapping:'none'},
+   activeCameraLocalName:'camera',nodes:[{localName:'camera',parentLocalName:null,transform:identity,components:[{key:'camera',type:'render.camera@1',
+    properties:{projection:'perspective',near:.1,far:1000,fovYDegrees:60,projectionProfile:deriveUpperFieldProjection({pitchDegrees:35,fovYDegrees:34,startNdcY:.1,targetNdcY:.79})}}]},
+    {localName:'background',parentLocalName:null,transform:identity,components:[{key:'background',type:'render.background@1',properties:{programResourceId:'program',textures:{bytes:'bytes',floats:'floats'}}}]}],prefabInstances:[]});
+ let pending=0,maximumPending=0;
+ const frameAdapter={now:()=>performance.now(),request(callback){pending++;maximumPending=Math.max(maximumPending,pending);return requestAnimationFrame(t=>{pending--;callback(t);});},cancel(id){cancelAnimationFrame(id);pending--;}};
+ runtime=createDisplayRuntime({hostElement:host,canvas,resourceRegistry:resources,sceneRegistry:createSceneRegistry([scene]),componentRegistry:createComponentRegistry(),
+  displayKindRegistry:createDisplayKindRegistry(),prefabRegistry:createPrefabRegistry(),authorityStateSchemas:[],frameAdapter,
+  createRenderBackend(options){const backend=createThreeRenderBackend(options);backends.push(backend);return backend;},onHealth:e=>{if(e.errorCode)errors.push(e);}});
+ runtime.installScene({sceneName:'main'});runtime.authority.installNodeMatrixPool({poolSize:0,matrices:new Float32Array()});runtime.activate();runtime.start();
+ await runtime.whenReady();
+ const ready=id=>Promise.race([runtime.generatedTextures.whenReady(id),wait(5000).then(()=>{throw Error('generated readiness timeout '+id);})]);
+ await Promise.all([ready('bytes'),ready('floats')]);
+ const gl=canvas.getContext('webgl2'),gpuExtension=gl.getExtension('WEBGL_debug_renderer_info');
+ const gpu=gpuExtension?gl.getParameter(gpuExtension.UNMASKED_RENDERER_WEBGL):gl.getParameter(gl.RENDERER);
+ const pixel=(x,y)=>{runtime.capture();const p=new Uint8Array(4);gl.readPixels(Math.floor(canvas.width*x),Math.floor(canvas.height*y),1,1,gl.RGBA,gl.UNSIGNED_BYTE,p);return [...p];};
+ const initial=pixel(.0625,.125),unchanged=pixel(.4375,.875);
+ const old=runtime.generatedTextures.begin('bytes',{sourceRevision:'old'}),oldReady=ready('bytes');
+ const current=runtime.generatedTextures.begin('bytes',{sourceRevision:'new'});
+ const late=old.commit({regions:[{x:0,y:0,width:1,height:1,data:new Uint8Array([0,255,0,255])}]});
+ const uploadBefore=backends.at(-1).diagnostics().generatedUploadedBytes;
+ const bytes=new Uint8Array([255,0,0,255]);
+ current.commit({regions:[{x:0,y:0,width:1,height:1,data:bytes}]});bytes.fill(0);
+ runtime.generatedTextures.begin('floats',{sourceRevision:'signed/1'}).commit({regions:[{x:0,y:0,width:1,height:1,data:new Float32Array([2,.5,0,1])}]});
+ await Promise.all([ready('bytes'),ready('floats')]);
+ const changed=pixel(.0625,.125),signed=pixel(.5625,.125),outside=pixel(.4375,.875);
+ const uploadedDelta=backends.at(-1).diagnostics().generatedUploadedBytes-uploadBefore;
+ let rejected=false; const invalid=runtime.generatedTextures.begin('bytes',{sourceRevision:'invalid'});
+ try{invalid.commit({regions:[{x:0,y:0,width:1,height:1,data:new Uint8Array([0,255,0,255])},{x:9,y:0,width:1,height:1,data:new Uint8Array(4)}]});}catch{rejected=true;}
+ invalid.cancel();const afterInvalid=pixel(.0625,.125);
+ const cpuIdentity=runtime.generatedTextures.status('floats').committedSourceRevision;
+ await runtime.rebuildRenderBackend();await runtime.whenReady();const rebuiltReady=await Promise.all([ready('bytes'),ready('floats')]);
+ const rebuilt=pixel(.0625,.125),rebuiltFloat=pixel(.5625,.125);
+ await wait(80);const frameBefore=runtime.capture().frameIndex;await wait(80);const frameAfter=runtime.capture().frameIndex;
+ const pendingTicket=runtime.generatedTextures.begin('floats',{sourceRevision:'dispose-late'}),pendingReady=ready('floats');
+ await runtime.dispose();const disposedReady=await pendingReady;
+ const checks={rgba8:initial[2]===255&&changed[0]===255&&changed[2]===0,floatSigned:signed[0]===255&&Math.abs(signed[1]-188)<=1,
+   localOnly:JSON.stringify(unchanged)===JSON.stringify(outside),copiedInput:changed[0]===255,localUploadBytes:uploadedDelta===20,
+   staleRejected:old.signal.aborted&&late.status==='discarded'&&(await oldReady).status==='discarded',
+   invalidAtomic:rejected&&JSON.stringify(afterInvalid)===JSON.stringify(changed),
+   rebuildPixels:JSON.stringify(rebuilt)===JSON.stringify(changed)&&JSON.stringify(rebuiltFloat)===JSON.stringify(signed),
+   rebuildIdentity:cpuIdentity==='signed/1',idle:frameBefore===frameAfter,oneRaf:maximumPending===1,
+   disposeCancels:pendingTicket.signal.aborted&&disposedReady.status==='disposed'&&pendingTicket.commit({}).status==='discarded',
+   resourcesReleased:backends.every(b=>b.diagnostics().resourceCount===0),noErrors:errors.length===0};
+ publish({status:Object.values(checks).every(Boolean)?'READY':'NOT READY',checks,uploadedDelta,rebuiltReady,pixels:{initial,changed,signed,outside,rebuilt},environment:{gpu,userAgent:navigator.userAgent,devicePixelRatio},errors});
+}catch(error){await runtime?.dispose();publish({status:'NOT READY',error:String(error.stack??error),errors});}
+function publish(report){document.body.dataset.result=btoa(unescape(encodeURIComponent(JSON.stringify(report))));document.title=report.status;}
+</script></body></html>

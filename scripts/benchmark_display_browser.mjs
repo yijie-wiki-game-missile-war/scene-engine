@@ -9,7 +9,19 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
-const HTML_PATH = '/scripts/support/display_browser_benchmark.html';
+const FIXTURES = Object.freeze({
+  display: 'display_browser_benchmark.html',
+  'upper-field': 'upper_field_browser_validation.html',
+  anchor: 'anchor_extent_browser_validation.html',
+  program: 'program_browser_validation.html',
+  'program-frame': 'program_frame_browser_validation.html',
+  'program-batch': 'program_batch_browser_validation.html',
+  'program-scale': 'program_scale_browser_benchmark.html',
+  'program-sprite-scale': 'program_scale_browser_benchmark.html',
+  'program-sprite': 'program_sprite_browser_validation.html',
+  'texture-alpha': 'texture_alpha_browser_validation.html',
+  generated: 'generated_texture_browser_validation.html',
+});
 const MAXIMUM_BINDINGS = 50_000;
 const MAXIMUM_TICKS = 100_000;
 const MAXIMUM_TIMEOUT_MS = 600_000;
@@ -32,9 +44,13 @@ async function main() {
       bindings: String(options.bindings),
       ticks: String(options.ticks),
       updateRatio: String(options.updateRatio),
+      projection: options.projection,
+      representation: options.fixture === 'program-sprite-scale' ? 'sprite' : 'mesh',
+      evidence: options.evidence ? '1' : '0',
+      width: String(options.width), height: String(options.height),
     });
-    const url = `http://127.0.0.1:${address.port}${HTML_PATH}?${query}`;
-    const report = await runChrome(chrome, profileDirectory, url, options.timeoutMs);
+    const url = `http://127.0.0.1:${address.port}/scripts/support/${FIXTURES[options.fixture]}?${query}`;
+    const report = await runChrome(chrome, profileDirectory, url, options.timeoutMs, options.dpr);
     process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
     if (report.status !== 'READY') process.exitCode = 1;
   } finally {
@@ -48,16 +64,36 @@ async function main() {
       force: true,
       maxRetries: 5,
       retryDelay: 100,
+    }).catch((error) => {
+      // A Windows browser helper may release its profile lock after its main
+      // process exits. Do not replace the actual test result with cleanup noise.
+      if (error.code !== 'EBUSY' && error.code !== 'EPERM') throw error;
+      process.stderr.write(`Browser profile remains locked: ${profileDirectory}\n`);
     });
   }
 }
 
 function parseArguments(arguments_) {
+  let fixture = 'display';
+  let evidence = false;
+  let dpr = 1;
+  let projection = 'perspective';
+  let width = 640, height = 480;
   let bindings = 500;
   let ticks = 60;
   let updateRatio = 0.01;
   let timeoutMs = 120_000;
   for (const argument of arguments_) {
+    if (argument === '--evidence') { evidence = true; continue; }
+    if (argument.startsWith('--fixture=')) {
+      fixture = argument.slice('--fixture='.length);
+      if (!Object.hasOwn(FIXTURES, fixture)) throw new Error('unknown fixture: ' + fixture);
+      continue;
+    }
+    if (argument === '--projection=orthographic') { projection = 'orthographic'; continue; }
+    const viewport = /^--viewport=([0-9]+)x([0-9]+)$/.exec(argument);
+    if (viewport) { width = positiveInteger(viewport[1], 'width'); height = positiveInteger(viewport[2], 'height'); continue; }
+    if (argument === '--dpr=1' || argument === '--dpr=1.25' || argument === '--dpr=2') { dpr = Number(argument.slice(6)); continue; }
     const match = /^(--bindings|--ticks|--update-ratio|--timeout-ms)=([^=]+)$/u.exec(argument);
     if (match === null) throw new Error(`unknown option: ${argument}`);
     const [, name, raw] = match;
@@ -79,7 +115,7 @@ function parseArguments(arguments_) {
       }
     }
   }
-  return { bindings, ticks, updateRatio, timeoutMs };
+  return { bindings, ticks, updateRatio, timeoutMs, fixture, dpr, projection, width, height, evidence };
 }
 
 function positiveInteger(raw, name) {
@@ -102,7 +138,7 @@ async function requireFile(target, label) {
   if (!value.isFile()) throw new Error(`${label} is not a file: ${target}`);
 }
 
-async function runChrome(chrome, profileDirectory, url, timeoutMs) {
+async function runChrome(chrome, profileDirectory, url, timeoutMs, dpr) {
   const arguments_ = [
     '--headless=new',
     '--no-first-run',
@@ -118,12 +154,12 @@ async function runChrome(chrome, profileDirectory, url, timeoutMs) {
     '--remote-allow-origins=*',
     '--remote-debugging-port=0',
     '--run-all-compositor-stages-before-draw',
-    '--force-device-scale-factor=1',
+    `--force-device-scale-factor=${dpr}`,
     '--window-size=1280,720',
     `--user-data-dir=${profileDirectory}`,
     url,
   ];
-  const child = spawn(chrome, arguments_, { stdio: ['ignore', 'ignore', 'pipe'] });
+  const child = spawn(chrome, arguments_, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
   child.stderr.setEncoding('utf8');
   let stderr = '';
   let socket;

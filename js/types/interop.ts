@@ -134,7 +134,7 @@ function inspectQueries(queries: Pick<RenderBackendPort,
   }
   const proximity = queries.pickProximity({ clientX: 0, clientY: 0, radiusPixels: 12 });
   const direction: Vec3 = queries.screenPointToWorldRay({ clientX: 0, clientY: 0 }).direction;
-  const clientX: number = queries.projectWorldPoint({ position: [0, 0, 0] }).clientX;
+  const clientX: number | null = queries.projectWorldPoint({ position: [0, 0, 0] }).clientX;
   const position: Vec3 = queries.focusWorldPoint({ position: [0, 0, 0], radius: 1 }).position;
   void [proximity?.screenDistancePixels, direction, clientX, position];
 }
@@ -203,3 +203,43 @@ void asynchronousCreate;
 // @ts-expect-error Scene installation is a synchronous barrier.
 const asynchronousInstall: DisplaySessionRuntime['installScene'] = async () => createProductDisplaySession().runtime;
 void asynchronousInstall;
+
+
+function generatedTextureTypeCheck(runtime: import('@scene-engine/display').DisplayRuntime,
+  registry: import('@scene-engine/display').ResourceRegistry) {
+  const resource: import('@scene-engine/display').GeneratedTextureResourceDescriptor = {
+    id: 'typed/data', kind: 'generated-texture', revision: 1, width: 4, height: 4,
+    format: 'rgba32float', usage: 'data', initialValue: [-1, 0, 0, 1],
+    budget: { maxUpdateBytes: 256, maxRegions: 4 },
+  };
+  registry.register(resource);
+  const ticket = runtime.generatedTextures.begin(resource.id, { sourceRevision: 'world/1' });
+  ticket.commit({ regions: [{ x: 0, y: 0, width: 1, height: 1, data: new Float32Array([-2, 0, 0, 1]) }] });
+  const ready: Promise<import('@scene-engine/display').GeneratedTextureStatus |
+    Readonly<{ status: 'discarded' | 'disposed'; generation: number }>> = runtime.generatedTextures.whenReady(resource.id);
+  void ready;
+  // @ts-expect-error generated regions require typed CPU pixel storage
+  ticket.commit({ regions: [{ x: 0, y: 0, width: 1, height: 1, data: [0, 0, 0, 1] }] });
+  // @ts-expect-error source revisions are explicit opaque identities
+  runtime.generatedTextures.begin(resource.id, { sourceRevision: 3 });
+}
+
+const programSprite: import('@scene-engine/display').SpriteProperties = {
+  materialResourceId: 'material/cloud', projectionSemantics: 'anchor-extent',
+  width: 4, height: 2, pivot: [0.5, 0], parameters: { phase: 1 },
+};
+const ordinarySprite: import('@scene-engine/display').SpriteProperties = {
+  textureResourceId: 'texture/card', width: 4, height: 2, frame: 1,
+};
+const spriteDefinition: import('@scene-engine/display').ComponentDefinition<import('@scene-engine/display').SpriteProperties> = {
+  key: 'sprite', type: 'render.sprite@3', properties: programSprite,
+};
+// @ts-expect-error Sprite resource branches are mutually exclusive.
+const mixedSprite: import('@scene-engine/display').SpriteProperties = { ...programSprite, textureResourceId: 'texture/card' };
+// @ts-expect-error Program sprites require anchor extent projection.
+const geometryProgramSprite: import('@scene-engine/display').SpriteProperties = { materialResourceId: 'material/cloud', width: 4, height: 2 };
+// @ts-expect-error Program materials own alpha, rather than a second inline alpha field.
+const inlineAlphaSprite: import('@scene-engine/display').SpriteProperties = { ...programSprite, alpha: 0.5 };
+// @ts-expect-error Geometry sprites cannot declare a projected pivot.
+const geometryPivotSprite: import('@scene-engine/display').SpriteProperties = { ...ordinarySprite, projectionSemantics: 'geometry', pivot: [0.5, 0] };
+void [programSprite, ordinarySprite, spriteDefinition, mixedSprite, geometryProgramSprite, inlineAlphaSprite, geometryPivotSprite];

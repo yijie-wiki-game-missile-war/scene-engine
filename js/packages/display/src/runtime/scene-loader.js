@@ -1,6 +1,7 @@
 import { Node } from '../node/node.js';
 import { AUTHORITY_ROOT_NAME, SCENE_ROOT_NAME, joinSceneNodeName } from '../node/node-name.js';
 import { fail } from './health.js';
+import { validateSpriteProjectionComponents } from '../render/components.js';
 
 export class SceneLoader {
   constructor({ scene, componentContext, prefabInstantiator, onCleanupErrors = null }) {
@@ -65,7 +66,10 @@ export class SceneLoader {
           this._directComponents.push(component);
         }
       }
-      for (const instance of compiled.prefabInstances) {
+      // A descendant's candidate must see the complete components of its Scene
+      // Prefab ancestors, even when the source declares the child first.
+      for (const instance of compiled.ordered) {
+        if (!instance.compiledPrefab) continue;
         const rootNode = nodeByLocalName.get(instance.localName);
         const scope = this._prefabInstantiator.prepareExistingRoot({
           root: rootNode,
@@ -151,11 +155,12 @@ export class SceneLoader {
     this._onCleanupErrors = null;
   }
 
-  _attachPreorder(node) {
+  _attachPreorder(node, inheritedFixed = false) {
+    const fixed = validateSpriteProjectionComponents([...node._components.values()], inheritedFixed);
     for (const component of node._components.values()) {
       if (component.node === null) component.attach(node, this._componentContext);
     }
-    for (const child of node._children) this._attachPreorder(child);
+    for (const child of node._children) this._attachPreorder(child, fixed);
     for (const scope of this._scopes) {
       if (scope.root === node) scope.attached = true;
     }

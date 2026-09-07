@@ -1,3 +1,5 @@
+import { requireOrdinaryTextureSampling } from '../resource/texture-sampling.js';
+import { normalizeProgramParameters, validateProgramTextures } from '../resource/program-resource.js';
 import {
   booleanValue,
   enumValue,
@@ -9,8 +11,10 @@ import {
   tuple,
 } from '../internal.js';
 import { TICKS_PER_SECOND } from '../constants.js';
+import { normalizeProjectionProfile } from '../math/projection.js';
 import { fail } from '../runtime/health.js';
 import { RenderComponent } from './render-component.js';
+import { BillboardComponent } from '../behaviours/billboard.js';
 
 const PROPERTY_ERROR = 'display-component-properties-invalid';
 const MATERIAL_FIELDS = Object.freeze([
@@ -117,11 +121,29 @@ function normalizeModel(value, resourceRegistry) {
   };
 }
 
-function normalizeMesh(value) {
+function normalizeMaterialParameters(material, value, resourceRegistry) {
+  const program = descriptorFor(resourceRegistry, material.programResourceId);
+  if (program?.kind !== 'program' || program.stage !== 'surface') fail(PROPERTY_ERROR);
+  const base = normalizeProgramParameters(program, material.parameters ?? {});
+  const dynamic = plainRecord(value ?? {}, PROPERTY_ERROR);
+  for (const [key, entry] of Object.entries(dynamic)) {
+    const spec = program.parameterSchema[key];
+    if (!spec || (!spec.updateable && JSON.stringify(entry) !== JSON.stringify(base[key]))) fail(PROPERTY_ERROR);
+  }
+  return normalizeProgramParameters(program, { ...base, ...dynamic });
+}
+
+function normalizeMesh(value, resourceRegistry) {
   const record = exactKeys(value, ['meshResourceId', 'materialResourceId'], [
-    'castShadow', 'receiveShadow', 'renderOrder', 'pickable',
+    'castShadow', 'receiveShadow', 'renderOrder', 'pickable', 'parameters',
   ], PROPERTY_ERROR);
+  const material = descriptorFor(resourceRegistry, record.materialResourceId);
+  let parameters;
+  if (material?.family === 'material.program') {
+    parameters = normalizeMaterialParameters(material, record.parameters, resourceRegistry);
+  } else if (record.parameters !== undefined) fail(PROPERTY_ERROR);
   return {
+    ...(parameters === undefined ? {} : { parameters }),
     meshResourceId: resourceId(record.meshResourceId),
     materialResourceId: resourceId(record.materialResourceId),
     castShadow: optional(record, 'castShadow', (entry) => booleanValue(entry, PROPERTY_ERROR), false),
@@ -141,20 +163,39 @@ function validateAtlasFrame(descriptor, frame) {
 }
 
 function normalizeSprite(value, resourceRegistry) {
-  const record = exactKeys(value, ['textureResourceId', 'width', 'height'], [
-    'material', 'alpha', 'frame', 'renderOrder', 'pickable',
+  const programBranch = Object.hasOwn(plainRecord(value, PROPERTY_ERROR), 'materialResourceId');
+  const record = exactKeys(value, ['width', 'height', programBranch ? 'materialResourceId' : 'textureResourceId'], [
+    ...(programBranch ? ['parameters'] : ['material', 'alpha', 'frame']),
+    'renderOrder', 'pickable', 'projectionSemantics', 'anchorOffset', 'pivot',
   ], PROPERTY_ERROR);
-  const textureResourceId = resourceId(record.textureResourceId);
-  const descriptor = descriptorFor(resourceRegistry, textureResourceId);
-  const frame = optional(record, 'frame', nonnegativeInteger, 0);
-  validateAtlasFrame(descriptor, frame);
+  const projectionSemantics = enumValue(record.projectionSemantics ?? 'geometry', ['geometry', 'anchor-extent'], PROPERTY_ERROR);
+  if (projectionSemantics !== 'anchor-extent'
+      && (programBranch || Object.hasOwn(record, 'anchorOffset') || Object.hasOwn(record, 'pivot'))) fail(PROPERTY_ERROR);
+  let resourceProperties;
+  if (programBranch) {
+    const materialResourceId = resourceId(record.materialResourceId);
+    const material = descriptorFor(resourceRegistry, materialResourceId);
+    if (material?.kind !== 'material' || material.family !== 'material.program') fail(PROPERTY_ERROR);
+    resourceProperties = { materialResourceId,
+      parameters: normalizeMaterialParameters(material, record.parameters, resourceRegistry) };
+  } else {
+    const textureResourceId = resourceId(record.textureResourceId);
+    const descriptor = descriptorFor(resourceRegistry, textureResourceId);
+    requireOrdinaryTextureSampling(descriptor);
+    const frame = optional(record, 'frame', nonnegativeInteger, 0);
+    validateAtlasFrame(descriptor, frame);
+    resourceProperties = { textureResourceId, material: normalizeMaterialProperties(record.material ?? {}, false),
+      alpha: optional(record, 'alpha', unit, 1), frame };
+  }
   return {
-    textureResourceId,
+    ...resourceProperties,
+    ...(record.projectionSemantics === undefined ? {} : { projectionSemantics }),
+    ...(projectionSemantics === 'anchor-extent' ? {
+      anchorOffset: optional(record, 'anchorOffset', vector, [0,0,0]),
+      pivot: optional(record, 'pivot', value => tuple(value, 2, PROPERTY_ERROR).map(unit), [0.5,0.5]),
+    } : {}),
     width: positive(record.width),
     height: positive(record.height),
-    material: normalizeMaterialProperties(record.material ?? {}, false),
-    alpha: optional(record, 'alpha', unit, 1),
-    frame,
     renderOrder: optional(record, 'renderOrder', (entry) => safeInteger(entry, PROPERTY_ERROR), 0),
     pickable: optional(record, 'pickable', (entry) => booleanValue(entry, PROPERTY_ERROR), false),
   };
@@ -243,12 +284,14 @@ function normalizeParticle(value, resourceRegistry) {
 }
 
 function normalizeCamera(value) {
-  const record = exactKeys(value, ['projection', 'near', 'far'], ['fovYDegrees', 'orthoHeight'],
+  const record = exactKeys(value, ['projection', 'near', 'far'], ['fovYDegrees', 'orthoHeight', 'projectionProfile'],
     PROPERTY_ERROR);
   const projection = enumValue(record.projection, ['perspective', 'orthographic'], PROPERTY_ERROR);
   const near = positive(record.near); const far = positive(record.far);
   if (far <= near) fail(PROPERTY_ERROR);
   const result = { projection, near, far };
+  if (Object.hasOwn(record, 'projectionProfile'))
+    result.projectionProfile = normalizeProjectionProfile(record.projectionProfile);
   if (projection === 'perspective') {
     const fov = Object.hasOwn(record, 'fovYDegrees') ? positive(record.fovYDegrees) : 50;
     if (fov >= 180 || Object.hasOwn(record, 'orthoHeight')) fail(PROPERTY_ERROR);
@@ -260,11 +303,22 @@ function normalizeCamera(value) {
   return result;
 }
 
-function normalizeBackground(value) {
+function normalizeBackground(value, resourceRegistry) {
+  if (value?.programResourceId) {
+    const record = exactKeys(value, ['programResourceId'], ['textures', 'parameters'], PROPERTY_ERROR);
+    const programResourceId = resourceId(record.programResourceId);
+    const program = descriptorFor(resourceRegistry, programResourceId);
+    if (!program || program.kind !== 'program' || program.stage !== 'background') fail(PROPERTY_ERROR);
+    return { programResourceId, textures: validateProgramTextures(program, record.textures ?? {}, resourceRegistry),
+      parameters: normalizeProgramParameters(program, record.parameters ?? {}, { dynamic: true }) };
+  }
   const record = exactKeys(value, [], ['colorRgba', 'textureResourceId', 'environmentResourceId'],
     PROPERTY_ERROR);
   if (!Object.hasOwn(record, 'colorRgba') && !Object.hasOwn(record, 'textureResourceId')) {
     fail(PROPERTY_ERROR);
+  }
+  for (const id of [record.textureResourceId, record.environmentResourceId]) {
+    if (id) requireOrdinaryTextureSampling(descriptorFor(resourceRegistry, id));
   }
   return {
     colorRgba: optional(record, 'colorRgba', color, null),
@@ -304,6 +358,27 @@ export class DirectionalLightComponent extends RenderComponent { static typeId =
 export class PointLightComponent extends RenderComponent { static typeId = 'render.point-light@1'; }
 export class SpotLightComponent extends RenderComponent { static typeId = 'render.spot-light@1'; }
 
+// The nearest billboard owns the fixed-panel choice, including a disabled or
+// camera-facing billboard that stops inheritance. Shared by candidate validation
+// and the renderer-facing projection path.
+export function fixedPanelSource(node) {
+  for (let ancestor = node; ancestor !== null; ancestor = ancestor.parent) {
+    const facing = ancestor.getComponent(BillboardComponent);
+    if (facing !== null) return facing.enabled && !facing.disposed && facing.properties.facing === 'fixed'
+      ? ancestor : null;
+  }
+  return null;
+}
+
+export function validateSpriteProjectionComponents(components, inheritedFixed = false) {
+  const typeOf = component => component.type ?? component.constructor.typeId;
+  const facing = components.find(component => typeOf(component) === 'behavior.billboard@2');
+  const fixed = facing ? facing.enabled !== false && !facing.disposed && facing.properties.facing === 'fixed' : inheritedFixed;
+  if (fixed && components.some(component => typeOf(component) === SpriteRendererComponent.typeId
+    && component.properties.projectionSemantics === 'anchor-extent')) fail('display-sprite-projection-combination-invalid');
+  return fixed;
+}
+
 export const RENDER_COMPONENT_DESCRIPTORS = Object.freeze([
   { ComponentClass: ModelRendererComponent, normalizeProperties: normalizeModel,
     resourceReferences: (properties) => [{ id: properties.modelResourceId, kinds: ['model'] }] },
@@ -313,16 +388,19 @@ export const RENDER_COMPONENT_DESCRIPTORS = Object.freeze([
       { id: properties.materialResourceId, kinds: ['material'] },
     ] },
   { ComponentClass: SpriteRendererComponent, normalizeProperties: normalizeSprite,
-    resourceReferences: (properties) => [{
-      id: properties.textureResourceId, kinds: ['texture', 'texture-atlas'],
-    }] },
+    resourceReferences: (properties) => properties.materialResourceId
+      ? [{ id: properties.materialResourceId, kinds: ['material'] }]
+      : [{ id: properties.textureResourceId, kinds: ['texture', 'texture-atlas'] }] },
   { ComponentClass: SurfaceRendererComponent, normalizeProperties: normalizeSurface,
     resourceReferences: (properties) => [{ id: properties.surfaceResourceId, kinds: ['surface'] }] },
   { ComponentClass: ParticleRendererComponent, normalizeProperties: normalizeParticle,
     resourceReferences: (properties) => [{ id: properties.particleResourceId, kinds: ['particle'] }] },
   { ComponentClass: CameraComponent, normalizeProperties: normalizeCamera, resourceReferences: () => [] },
   { ComponentClass: BackgroundComponent, normalizeProperties: normalizeBackground,
-    resourceReferences: (properties) => [properties.textureResourceId, properties.environmentResourceId]
+    resourceReferences: (properties) => properties.programResourceId
+      ? [{ id: properties.programResourceId, kinds: ['program'] },
+        ...Object.values(properties.textures).map((id) => ({ id, kinds: ['texture', 'generated-texture'] }))]
+      : [properties.textureResourceId, properties.environmentResourceId]
       .filter(Boolean).map((id) => ({ id, kinds: ['texture', 'texture-atlas'] })) },
   { ComponentClass: AmbientLightComponent, normalizeProperties: (properties) => normalizeLight(properties, true),
     resourceReferences: () => [] },

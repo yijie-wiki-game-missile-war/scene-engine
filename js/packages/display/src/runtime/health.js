@@ -12,7 +12,7 @@ export function fail(code, message = code, options = undefined) {
 
 export function healthEvent({ severity = 'error', code, message, nodeName = null,
   componentType = null, componentKey = null, resourceId = null, phase = null,
-  recoverable = false }) {
+  recoverable = false, revision, programStage, affectedBindingCount, diagnostic, isolation }) {
   return Object.freeze({
     severity,
     code,
@@ -23,5 +23,7 @@ export function healthEvent({ severity = 'error', code, message, nodeName = null
     resourceId,
     phase,
     recoverable,
+    ...(programStage ? { revision, programStage, affectedBindingCount, diagnostic } : {}),
+    ...(isolation ? { isolation } : {}),
   });
 }

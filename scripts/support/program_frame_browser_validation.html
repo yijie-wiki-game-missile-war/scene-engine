@@ -1,0 +1,80 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Program prepared frame WebGL validation</title>
+<style>body{margin:0}#host{width:640px;height:480px;margin:11px 17px}canvas{width:100%;height:100%;display:block}</style>
+<script type="importmap">{"imports":{"@scene-engine/display":"/js/packages/display/src/index.js","three":"/node_modules/three/build/three.module.js","three/addons/":"/node_modules/three/examples/jsm/"}}</script>
+</head><body><div id="host"><canvas></canvas></div><script type="module">
+import {createResourceRegistry,deriveUpperFieldProjection} from '@scene-engine/display';
+import {createThreeRenderBackend} from '/js/packages/renderer-three/src/index.js';
+const host=document.querySelector('#host'),canvas=document.querySelector('canvas'),query=new URLSearchParams(location.search);
+const fractional=devicePixelRatio===1.25;
+const initialWidth=Number(query.get('width')??640)+(fractional ? 0.5 : 0),initialHeight=Number(query.get('height')??480)+(fractional ? 0.25 : 0);
+const checks={},errors=[],samples=[];let backend;
+const original=console.error;console.error=(...args)=>{errors.push(args.map(String).join(' '));original(...args)};
+const field=(type,value)=>({type,default:value,min:-100000,max:100000,updateable:true});
+const source=`vec4 evaluate(ProgramInput data){
+ vec4 probe=vec4(0.23,-0.37,0.41,1.0);
+ bool valid=length(data.viewMatrix*data.cameraWorldMatrix*probe-probe)<0.001;
+ valid=valid&&length(data.projectionMatrix*data.inverseProjectionMatrix*probe-probe)<0.001;
+ vec4 clip=data.projectionMatrix*data.viewMatrix*vec4(p_targetWorld,1.0);
+ vec2 sourceUv=clip.xy/clip.w*0.5+0.5;
+ float y=sourceUv.y*data.projectionProfile.z-1.0;
+ float d=max(0.0,y-data.projectionProfile.x);
+ float finalY=y<=data.projectionProfile.x?y:data.projectionProfile.x+d/(1.0+data.projectionProfile.y*d);
+ vec2 client=data.viewportCssOrigin+vec2(sourceUv.x,0.5-0.5*finalY)*data.viewportCss;
+ valid=valid&&length(client-p_targetClient)<0.05;
+ valid=valid&&length(data.viewportCss-p_viewport)<0.01&&length(data.viewportBuffer-p_buffer)<0.01;
+ valid=valid&&length(data.viewportCssOrigin-p_origin)<0.01&&length(data.viewportBufferOrigin)<0.001;
+ valid=valid&&data.projectionMode==p_mode&&length(data.projectionParameters-p_parameters)<0.001;
+ valid=valid&&length(data.projectionProfile.xy-p_profile)<0.001;
+ valid=valid&&length(data.cameraPosition-p_camera)<0.001;
+ vec4 localOrigin=data.viewMatrix*vec4(data.rayOrigin,1.0);
+ valid=valid&&(data.projectionMode==0?length(localOrigin.xyz)<0.001:abs(localOrigin.z+p_parameters.x)<0.001);
+ valid=valid&&abs(length(data.rayDirection)-1.0)<0.001;
+ return valid?vec4(0.0,1.0,0.0,1.0):vec4(1.0,0.0,0.0,1.0);
+}`;
+const base={kind:'program',revision:1,language:'glsl-module@1',textureSlots:{},source,parameterSchema:{
+ targetWorld:field('vec3',[0,0,0]),targetClient:field('vec2',[0,0]),viewport:field('vec2',[1,1]),buffer:field('vec2',[1,1]),
+ origin:field('vec2',[0,0]),mode:field('int',0),parameters:field('vec4',[0,0,0,0]),profile:field('vec2',[0,0]),camera:field('vec3',[0,0,0])}};
+const registry=createResourceRegistry([{...base,id:'program/surface',stage:'surface'},{...base,id:'program/background',stage:'background'},
+ {id:'mesh/quad',kind:'mesh',positions:[-2,-2,0,2,-2,0,2,2,0,-2,2,0],indices:[0,1,2,0,2,3]},
+ {id:'material/program',kind:'material',family:'material.program',programResourceId:'program/surface',textures:{},parameters:{},properties:{alphaMode:'opaque',depthTest:true,depthWrite:true}}]);
+const matrix=(x,y,z)=>[1,0,0,0,0,1,0,0,0,0,1,0,x,y,z,1];
+const desc=(name,type,properties,batchable=false)=>({nodeName:name,componentKey:'visual',componentType:type,properties,batchable,compositionGroup:null,resourceRegistry:registry});
+const update=(binding,name,properties,position,batchable=false)=>backend.updateBinding(binding,{identity:{nodeName:name,componentKey:'visual'},worldMatrix:matrix(...position),visible:true,panelAnchorWorld:null,batchable,compositionGroup:null,properties});
+const profile=deriveUpperFieldProjection({pitchDegrees:35,fovYDegrees:34,startNdcY:.1,targetNdcY:.79});
+try{
+ for(const stage of ['background','ordinary','batch']){
+  host.style.width=`${initialWidth}px`;host.style.height=`${initialHeight}px`;
+  backend=createThreeRenderBackend({hostElement:host,canvas,rendererProfile:{drawMode:'requested',maximumPixelRatio:2,clearRgba:0x000000ff,antialias:false,alpha:false,shadows:false,toneMapping:'none'},compositionPlan:null,resourceRegistry:registry,onHealth:event=>errors.push(JSON.stringify(event))});
+  const cameraBindings=[];
+  for(const mode of [0,1]){const p={projection:mode?'orthographic':'perspective',near:.2,far:100,...(mode?{orthoHeight:8}:{fovYDegrees:60})};
+   cameraBindings.push({properties:p,binding:await backend.createBinding(desc(`camera/${mode}`,'render.camera@1',p))});}
+  const items=[];
+  for(let i=0;i<(stage==='batch'?2:1);i++){
+   const p=stage==='background'?{programResourceId:'program/background',textures:{},parameters:{}}:{meshResourceId:'mesh/quad',materialResourceId:'material/program',parameters:{}};
+   items.push({name:`item/${i}`,properties:p,binding:await backend.createBinding(desc(`item/${i}`,stage==='background'?'render.background@1':'render.mesh@1',p,stage==='batch'))});
+  }
+  for(const mode of [0,1])for(const compressed of [false,true])for(const resized of [false,true]){
+   const width=initialWidth-(resized?83:0),height=initialHeight-(resized?67:0);
+   host.style.width=`${width}px`;host.style.height=`${height}px`;host.style.margin=`${resized?43:11}px ${resized?59:17}px`;backend.requestResize();
+   const cameraPosition=resized?[1.5,2.5,9]:[1,2,8],target=[cameraPosition[0],cameraPosition[1]+1,0];
+   const camera=cameraBindings[mode],p={...camera.properties,...(compressed?{projectionProfile:profile}:{projectionProfile:null})};
+   update(camera.binding,`camera/${mode}`,p,cameraPosition);
+   const frame={sourceTick:0,visualSeconds:3,activeCameraBinding:camera.binding,dirtyBindings:[]};backend.prepareFrame(frame);
+   const point=backend.projectWorldPoint({position:target}),rect=host.getBoundingClientRect();
+   const parameters={targetWorld:target,targetClient:[point.clientX,point.clientY],viewport:[width,height],buffer:[canvas.width,canvas.height],origin:[rect.left,rect.top],mode,
+    parameters:[.2,100,mode?0:Math.PI/3,mode?8:0],profile:compressed?[profile.startNdcY,profile.strength]:[0,0],camera:cameraPosition};
+   items.forEach(item=>update(item.binding,item.name,{...item.properties,parameters},target,stage==='batch'));
+   backend.prepareFrame(frame);backend.render();
+   const gl=canvas.getContext('webgl2'),pixel=new Uint8Array(4),ratio=canvas.width/width;
+   gl.readPixels(Math.floor((point.clientX-rect.left)*ratio),Math.floor((height-(point.clientY-rect.top))*ratio),1,1,gl.RGBA,gl.UNSIGNED_BYTE,pixel);
+   const key=`${stage}/${mode?'orthographic':'perspective'}/${compressed?'upper':'linear'}/${resized?'moved-resized':'initial'}`;
+   checks[key]=pixel[1]>240&&pixel[0]<10&&pixel[2]<10&&(stage!=='batch'||backend.diagnostics().batchCount===1);
+   samples.push({key,pixel:[...pixel],origin:parameters.origin,viewport:parameters.viewport,buffer:parameters.buffer});
+  }
+  backend.dispose();
+ }
+ checks.noErrors=errors.length===0;
+ publish({status:Object.values(checks).every(Boolean)?'READY':'NOT READY',checks,samples,errors,devicePixelRatio});
+}catch(error){backend?.dispose();publish({status:'NOT READY',checks,error:String(error.stack??error),errors})}
+function publish(report){document.body.dataset.result=btoa(unescape(encodeURIComponent(JSON.stringify(report))));document.title=report.status}
+</script></body></html>

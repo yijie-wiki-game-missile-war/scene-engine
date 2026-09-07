@@ -1,7 +1,7 @@
 import { attachedComponentNode } from '../component/component.js';
 import { assertSynchronous, cloneAndFreeze } from '../internal.js';
 import { DisplayRuntimeError, fail } from '../runtime/health.js';
-import { CameraComponent, SpriteRendererComponent } from './components.js';
+import { CameraComponent, SpriteRendererComponent, fixedPanelSource } from './components.js';
 import { BillboardComponent } from '../behaviours/billboard.js';
 import { assertRenderBackendPort, bindingIdentity } from './render-backend-port.js';
 import { RenderComponent } from './render-component.js';
@@ -20,14 +20,8 @@ const COMPOSED_RENDER_TYPES = new Set([
 ]);
 
 function fixedPanelAnchor(node) {
-  for (let ancestor = node; ancestor !== null; ancestor = ancestor.parent) {
-    const facing = ancestor.getComponent(BillboardComponent);
-    if (facing !== null) {
-      return facing.enabled && !facing.disposed && facing.properties.facing === 'fixed'
-        ? Object.freeze(Array.from(ancestor._worldTransform.slice(12, 15))) : null;
-    }
-  }
-  return null;
+  const source = fixedPanelSource(node);
+  return source === null ? null : Object.freeze(Array.from(source._worldTransform.slice(12, 15)));
 }
 
 function identityKey(identity) {
@@ -53,6 +47,7 @@ export class RenderSystem {
     // Transient animation values (Display AnimationSystem only). Never written into
     // component properties; backends always receive base+override "effective" data.
     this._animationOverrides = new WeakMap();
+    this._programParameterOverrides = new WeakMap();
     this._pending = new Set();
     this._identityBarriers = new Map();
     this._generation = 0;
@@ -184,10 +179,23 @@ export class RenderSystem {
     this._onNeedsDraw?.();
   }
 
+  setProgramParameterOverride(component, values) {
+    this._programParameterOverrides.set(component, values);
+    this.markComponentDirty(component);
+  }
+
+  clearProgramParameterOverride(component) {
+    if (this._programParameterOverrides.delete(component)) this.markComponentDirty(component);
+  }
+
   effectiveProperties(component) {
     const override = this._animationOverrides.get(component);
-    return override === undefined ? component.properties
-      : Object.freeze({ ...component.properties, ...override });
+    const parameters = this._programParameterOverrides.get(component);
+    if (override === undefined && parameters === undefined) return component.properties;
+    return Object.freeze({ ...component.properties, ...override,
+      ...(parameters === undefined ? {} : { parameters: Object.freeze({
+        ...component.properties.parameters, ...parameters,
+      }) }) });
   }
 
   markComponentDirty(component) {
@@ -206,8 +214,7 @@ export class RenderSystem {
     if (this._byNode.has(node)) this._onNeedsDraw?.();
   }
 
-  markPanelAnchorSubtreeDirty(sourceNode) {
-    let changed = false;
+  _visitPanelAnchorEntries(sourceNode, operation) {
     const visit = (node, source = false) => {
       // The nearest Billboard owns every descendant Sprite anchor. A nested
       // Billboard therefore blocks invalidation from the changed ancestor, but
@@ -215,14 +222,38 @@ export class RenderSystem {
       if (!source && node.getComponent(BillboardComponent) !== null) return;
       for (const entry of this._byNode.get(node) ?? []) {
         if (!(entry.component instanceof SpriteRendererComponent)) continue;
-        entry.dirty = true;
-        this._dirtyEntries.add(entry);
-        changed = true;
+        operation(entry);
       }
       for (const child of node._children) visit(child);
     };
     visit(sourceNode, true);
+  }
+
+  markPanelAnchorSubtreeDirty(sourceNode) {
+    let changed = false;
+    this._visitPanelAnchorEntries(sourceNode, entry => {
+      entry.dirty = true;
+      this._dirtyEntries.add(entry);
+      changed = true;
+    });
     if (changed) this._onNeedsDraw?.();
+  }
+
+  _validateSpriteProjection(component) {
+    if (component instanceof SpriteRendererComponent && component.properties.projectionSemantics === 'anchor-extent'
+      && fixedPanelSource(attachedComponentNode(component)) !== null) fail('display-sprite-projection-combination-invalid');
+  }
+
+  validateProjectionComponent(component) {
+    this._validateSpriteProjection(component);
+    if (component instanceof BillboardComponent) {
+      const node = attachedComponentNode(component);
+      if (node !== null) this._visitPanelAnchorEntries(node, entry => this._validateSpriteProjection(entry.component));
+    }
+  }
+
+  validatePendingProjection() {
+    for (const entry of this._dirtyEntries) this._validateSpriteProjection(entry.component);
   }
 
   markCompositionSubtreeDirty(sourceNode) {
@@ -256,6 +287,9 @@ export class RenderSystem {
       const component = entry.component;
       const node = attachedComponentNode(component);
       const panelAnchorWorld = component instanceof SpriteRendererComponent ? fixedPanelAnchor(node) : null;
+      if (panelAnchorWorld !== null && component.properties.projectionSemantics === 'anchor-extent') {
+        fail('display-sprite-projection-combination-invalid');
+      }
       const patch = Object.freeze({
         identity: entry.identity,
         worldMatrix: Object.freeze(Array.from(node._worldTransform)),
@@ -280,6 +314,7 @@ export class RenderSystem {
       this._backend.prepareFrame({
         sourceTick: frame.sourceTick,
         visualSeconds: frame.visualSeconds,
+        ...(frame.visualTimes ? { visualTimes: frame.visualTimes } : {}),
         dirtyBindings: Object.freeze(dirtyBindings),
         activeCameraBinding,
       }),
@@ -313,7 +348,7 @@ export class RenderSystem {
   screenPointToWorldRay(query) {
     this._assertHealthy();
     return this._runBackend('display-render-world-ray-failed',
-      () => this._backend.screenPointToWorldRay(cloneAndFreeze(query)));
+      () => this._backend.screenPointToWorldRay(cloneAndFreeze(query)), ['display-projection-domain']);
   }
   projectWorldPoint(point) {
     this._assertHealthy();
@@ -323,7 +358,7 @@ export class RenderSystem {
   focusWorldPoint(target) {
     this._assertHealthy();
     return this._runBackend('display-render-focus-failed',
-      () => this._backend.focusWorldPoint(cloneAndFreeze(target)));
+      () => this._backend.focusWorldPoint(cloneAndFreeze(target)), ['three-focus-bounds-unfit']);
   }
   capture() {
     this._assertHealthy();
@@ -527,7 +562,7 @@ export class RenderSystem {
   _retireBackend(backend) {
     this._cancelBackendWait?.();
     this._cancelBackendWait = null;
-    this._backendAbortController?.abort();
+    this._backendAbortController?.abort('backend-disposed');
     this._backendAbortController = null;
     if (backend) this._retiredBackends.add(backend);
   }
@@ -568,8 +603,11 @@ export class RenderSystem {
     return this._compositionPlan.defaultGroup;
   }
 
-  _runBackend(code, operation) {
-    try { return operation(); } catch (error) { this._report(code, error); throw error; }
+  _runBackend(code, operation, expectedErrors = []) {
+    try { return operation(); } catch (error) {
+      if (!expectedErrors.includes(error?.code)) this._report(code, error);
+      throw error;
+    }
   }
   _report(code, error) {
     const wrapped = error instanceof DisplayRuntimeError ? error

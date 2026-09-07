@@ -24,6 +24,7 @@ export interface RenderCompositionPlan {
 }
 
 export interface ThreeRenderBackendOptions {
+  readonly generatedTextureSource?: import('@scene-engine/display').GeneratedTextureSourcePort | null;
   readonly hostElement: unknown;
   readonly canvas: unknown;
   readonly rendererProfile: RendererProfile;
@@ -33,7 +34,7 @@ export interface ThreeRenderBackendOptions {
     get?(id: string): unknown;
     has?(id: string): boolean;
   };
-  readonly onHealth?: ((event: Readonly<Record<string, unknown>>) => void) | null;
+  readonly onHealth?: ((event: import('@scene-engine/display').RenderHealthEvent) => void) | null;
   readonly signal?: AbortSignal;
 }
 
@@ -56,12 +57,9 @@ export interface ProximityHit {
   readonly depth: number;
 }
 
-export interface WorldPointProjection {
-  readonly clientX: number;
-  readonly clientY: number;
-  readonly visible: boolean;
-  readonly depth: number;
-}
+export type WorldPointProjection = Readonly<{
+  clientX: number; clientY: number; visible: boolean; depth: number;
+}> | Readonly<{ clientX: null; clientY: null; visible: false; depth: null }>;
 
 export interface WorldPointFocus {
   readonly nodeName: string;
@@ -90,7 +88,7 @@ export interface ThreeRenderBackendPort {
     radiusPixels: number;
   }>): ProximityHit | null;
   projectWorldPoint(value: Readonly<{ position: Vec3 }>): WorldPointProjection;
-  focusWorldPoint(value: Readonly<{ position: Vec3; radius: number }>): WorldPointFocus;
+  focusWorldPoint(value: Readonly<{ position: Vec3; radius: number; halfExtents?: never } | { position: Vec3; halfExtents: Vec3; radius?: never }>): WorldPointFocus;
   capture(): unknown;
   whenIdle(): Promise<void> | void;
   diagnostics(): unknown;

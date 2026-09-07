@@ -18,7 +18,7 @@ import { RENDER_COMPONENT_DESCRIPTORS } from '../render/components.js';
 import { RENDER_COMPOSITION_COMPONENT_DESCRIPTOR } from '../render/composition.js';
 import { POINTER_TARGET_COMPONENT_DESCRIPTOR } from '../interaction/pointer-target-component.js';
 
-const FINAL_METHODS = ['attach', 'setEnabled', 'setDrivenLocalTransform', 'setAnimation',
+const FINAL_METHODS = ['attach', 'setEnabled', 'setDrivenLocalTransform', 'setProgramParameters', 'setAnimation',
   'playAnimation', 'stopAnimation', '_animationCommand', '_adoptContext',
   'patchProperties', 'dispose'];
 const FORBIDDEN_TRANSFORM_FIELDS = new Set([

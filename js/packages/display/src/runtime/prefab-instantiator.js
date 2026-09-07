@@ -6,6 +6,7 @@ import {
 } from '../animation/animation-system.js';
 import {
   adoptComponentContext,
+  captureComponentVisualInputs,
   replaceComponentProperties,
   suspendComponentRegistration,
 } from '../component/component.js';
@@ -21,6 +22,7 @@ import { joinPrefabNodeName } from '../node/node-name.js';
 import { NodeGraph } from '../node/node-graph.js';
 import { NodeIndex } from '../node/node-index.js';
 import { NodeView } from '../node/node-view.js';
+import { fixedPanelSource, validateSpriteProjectionComponents } from '../render/components.js';
 import { createInternalComponentContext } from './component-context.js';
 import { fail } from './health.js';
 
@@ -28,6 +30,17 @@ const ROOT_INSTANCE_PATH = '$root';
 const MAX_EXPANDED_NODES = 65_536;
 
 function componentPath(localPath, key) { return `${localPath ?? '$root'}/${key}`; }
+
+function validatePlanSpriteProjection(plan, inheritedFixed) {
+  const validate = (definition, localPath, inherited) => validateSpriteProjectionComponents(
+    definition.components.map(component => ({ ...component,
+      properties: plan.patch.components[componentPath(localPath, component.key)] ?? component.properties })), inherited);
+  const fixedByPath = new Map([[null, validate(plan.compiled.root, null, inheritedFixed)]]);
+  for (const node of plan.compiled.nodes) {
+    fixedByPath.set(node.localPath, validate(node, node.localPath, fixedByPath.get(node.parentLocalPath)));
+  }
+  for (const child of plan.children) validatePlanSpriteProjection(child, fixedByPath.get(child.parentLocalPath));
+}
 
 function joinInstancePath(parentPath, childPath) {
   return parentPath === ROOT_INSTANCE_PATH ? childPath : `${parentPath}/${childPath}`;
@@ -206,6 +219,7 @@ export class PrefabInstantiator {
     if (this._scopes.has(root)) fail('display-prefab-scope-duplicate');
     const plan = validatedPatch ?? this.resolveAndValidateState(compiled, initialState, null, {}, {
       ownerName: root.name,
+      parentNode: root.parent,
     });
     const scope = this._prepare({
       root,
@@ -267,6 +281,7 @@ export class PrefabInstantiator {
     if (options.ownerName !== undefined && options.ownerName !== null) {
       this._validatePlanNames(plan, options.ownerName);
     }
+    validatePlanSpriteProjection(plan, fixedPanelSource(options.parentNode ?? scope?.root.parent ?? null) !== null);
     return plan;
   }
 
@@ -451,6 +466,7 @@ export class PrefabInstantiator {
       shadowRoot.addComponent(authorityComponent);
       const plan = validatedPatch ?? this.resolveAndValidateState(compiled, state, null, {}, {
         ownerName: target.name,
+        parentNode: liveParent,
       });
       scope = this._prepare({
         root: shadowRoot,
@@ -767,12 +783,16 @@ export class PrefabInstantiator {
       for (const [path, properties] of Object.entries(plan.patch.components)) {
         const component = record.componentByPath.get(path);
         const previous = component.properties;
+        const restoreInputs = captureComponentVisualInputs(component);
         record.compiled.componentRegistry.patchComponentProperties({
           component,
           patch: properties,
           resourceRegistry: record.compiled.resourceRegistry,
         });
-        undos.push(() => replaceComponentProperties(component, previous));
+        undos.push(() => {
+          try { replaceComponentProperties(component, previous); }
+          finally { restoreInputs?.(); }
+        });
       }
     } catch (error) {
       for (const undo of undos.reverse()) {

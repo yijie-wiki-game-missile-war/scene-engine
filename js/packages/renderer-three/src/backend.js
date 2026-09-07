@@ -1,8 +1,11 @@
 import * as THREE from 'three';
+import { projectUpperFieldY, unprojectUpperFieldY, normalizeProjectionProfile } from '@scene-engine/display';
+import { UpperFieldTerminal } from './upper-field.js';
 
 import { COMPOSED_COMPONENT_TYPES, THREE_RENDER_BACKEND_SCHEMA } from './constants.js';
 import { ThreeRenderBackendError, fail } from './errors.js';
 import { compensatePanelViewPoint } from './panel-projection.js';
+import { anchorExtentBounds } from './anchor-extent.js';
 import { ResourceManager } from './resource-manager.js';
 import {
   DEFAULT_THREE_IMPLEMENTATION,
@@ -43,7 +46,9 @@ export class ThreeRenderBackend {
     this._implementation = Object.freeze({ ...DEFAULT_THREE_IMPLEMENTATION, ...implementation });
     this._disposed = false;
     this._failure = null;
+    this._isolatedPrograms = new Set();
     this._drawCount = 0;
+    this._renderCpuSamples = [];
     this._resizeCount = 0;
     this._width = 1;
     this._height = 1;
@@ -57,6 +62,7 @@ export class ThreeRenderBackend {
     this._pending = new Set();
     this._backgroundKey = null;
     this._activeCamera = null;
+    this._upperFieldTerminal = null;
     this._batches = [];
     this._batchDirty = true;
     this._dirtyBatchRecords = new Set();
@@ -88,6 +94,8 @@ export class ThreeRenderBackend {
         this._emitHealth({ phase: 'resource-load', resourceId,
           errorCode: wrapped.code, recoverable: true });
       },
+      generatedTextureSource: normalized.generatedTextureSource,
+      renderer: this._renderer,
     });
     this._resizeObserver = this._implementation.createResizeObserver(() => {
       try { this.requestResize(); } catch (error) {
@@ -177,9 +185,11 @@ export class ThreeRenderBackend {
     if (patch.panelAnchorWorld !== null && record.componentType !== 'render.sprite@3') {
       fail('three-backend-panel-anchor-invalid');
     }
+    if (patch.panelAnchorWorld !== null && patch.properties.projectionSemantics === 'anchor-extent') {
+      fail('three-sprite-projection-combination-invalid');
+    }
     record.worldMatrix = patch.worldMatrix;
     record.panelAnchorWorld = patch.panelAnchorWorld;
-    record.handle.setPanelAnchor?.(patch.panelAnchorWorld);
     record.visible = patch.visible;
     if (record.nodeRoot) {
       record.nodeRoot.matrix.fromArray(patch.worldMatrix);
@@ -216,16 +226,22 @@ export class ThreeRenderBackend {
     }
     this._cancelReplacement(record, 'binding-replacement-reverted');
     const propertiesChanged = stableData(record.properties) !== stableData(patch.properties);
-    if (!propertiesChanged) return;
+    if (!propertiesChanged) {
+      record.handle.setPanelAnchor?.(patch.panelAnchorWorld);
+      return;
+    }
     // Animated (non-batchable) frame flips update only this handle and never touch
     // batches. Eligibility changes and static fingerprint updates leave or reshape a
-    // batch and dispose the current batches at most once per change.
-    if (record.batched) this._disposeBatches();
+    // batch and dispose the current batches at most once per change. A program
+    // parameter-only patch preserves membership and updates its instance row.
+    const preserveBatch = record.batched && record.handle.canUpdateBatchProperties?.(patch.properties) === true;
+    if (record.batched && !preserveBatch) this._disposeBatches();
     try {
       record.handle.update(patch.properties);
+      record.handle.setPanelAnchor?.(patch.panelAnchorWorld);
       record.properties = patch.properties;
       this._applyRecordVisibility(record);
-      if (record.batchable && record.handle.batchFingerprint
+      if (!preserveBatch && record.batchable && record.handle.batchFingerprint
           && typeof record.handle.createBatch === 'function') this._batchDirty = true;
     } catch (error) {
       const wrapped = wrapError('three-binding-update-failed', error); this._failure = wrapped;
@@ -249,32 +265,82 @@ export class ThreeRenderBackend {
       fail('three-active-camera-invalid');
     }
     this._activeCamera = cameraRecord;
+    const generatedPending = this._resources.prepareGeneratedTextures();
     let activeContinuousRecord = false;
     for (const record of this._continuousRecords) {
-      if (!continuousRecordIsActive(record)) continue;
+      if (!record.visible || record.destroyed || record.programIsolated) continue;
+      if (!record.handle.prepareProgramFrame && !continuousRecordIsActive(record)) continue;
       record.handle.sample(frame);
-      activeContinuousRecord = true;
+      if (continuousRecordIsActive(record)) activeContinuousRecord = true;
     }
     this._updateBatches();
+    // Queries use the declared camera before any render/source-frustum expansion.
+    const projectionProfile = this._projectionProfile();
+    for (const record of this._bindings.values()) record.handle.prepareAnchorQuery?.(projectionProfile);
+    for (const batch of this._batches) batch.prepareAnchorQuery?.(projectionProfile);
+    for (const batch of this._batches) if (batch.object.visible) batch.sample?.(frame);
     const requiresContinuousDraw = this._pending.size > 0
-      || activeContinuousRecord;
+      || activeContinuousRecord || generatedPending;
     return Object.freeze({ requiresContinuousDraw });
   }
 
   render() {
     this._assertOpen();
+    if (this._resources.hasUninitializedGeneratedTextures()) return;
     if (!this._activeCamera?.handle.camera) fail('three-active-camera-required');
+    const started = globalThis.performance?.now?.() ?? Date.now();
+    const collectInfo = typeof this._renderer.info?.reset === 'function' && !Object.isFrozen(this._renderer.info);
+    const originalInfoAutoReset = this._renderer.info?.autoReset;
+    if (collectInfo) { this._renderer.info.reset(); this._renderer.info.autoReset = false; }
     try {
-      if (this._composition === null) {
-        this._renderer.render(this._scene, this._activeCamera.handle.camera);
+      const camera = this._activeCamera.handle.camera;
+      const profile = this._projectionProfile();
+      const rect = viewportRect(this._hostElement);
+      const renderWorld = (layout = null) => {
+        camera.updateWorldMatrix(true, false);
+        const programFrame = {
+          camera, width: layout?.width ?? this._width, height: layout?.height ?? this._height,
+          pixelRatio: layout ? 1 : this._pixelRatio, projectionProfile: profile,
+          sourceSpan: layout?.span ?? 2, finalWidth: this._width, finalHeight: this._height,
+          finalPixelRatio: this._pixelRatio,
+          viewportCssOrigin: { x: rect.left, y: rect.top },
+          finalCssWidth: rect.width, finalCssHeight: rect.height,
+        };
+        const prepare = (handle) => {
+          if (!handle.object?.visible) return;
+          handle.prepareAnchorFrame?.(programFrame);
+          handle.prepareProgramFrame?.(programFrame);
+          this._prepareProgramCompile(handle, camera);
+        };
+        for (const record of this._bindings.values()) prepare(record.handle);
+        for (const batch of this._batches) prepare(batch);
+        if (this._composition === null) this._renderer.render(this._scene, camera);
+        else this._renderComposition(camera);
+      };
+      if (profile !== null && profile.strength > 0) {
+        this._upperFieldTerminal ??= new UpperFieldTerminal(this._scene);
+        this._upperFieldTerminal.prepare(this._renderer, this._width, this._height, profile);
+        this._upperFieldTerminal.render(this._renderer, camera, [this._root, this._batchRoot], renderWorld);
       } else {
-        this._renderComposition(this._activeCamera.handle.camera);
+        this._upperFieldTerminal?.dispose();
+        this._upperFieldTerminal = null;
+        renderWorld();
       }
       this._drawCount += 1;
+      this._renderCpuSamples.push((globalThis.performance?.now?.() ?? Date.now()) - started);
+      if (this._renderCpuSamples.length > 120) this._renderCpuSamples.shift();
     } catch (error) {
       const wrapped = wrapError('three-render-failed', error); this._failure = wrapped;
-      this._emitHealth({ phase: 'render', errorCode: wrapped.code, recoverable: true });
+      const context = error.programContext;
+      this._emitHealth({ phase: 'render', errorCode: wrapped.code, recoverable: true,
+        record: context?.bindingToken ? this._records.get(context.bindingToken) : null,
+        identity: context?.batchIdentity ?? undefined, resourceId: context?.metadata.resourceId ?? null,
+        programDiagnostic: context ? { revision: context.metadata.revision,
+          programStage: context.metadata.programStage, affectedBindingCount: context.affectedBindingCount,
+          diagnostic: wrapped.message.slice(0, 4096) } : null });
       throw wrapped;
+    } finally {
+      if (collectInfo) this._renderer.info.autoReset = originalInfoAutoReset;
     }
   }
 
@@ -295,6 +361,32 @@ export class ThreeRenderBackend {
     return Object.freeze({ width, height, pixelRatio });
   }
 
+  _prepareProgramCompile(handle, camera) {
+    try { handle.prepareProgramCompile?.(this._renderer, this._scene, camera, handle.object); }
+    catch (error) {
+      const context = error.programContext;
+      if (error.code !== 'three-program-compile-failed' || !context) throw error;
+      const key = JSON.stringify(context.metadata);
+      if (this._isolatedPrograms.has(key)) return;
+      this._isolatedPrograms.add(key);
+      let affectedBindingCount = 0;
+      for (const record of this._bindings.values()) {
+        this._applyRecordVisibility(record);
+        if (record.programIsolated && JSON.stringify(record.handle.object.material?.userData.sceneEngineProgram) === key)
+          affectedBindingCount += 1;
+      }
+      for (const batch of this._batches) {
+        if (JSON.stringify(batch.object.material?.userData.sceneEngineProgram) === key) batch.object.visible = false;
+      }
+      this._batchDirty = true;
+      this._emitHealth({ phase: 'render', record: context.bindingToken ? this._records.get(context.bindingToken) : null,
+        identity: context.batchIdentity ?? undefined, resourceId: context.metadata.resourceId,
+        errorCode: error.code, recoverable: true, programDiagnostic: { revision: context.metadata.revision,
+          programStage: context.metadata.programStage, affectedBindingCount, isolation: 'program',
+          diagnostic: error.message.slice(0, 4096) } });
+    }
+  }
+
   pick(value) {
     this._assertOpen();
     const query = normalizePick(value);
@@ -305,14 +397,16 @@ export class ThreeRenderBackend {
       ((query.clientX - rect.left) / Math.max(1, rect.width)) * 2 - 1,
       -((query.clientY - rect.top) / Math.max(1, rect.height)) * 2 + 1,
     );
+    try { pointer.y = unprojectUpperFieldY(pointer.y, this._projectionProfile()); }
+    catch (error) { if (error.code === 'display-projection-domain') return null; throw error; }
     const raycaster = new THREE.Raycaster();
     const candidates = [];
     for (const record of this._bindings.values()) {
-      if (record.visible && record.handle.pickable && !record.batched && record.handle.object) {
+      if (record.visible && !record.programIsolated && record.handle.pickable && !record.batched && record.handle.object) {
         candidates.push(record.handle.object);
       }
     }
-    for (const batch of this._batches) if (batch.pickable) candidates.push(batch.object);
+    for (const batch of this._batches) if (batch.pickable && batch.object.visible) candidates.push(batch.object);
     camera.updateWorldMatrix(true, false);
     for (const candidate of candidates) candidate.updateWorldMatrix(true, true);
     raycaster.setFromCamera(pointer, camera);
@@ -334,7 +428,7 @@ export class ThreeRenderBackend {
         if (cursor?.userData?.threeBindingToken) record = this._records.get(cursor.userData.threeBindingToken);
         activeRepresentation = record?.batched === false;
       }
-      if (record && activeRepresentation && record.visible && !record.destroyed) {
+      if (record && activeRepresentation && record.visible && !record.programIsolated && !record.destroyed) {
         logicalHits.push({ record, hit });
         if (this._composition === null) break;
       }
@@ -359,7 +453,9 @@ export class ThreeRenderBackend {
     const rect = viewportRect(this._hostElement);
     camera.updateWorldMatrix(true, false);
     const raycaster = new THREE.Raycaster();
-    raycaster.setFromCamera(clientPointToNdc(query, rect), camera);
+    const pointer = clientPointToNdc(query, rect);
+    pointer.y = unprojectUpperFieldY(pointer.y, this._projectionProfile());
+    raycaster.setFromCamera(pointer, camera);
     const origin = raycaster.ray.origin.toArray();
     const direction = raycaster.ray.direction.normalize().toArray();
     if (!origin.every(Number.isFinite) || !direction.every(Number.isFinite)
@@ -410,9 +506,9 @@ export class ThreeRenderBackend {
     const rect = viewportRect(this._hostElement);
     const candidates = [];
     for (const record of this._bindings.values()) {
-      if (!record.visible || !record.handle.pickable || !record.handle.object
+      if (!record.visible || record.programIsolated || !record.handle.pickable || !record.handle.object
           || record.destroyed) continue;
-      const bounds = projectedBindingBounds(record, camera, rect);
+      const bounds = projectedBindingBounds(record, camera, rect, this._projectionProfile());
       if (bounds === null) continue;
       const screenDistancePixels = distanceToBounds(
         query.clientX, query.clientY, bounds,
@@ -443,12 +539,19 @@ export class ThreeRenderBackend {
     const camera = this._activeCamera?.handle.camera;
     if (!camera) fail('three-active-camera-required');
     camera.updateWorldMatrix(true, false);
-    const vector = new THREE.Vector3(...position).project(camera);
+    const point = new THREE.Vector3(...position);
+    const viewDepth = -point.clone().applyMatrix4(camera.matrixWorldInverse).z;
+    if (!Number.isFinite(viewDepth) || viewDepth < camera.near || viewDepth > camera.far)
+      return Object.freeze({ clientX: null, clientY: null, depth: null, visible: false });
+    const vector = point.project(camera);
+    if (![vector.x, vector.y, vector.z].every(Number.isFinite))
+      return Object.freeze({ clientX: null, clientY: null, depth: null, visible: false });
+    vector.y = projectUpperFieldY(vector.y, this._projectionProfile());
     const rect = this._hostElement.getBoundingClientRect();
     return Object.freeze({
       clientX: rect.left + (vector.x + 1) * rect.width / 2,
       clientY: rect.top + (1 - vector.y) * rect.height / 2,
-      visible: vector.z >= -1 && vector.z <= 1,
+      visible: vector.z >= -1 && vector.z <= 1 && Math.abs(vector.x) <= 1 && Math.abs(vector.y) <= 1,
       depth: vector.z,
     });
   }
@@ -464,10 +567,54 @@ export class ThreeRenderBackend {
     const current = new THREE.Vector3(); camera.getWorldPosition(current);
     const targetVector = new THREE.Vector3(...target.position);
     let distance = current.distanceTo(targetVector);
-    if (camera.isPerspectiveCamera && target.radius > 0) {
-      distance = Math.max(distance, target.radius / Math.tan(camera.fov * Math.PI / 360));
+    if (target.halfExtents) {
+      const right = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0).normalize();
+      const up = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 1).normalize();
+      const profile = this._projectionProfile();
+      const halfHeight = camera.isPerspectiveCamera ? Math.tan(camera.fov * Math.PI / 360)
+        : (camera.top - camera.bottom) / (2 * camera.zoom);
+      const halfWidth = camera.isPerspectiveCamera ? halfHeight * camera.aspect
+        : (camera.right - camera.left) / (2 * camera.zoom);
+      const top = unprojectUpperFieldY(1, profile) * halfHeight;
+      const bottom = -unprojectUpperFieldY(-1, profile) * halfHeight;
+      let farthest = -Infinity;
+      distance = 0;
+      for (const sx of [-1, 1]) for (const sy of [-1, 1]) for (const sz of [-1, 1]) {
+        const corner = new THREE.Vector3(sx * target.halfExtents[0], sy * target.halfExtents[1], sz * target.halfExtents[2]);
+        const x = corner.dot(right); const y = corner.dot(up); const z = corner.dot(direction);
+        farthest = Math.max(farthest, z);
+        distance = Math.max(distance, camera.near - z);
+        if (camera.isPerspectiveCamera) {
+          distance = Math.max(distance, Math.abs(x) / halfWidth - z,
+            (y >= 0 ? y / top : -y / bottom) - z);
+        } else if (Math.abs(x) > halfWidth || y > top || -y > bottom) {
+          fail('three-focus-bounds-unfit');
+        }
+      }
+      if (distance + farthest > camera.far) fail('three-focus-bounds-unfit');
     }
-    const suggested = targetVector.clone().addScaledVector(direction, -Math.max(distance, target.radius));
+    if (camera.isPerspectiveCamera && target.radius > 0) {
+      const profile = this._projectionProfile();
+      const verticalTangent = Math.tan(camera.fov * Math.PI / 360);
+      const top = unprojectUpperFieldY(0.9, profile);
+      const bottom = -unprojectUpperFieldY(-0.9, profile);
+      const halfAngle = Math.atan(Math.min(0.9 * camera.aspect, top, bottom) * verticalTangent);
+      distance = Math.max(distance, target.radius / Math.sin(halfAngle));
+    }
+    if (target.radius > 0) {
+      if (camera.isOrthographicCamera) {
+        const profile = this._projectionProfile();
+        const halfHeight = (camera.top - camera.bottom) / (2 * camera.zoom);
+        const halfWidth = (camera.right - camera.left) / (2 * camera.zoom);
+        const available = Math.min(0.9 * halfWidth,
+          halfHeight * unprojectUpperFieldY(0.9, profile),
+          -halfHeight * unprojectUpperFieldY(-0.9, profile));
+        if (target.radius > available) fail('three-focus-bounds-unfit');
+      }
+      distance = Math.max(distance, camera.near + target.radius);
+      if (distance + target.radius > camera.far) fail('three-focus-bounds-unfit');
+    }
+    const suggested = targetVector.clone().addScaledVector(direction, -Math.max(distance, target.radius ?? 0));
     return Object.freeze({
       nodeName: record.identity.nodeName,
       componentKey: record.identity.componentKey,
@@ -486,6 +633,9 @@ export class ThreeRenderBackend {
       width: this._width,
       height: this._height,
       dataUrl,
+      projection: this._upperFieldTerminal?.layout ?? null,
+      renderer: Object.freeze({ ...rendererInfo(this._renderer) }),
+      renderCpuSubmit: renderCpuSummary(this._renderCpuSamples),
       drawCount: this._drawCount,
       bindingCount: this._bindings.size,
       batchCount: this._batches.length,
@@ -522,7 +672,8 @@ export class ThreeRenderBackend {
       pendingBindingCount: this._pending.size,
       drawCount: this._drawCount,
       resizeCount: this._resizeCount,
-      renderTargetCount: 0,
+      renderTargetCount: this._upperFieldTerminal?.target ? 1 : 0,
+      upperFieldSampling: this._upperFieldTerminal?.layout ?? null,
       compositionPlanId: this._compositionPlan?.id ?? null,
       compositionPassCount: this._compositionPlan?.passes.length ?? 1,
       rendererCalls: info?.calls ?? 0,
@@ -549,11 +700,17 @@ export class ThreeRenderBackend {
     this._bindings.clear(); this._reservations.clear(); this._nodes.clear();
     this._allRecords.clear();
     this._dirtyBatchRecords.clear(); this._continuousRecords.clear();
+    this._upperFieldTerminal?.dispose(); this._upperFieldTerminal = null;
     this._resources.dispose();
     this._scene.background = null; this._scene.environment = null;
     this._root.removeFromParent(); this._batchRoot.removeFromParent();
     this._renderer.dispose();
+    this._isolatedPrograms.clear();
     this._activeCamera = null;
+  }
+
+  _projectionProfile() {
+    return normalizeProjectionProfile(this._activeCamera?.properties.projectionProfile ?? null);
   }
 
   async _completeBinding(record) {
@@ -728,19 +885,27 @@ export class ThreeRenderBackend {
   _rebuildBatches() {
     const groups = new Map();
     for (const record of this._bindings.values()) {
-      if (!record.batchable) continue;
+      if (!record.batchable || record.programIsolated) continue;
       const fingerprint = record.handle.batchFingerprint;
       if (!fingerprint || typeof record.handle.createBatch !== 'function') continue;
       const key = `${record.componentType}\u0000${record.compositionGroup ?? ''}\u0000${fingerprint}`;
       if (!groups.has(key)) groups.set(key, []); groups.get(key).push(record);
     }
     const eligible = [...groups.entries()].filter(([, records]) => records.length >= 2)
-      .sort(([left], [right]) => left.localeCompare(right));
+      .sort(([left], [right]) => left.localeCompare(right))
+      .flatMap(([key, records]) => {
+        const limit = records[0].handle.maximumBatchSize === 'texture-height'
+          ? this._renderer.capabilities?.maxTextureSize ?? 2048 : records.length;
+        const chunks = [];
+        records.sort((left, right) => left.key.localeCompare(right.key));
+        for (let offset = 0; offset < records.length; offset += limit) chunks.push([key, records.slice(offset, offset + limit)]);
+        return chunks;
+      });
     this._disposeBatches();
     for (const [, records] of eligible) {
       records.sort((left, right) => left.key.localeCompare(right.key));
       const created = records[0].handle.createBatch(records.length);
-      const batch = { ...created, records,
+      const batch = { ...created, records, visibleCount: 0, instanceVisibility: new Uint8Array(records.length),
         pickable: records[0].handle.pickable, localMatrix: new THREE.Matrix4().fromArray(created.localMatrix) };
       batch.object.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
       batch.panelAnchorAttribute?.setUsage(THREE.DynamicDrawUsage);
@@ -764,11 +929,16 @@ export class ThreeRenderBackend {
   }
 
   _writeBatchRecord(batch, index, record) {
-    batch.setPanelAnchorAt?.(index, record.panelAnchorWorld);
-    if (!record.visible) {
+    const visible = record.visible && !record.programIsolated ? 1 : 0;
+    batch.visibleCount += visible - batch.instanceVisibility[index];
+    batch.instanceVisibility[index] = visible;
+    batch.object.visible = batch.visibleCount > 0;
+    if (!visible) {
       batch.object.setMatrixAt(index, ZERO_MATRIX);
       return;
     }
+    batch.setPanelAnchorAt?.(index, record.panelAnchorWorld);
+    batch.setParametersAt?.(index, record.properties.parameters ?? {});
     this._batchWorldMatrix.fromArray(record.worldMatrix);
     this._batchFinalMatrix.multiplyMatrices(this._batchWorldMatrix, batch.localMatrix);
     batch.object.setMatrixAt(index, this._batchFinalMatrix);
@@ -798,7 +968,8 @@ export class ThreeRenderBackend {
     record.handle?.applyVisibility?.(record.visible);
     const object = record.handle?.object;
     if (!object) return;
-    object.visible = record.visible && !record.batched;
+    record.programIsolated = this._isolatedPrograms.has(JSON.stringify(object.material?.userData.sceneEngineProgram));
+    object.visible = record.visible && !record.batched && !record.programIsolated;
     if (!record.nodeRoot) return;
     if (record.batched) {
       object.removeFromParent();
@@ -840,6 +1011,11 @@ export class ThreeRenderBackend {
     const shadowMap = renderer.shadowMap ?? null;
     const previousShadowAutoUpdate = shadowMap?.autoUpdate;
     let depthMaterials = null;
+    const programBackgrounds = [];
+    this._scene.traverse((object) => {
+      if (object.userData.sceneEngineProgramBackground)
+        programBackgrounds.push([object, object.visible]);
+    });
     try {
       renderer.autoClear = false;
       renderer.clear(true, true, true);
@@ -848,6 +1024,7 @@ export class ThreeRenderBackend {
       if (shadowMap && typeof previousShadowAutoUpdate === 'boolean') shadowMap.autoUpdate = false;
 
       this._scene.background = null;
+      for (const [object] of programBackgrounds) object.visible = false;
       camera.layers.mask = this._composition.passMasks[1];
       renderer.render(this._scene, camera);
 
@@ -862,6 +1039,7 @@ export class ThreeRenderBackend {
       renderer.render(this._scene, camera);
     } finally {
       if (depthMaterials !== null) restoreColorWrite(depthMaterials);
+      for (const [object, visible] of programBackgrounds) object.visible = visible;
       if (shadowMap && typeof previousShadowAutoUpdate === 'boolean') {
         shadowMap.autoUpdate = previousShadowAutoUpdate;
       }
@@ -974,11 +1152,12 @@ export class ThreeRenderBackend {
     tracked.catch(() => {}); this._pending.add(tracked); return tracked;
   }
 
-  _emitHealth({ phase, record = null, resourceId = null, errorCode, recoverable }) {
+  _emitHealth({ phase, record = null, identity = record?.identity, resourceId = null, errorCode, recoverable, programDiagnostic = null }) {
     const event = Object.freeze({ phase,
-      nodeName: record?.identity.nodeName ?? null,
-      componentKey: record?.identity.componentKey ?? null,
+      nodeName: identity?.nodeName ?? null,
+      componentKey: identity?.componentKey ?? null,
       resourceId,
+      ...(programDiagnostic ?? {}),
       errorCode,
       recoverable });
     try { this._onHealth?.(event); } catch { /* diagnostics observers cannot corrupt cleanup */ }
@@ -1024,7 +1203,7 @@ function compileComposition(plan) {
 }
 
 function continuousRecordIsActive(record) {
-  if (!record.visible) return false;
+  if (!record.visible || record.programIsolated) return false;
   const predicate = record.handle.isContinuousDrawActive;
   return typeof predicate !== 'function' || predicate.call(record.handle) === true;
 }
@@ -1137,7 +1316,7 @@ function clientPointToNdc(query, rect) {
     -((query.clientY - rect.top) / rect.height) * 2 + 1,
   );
 }
-function projectedBindingBounds(record, camera, rect) {
+function projectedBindingBounds(record, camera, rect, profile) {
   const bounds = {
     minX: Number.POSITIVE_INFINITY,
     minY: Number.POSITIVE_INFINITY,
@@ -1149,6 +1328,16 @@ function projectedBindingBounds(record, camera, rect) {
   const anchorView = record.panelAnchorWorld === null ? null
     : new THREE.Vector3(...record.panelAnchorWorld).applyMatrix4(camera.matrixWorldInverse);
   const projectGeometry = (geometry, worldMatrix) => {
+    if (record.componentType === 'render.sprite@3' && record.properties.projectionSemantics === 'anchor-extent') {
+      const sprite = anchorExtentBounds(worldMatrix, record.properties, camera, profile);
+      if (!sprite) return;
+      bounds.minX = rect.left + (sprite.minX + 1) * rect.width / 2;
+      bounds.maxX = rect.left + (sprite.maxX + 1) * rect.width / 2;
+      bounds.minY = rect.top + (1 - sprite.maxY) * rect.height / 2;
+      bounds.maxY = rect.top + (1 - sprite.minY) * rect.height / 2;
+      bounds.depth = sprite.ndcDepth; bounds.count = 4;
+      return;
+    }
     if (!geometry?.isBufferGeometry) return;
     if (geometry.boundingBox === null) geometry.computeBoundingBox();
     const box = geometry.boundingBox;
@@ -1169,6 +1358,7 @@ function projectedBindingBounds(record, camera, rect) {
       const viewDepth = -point.z;
       if (!Number.isFinite(viewDepth) || viewDepth < camera.near || viewDepth > camera.far) return;
       projected.copy(point).applyMatrix4(camera.projectionMatrix);
+      projected.y = projectUpperFieldY(projected.y, profile);
       if (![projected.x, projected.y, projected.z].every(Number.isFinite)) return;
       const clientX = rect.left + (projected.x + 1) * rect.width / 2;
       const clientY = rect.top + (1 - projected.y) * rect.height / 2;
@@ -1267,5 +1457,14 @@ function requireRenderer(value) { for (const method of [
   'setPixelRatio', 'setSize', 'render', 'clear', 'clearDepth', 'dispose',
 ]) {
   if (!value || typeof value[method] !== 'function') fail('three-renderer-invalid'); } }
+function renderCpuSummary(samples) {
+  const sorted = [...samples].sort((a, b) => a - b);
+  const percentile = (ratio) => sorted.length ? sorted[Math.ceil(sorted.length * ratio) - 1] : null;
+  return Object.freeze({ samples: samples.length, p50Ms: percentile(0.5), p95Ms: percentile(0.95),
+    maximumMs: sorted.at(-1) ?? null, measurement: 'cpu-render-submit-only' });
+}
 function rendererInfo(renderer) { const render = renderer.info?.render; const memory = renderer.info?.memory;
-  return render && memory ? { calls: render.calls, geometries: memory.geometries, textures: memory.textures } : null; }
+  return render && memory ? { calls: render.calls, triangles: render.triangles ?? 0,
+    points: render.points ?? 0, lines: render.lines ?? 0,
+    programs: renderer.info.programs?.length ?? 0,
+    geometries: memory.geometries, textures: memory.textures } : null; }

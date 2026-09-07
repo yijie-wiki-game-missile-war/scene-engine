@@ -7,7 +7,7 @@ import { fail } from './errors.js';
 
 const OPTION_KEYS = Object.freeze(new Set([
   'hostElement', 'canvas', 'rendererProfile', 'compositionPlan', 'resourceRegistry', 'onHealth',
-  'signal',
+  'signal', 'generatedTextureSource',
 ]));
 const PROFILE_KEYS = Object.freeze(new Set([
   'drawMode', 'maximumPixelRatio', 'clearRgba', 'antialias', 'alpha', 'shadows', 'toneMapping',
@@ -44,6 +44,7 @@ export function normalizeOptions(value) {
     rendererProfile: normalizeRendererProfile(record.rendererProfile),
     compositionPlan: normalizeCompositionPlan(record.compositionPlan),
     resourceRegistry: record.resourceRegistry,
+    generatedTextureSource: record.generatedTextureSource ?? null,
     onHealth: record.onHealth ?? null,
     signal: record.signal ?? null,
   });
@@ -191,14 +192,21 @@ function normalizeCompositionGroup(componentType, value) {
 
 export function normalizeFrame(value) {
   const record = exactRecord(value,
-    new Set(['sourceTick', 'visualSeconds', 'dirtyBindings', 'activeCameraBinding']),
+    new Set(['sourceTick', 'visualSeconds', 'visualTimes', 'dirtyBindings', 'activeCameraBinding']),
     'three-backend-frame-invalid');
-  if (Object.keys(record).length !== 4 || !Number.isSafeInteger(record.sourceTick)
+  if (Object.keys(record).length !== (record.visualTimes ? 5 : 4) || !Number.isSafeInteger(record.sourceTick)
       || record.sourceTick < 0 || !nonnegativeFinite(record.visualSeconds)
       || !Array.isArray(record.dirtyBindings) || !record.activeCameraBinding
       || typeof record.activeCameraBinding !== 'object') fail('three-backend-frame-invalid');
+  if (record.visualTimes !== undefined) {
+    if (!isPlainRecord(record.visualTimes)) fail('three-backend-frame-invalid');
+    for (const time of Object.values(record.visualTimes)) {
+      if (!isPlainRecord(time) || Object.keys(time).length !== 2 || !nonnegativeFinite(time.seconds) || typeof time.running !== 'boolean') fail('three-backend-frame-invalid');
+    }
+  }
   return Object.freeze({
     sourceTick: record.sourceTick,
+    ...(record.visualTimes ? { visualTimes: record.visualTimes } : {}),
     visualSeconds: record.visualSeconds,
     dirtyBindings: record.dirtyBindings,
     activeCameraBinding: record.activeCameraBinding,
@@ -212,9 +220,16 @@ export function normalizePoint(value, code = 'three-backend-point-invalid') {
 }
 
 export function normalizeFocus(value) {
-  const record = exactRecord(value, new Set(['position', 'radius']), 'three-backend-focus-invalid');
-  if (!Object.hasOwn(record, 'position') || !Object.hasOwn(record, 'radius')
-      || !nonnegativeFinite(record.radius)) fail('three-backend-focus-invalid');
+  const code = 'three-backend-focus-invalid';
+  const record = exactRecord(value, new Set(['position', 'radius', 'halfExtents']), code);
+  if (!Object.hasOwn(record, 'position') || Object.hasOwn(record, 'radius') === Object.hasOwn(record, 'halfExtents')) fail(code);
+  if (Object.hasOwn(record, 'halfExtents')) {
+    const halfExtents = finiteTuple(record.halfExtents, 3, code);
+    if (halfExtents.some((extent) => extent < 0)) fail(code);
+    return Object.freeze({ position: Object.freeze(finiteTuple(record.position, 3, code)),
+      halfExtents: Object.freeze(halfExtents) });
+  }
+  if (!nonnegativeFinite(record.radius)) fail(code);
   return Object.freeze({
     position: Object.freeze(finiteTuple(record.position, 3, 'three-backend-focus-invalid')),
     radius: record.radius,

@@ -2,6 +2,16 @@
 
 Status: implemented by `@scene-engine/display@0.16.0` and `@scene-engine/renderer-three@0.13.0`.
 
+## Projection domain
+
+Upper-field cameras use one inverse for exact pick and ray; proximity measures the final warped representation in CSS pixels.
+A direct ray outside the inverse domain raises `display-projection-domain`. Display excludes this expected query error from
+renderer health failure. The pointer controller skips such an active movement sample while keeping capture and the last
+valid sample, so re-entry can continue and drop normally. Release while still outside has no valid movement ray and cancels
+using the previous sample; it does not invent a plane intersection. Invalid input shapes and missing cameras remain errors.
+`projectWorldPoint` has nullable coordinates/depth for unprojectable points and final-viewport `visible` semantics; see
+[the shared projection contract](render-runtime.md#upper-field-projection-terminal).
+
 ## Confirmed scope
 
 Display will normalize browser Pointer Events into these nine application-facing completion or observation events:

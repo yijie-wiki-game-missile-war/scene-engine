@@ -13,6 +13,17 @@
 
 表中 runner 均按需显式执行，触发规则与结果含义见[测试入口](../testing.md)。
 
+## Upper-field projection
+
+- `js/packages/display/test/projection.test.mjs`: closed profile, exact reference horizon, monotonicity, derivative continuity,
+  inverse domain and viewport round trips.
+- `js/packages/renderer-three/test/upper-field.test.mjs`: bounded source allocation, unchanged clip depth, same-camera terminal
+  restoration/disposal, warped pick/project/proximity and orthographic origin/direction semantics.
+- `pointer-interaction.test.mjs`: inverse-domain drag movement skips a sample, keeps capture, and permits re-entry/drop.
+- `scripts/benchmark_display_browser.mjs --fixture=upper-field [--dpr=2]`: explicit real-browser generic giant-triangle edge
+  and eye/near crossing test; stdout JSON reports actual CSS pixel error, GPU, source size and resource cleanup. Configure
+  `SCENE_ENGINE_BENCHMARK_CHROME` to the installed Chromium executable. This is not a complete Far Sea matrix claim.
+
 ## Python
 
 Python 测试由 `uv run python -m pytest -q` 按 `pyproject.toml` 的 `tests/` 路径发现。
@@ -184,6 +195,14 @@ binding、resource lease、pending load 以及 Three geometry/material/texture �
 
 ## TypeScript 声明兼容
 
+Generated data resources: `display/test/generated-texture.test.mjs` and
+`renderer-three/test/generated-texture.test.mjs` cover atomic candidates, CPU/GPU
+generation and lease lifetimes, bytes/regions/residency budgets, real upload range
+accounting, device rejection and bounded fence failures. Run
+`node scripts/benchmark_display_browser.mjs --fixture=generated --dpr=2` for the
+public DisplayRuntime real WebGL fixture (signed floats, unchanged-region pixels,
+late results, rebuild, idle and disposal). Contract: [generated textures](../generated-textures.md).
+
 [`interop.ts`](../../js/types/interop.ts) 由根 `npm test` 的严格 TypeScript 检查编译，验证 Client、Display 和
 renderer-three 的公开 `.d.ts` 可以直接组合，并验证 Authority 与 Scene 安装等同步屏障拒绝异步签名。
 
@@ -193,3 +212,50 @@ renderer-three 的公开 `.d.ts` 可以直接组合，并验证 Authority 与 Sc
 `generate-fixtures.mjs` 只委托给该入口。`fixtures/`、各 package 的 `fixtures/`、`support.mjs` 和 `helpers.mjs` 为上述
 测试提供 canonical 输入或测试环境，不单独构成测试项目。只有被全量命令实际消费的 fixture 才构成自动化覆盖；例如当前
 `fixtures/transform-v1/rule-matrix.canonical-vectors.json` 尚未被 Python 或 JavaScript 测试引用。
+
+
+Procedural resources: `js/packages/display/test/program-resource.test.mjs`, `js/packages/renderer-three/test/program-resource.test.mjs`, and the real WebGL runner `node scripts/benchmark_display_browser.mjs --fixture=program --dpr=2` cover public validation, typed values, texture identity, independent visual phases, per-instance uniforms, fixed-time pixels, live pixels and disposal. See [contract and limits](../procedural-programs.md).
+
+
+## 程序、投影与真实 WebGL 验收
+
+新增程序参数事务覆盖包括 `program-input.test.mjs` 和
+`program-input-rollback.test.mjs`：同 Node/单 owner、原子校验、权威底值不变、
+Prefab 成功保留和失败回滚、disable/dispose、backend rebuild。
+全局暂停与独立暂停/速率/定格由 `program-resource.test.mjs` 验证。
+
+`benchmark_display_browser.mjs` 的 `upper-field`、`anchor`、`program`、
+`program-batch`、`program-frame`、`texture-alpha`、`generated` fixture
+使用独立引擎数据。它们覆盖曲边与内部插值、深度探针、真实灯光阴影、锚点UV/代理、
+普通/实例化像素一致、同帧矩阵与viewport、局部编译故障隔离、alpha/sRGB/data、
+generation与真实GPU就绪。添加 `--dpr=2` 验证高DPR；
+`upper-field`/`anchor` 支持 `--projection=orthographic` 和 `--viewport=1920x1080`。
+透明 fixture 的确定性 PNG 由 `scripts/support/make_texture_alpha_fixtures.mjs`
+生成，它们不属于运行时动态纹理来源。
+
+`scripts/verify_far_sea_package_consumer.mjs` 显式接收 Client、Display、
+renderer tarball，在隔离目录安装、严格编译公共类型并运行 API/rebuild/dispose smoke；
+源码直连测试不代替真实包验证。浏览器/性能命令输出 stdout JSON，机器结果
+不作为跨设备固定 FPS 承诺。
+
+
+程序面片组合：`js/packages/renderer-three/test/program-sprite.test.mjs` 验证共享覆盖、pivot、透明排序、模式切换、
+缩放相机下的显示命中平面，以及多程序对象每个 world pass 只准备一次相机。
+Display 的 `sprite-projection.test.mjs`、`program-input.test.mjs`、`program-input-rollback.test.mjs`、
+`program-resource.test.mjs` 覆盖互斥资源分支、完整候选的 fixed-panel 校验、参数所有权/恢复及 signed32 整数边界。
+
+真实 WebGL 组合验收使用 `node scripts/benchmark_display_browser.mjs --fixture=program-sprite --viewport=1280x720 --dpr=1`。
+同一公开 DisplayRuntime 夹具覆盖透视/正交与 identity/upper-field、中心/底部/偏底 pivot、轮廓与内部 UV、
+屏外锚点和 near/behind/far、关联 alpha、共享参数、深度与排序、暂停/定格、重建及释放。另运行
+`--viewport=1920x1080`、`--viewport=720x960` 与 `--dpr=2`。
+轮廓量测使用已解码线性光的 50% 覆盖等值线，不以 sRGB 字节阈值对应的像素中心冒充几何边界。
+`--evidence` 可在 stdout JSON 中附代表性 GPU 图像；runner 不写结果文件。
+
+透明程序面片规模复用现有 program scale 夹具：
+`node scripts/benchmark_display_browser.mjs --fixture=program-sprite-scale --bindings=128 --ticks=120 --update-ratio=0.1 --viewport=1280x720`。
+引擎档位为 32/128/512，20 帧预热后记录参数更新与 CPU 提交分布、draw calls、投影目标内存和
+计入重叠的面片面积；不把 CPU 时间解释成 GPU 帧率，不自动批处理透明面片。
+
+独立打包消费者使用 `scripts/verify_far_sea_package_consumer.mjs --client=<tgz> --display=<tgz> --renderer=<tgz> --browser`，
+验证已安装 tarball 的公开类型、资源/重建及同一 program-sprite WebGL 夹具。临时服务器只服务隔离目录，
+无法读取 sibling 源码；本机 Chrome 通过 `SCENE_ENGINE_BENCHMARK_CHROME` 指定。
