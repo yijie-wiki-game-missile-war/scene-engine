@@ -1,7 +1,7 @@
 # 测试项目
 
 本页列出仓库级测试命令当前发现或调用的测试项目。测试数量随合同演进，不在文档中固定；新增、删除或重命名
-项目时更新本索引。测试方法、编写要求和可用命令见[测试方法和标准](../testing.md)。
+项目时更新本索引。本仓方法和命令见[测试入口](../testing.md)，通用编写规则见 workspace [总则](../../../testing.md)。
 
 ## 整体与性能测试分类
 
@@ -11,10 +11,7 @@
 | 显示引擎功能与性能 | `display-runtime-foundation.test.mjs`；`display-runtime-scale.test.mjs` 调用 12-binding deterministic smoke。 | `benchmark_display_runtime_scale.mjs` 运行 10k/30k/50k bindings；`benchmark_display_browser.mjs` 在真实 Chrome/WebGL 中运行。 |
 | 通讯性能 | `test_python_js_communication_e2e.py` 运行 32-root Python↔JavaScript roundtrip，并以小规模 windowed CLI smoke 检查 pending/in-flight。 | `benchmark_python_js_communication.py` 参数化 roots、commits、update ratio 和 roundtrip/windowed profile。 |
 
-`uv run python -m pytest -q` 与 `npm test` 只执行表中的小规模确定性 smoke，不自动运行 Python Matrix4
-benchmark、10k/30k/50k 或 Chrome/WebGL runner。所有显式 runner 只向 stdout 输出 JSON，不创建或提交持久化
-性能报告、历史结果文件。时间数据当前用于观察，不设置跨机器硬阈值；各 runner 与自身范围对应的 correctness
-仍必须通过，状态与通讯 runner 另行检查结构、cursor、最终状态、健康和释放。
+表中 runner 均按需显式执行，触发规则与结果含义见[测试入口](../testing.md)。
 
 ## Python
 
@@ -182,8 +179,8 @@ ACK 读取队列等待，不能解释为孤立的 Wire/Client 处理时间。
 
 [`verify_display_leaks.mjs`](../../scripts/verify_display_leaks.mjs) 在一个进程内执行 authority create/remove 循环、
 RenderBackend 重建、异步 fault injection、动画 player 生命周期和完整 dispose，检查 Node、Component、scheduler、
-binding、resource lease、pending load 以及 Three geometry/material/texture 最终归零。根 `npm test` 统一调用该测试；
-它由根 `npm test` 调用，不以持久化运行结果作为通过条件。
+binding、resource lease、pending load 以及 Three geometry/material/texture 最终归零。
+用 `npm run test:resource-lifecycle` 显式执行；`npm run test:full` 包含该项，普通 `npm test` 不重复执行。
 
 ## TypeScript 声明兼容
 

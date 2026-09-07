@@ -12,7 +12,8 @@
     "js/packages/*"
   ],
   "scripts": {
-    "test": "npm test --workspaces && npm run typecheck && npm run test:resource-lifecycle",
+    "test": "npm test --workspaces && npm run typecheck",
+    "test:full": "npm test && npm run test:resource-lifecycle",
     "benchmark:communication": "uv run python scripts/benchmark_python_js_communication.py",
     "benchmark:display": "node scripts/benchmark_display_runtime_scale.mjs",
     "benchmark:display:browser": "node scripts/benchmark_display_browser.mjs",

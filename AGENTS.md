@@ -11,3 +11,5 @@
 `docs/architecture.md` 定义总体架构、分层和所有权；合同与语法由 `README.md`“技术文档”中索引的现行专项文档定义。
 
 修改前阅读 `README.md`、`docs/architecture.md` 和与变更相关的现行文档。实现、测试和现行文档必须保持一致；具体技术规则写入其所属文档，不在本文件重复维护。
+
+测试与门禁选择遵守 workspace [总则](../testing.md)；本仓命令和覆盖导航见 [测试入口](docs/testing.md)。
